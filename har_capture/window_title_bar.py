@@ -2,7 +2,7 @@
 
 from har_capture.hdc import Hdc, fail
 from har_capture.metadata import layout_bounding_box
-from har_capture.window_control import read_current_window_layout
+from har_capture.window_layout import read_current_window_layout
 
 BUTTON_ROW_ID = "containerModalButtonRowId"
 

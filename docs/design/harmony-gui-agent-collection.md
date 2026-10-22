@@ -353,7 +353,7 @@ Midscene 的 `call` 返回值主要用于执行记录，不能假定返回 JSON 
 | `Scroll` | `target`、`direction`、`distance` | 滚动后实际状态，不承诺加载了多少条内容 |
 | `DragAndDrop` | `from`、`to` | 拖动执行结果；使用 SDK 支持的参数，不把触摸拖动等同于窗口 resize |
 | `KeyboardPress` | `keyName` | 按键执行结果；使用 Midscene 原生命名与设备支持的键值 |
-| `ToggleWindowSize` | `window_id` | 使用唯一可操作的系统 `EnhanceMaximizeBtn` 切换最大化或还原，再核验 WMS 边界变化 |
+| `ToggleWindowSize` | `window_id` | 从已核实的普通及兼容窗口最大化控件中唯一选择，核验系统标题栏归属和 WMS 边界变化 |
 | `MoveWindow` | `window_id`、`x`、`y` | 移动浮动窗口，连续两次读回请求的精确矩形 |
 | `ResizeWindow` | `window_id`、`width`、`height` | 调整浮动窗口宽高并保持左上角，连续两次读回请求的精确矩形 |
 | `OccludeWindow` | `window_id`、`target_window_id`、`x`、`y` | 移动前景窗口，验证它与目标窗口不同、z_order 更高且形成部分矩形交集 |

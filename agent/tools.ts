@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { bridge } from './bridge.js';
 import type { CollectionDevice } from './device.js';
 import { ToolRegistry } from './registry.js';
-import { assertInputScope } from './scope.js';
+import { assertInputScope, windowAt } from './scope.js';
 import { windowSchema } from './state.js';
 import { checkWindows } from './observation.js';
 import { registerGeometry } from './geometry.js';
@@ -106,11 +106,14 @@ async function toggleWindow(device: CollectionDevice, parameters: any, context?:
   if (allowed && !allowed.includes(before.bundle_name)) throw new Error('Window is outside task scope');
   const control = await bridge(device.connection, { operation: 'window_size_control',
     window_id: before.window_id }, device.state.signal);
-  await checkWindows(device);
+  const current = await checkWindows(device);
   const { x, y } = control.center;
   const box = before.bounding_box;
   if (x < box.x || x >= box.x + box.width || y < box.y || y >= box.y + box.height) {
     throw new Error('Window control is outside the target window');
+  }
+  if (windowAt({ center: [x, y] }, current.windows)?.window_id !== before.window_id) {
+    throw new Error('Window control is covered by another application window');
   }
   const hdc = await device.getHdc();
   device.state.event('window_control', { window_id: before.window_id, control });
@@ -119,7 +122,7 @@ async function toggleWindow(device: CollectionDevice, parameters: any, context?:
   while (Date.now() < deadline) {
     device.state.signal.throwIfAborted();
     const after = (await device.windows()).find((window) => window.window_id === before.window_id);
-    if (!after || after.process_id !== before.process_id || after.ui_node_id !== before.ui_node_id) {
+    if (!after || ['process_id', 'bundle_name', 'ui_node_id', 'display_id'].some((key) => after[key] !== before[key])) {
       throw new Error('Target window disappeared or changed identity');
     }
     if (JSON.stringify(after.bounding_box) !== JSON.stringify(before.bounding_box)) {

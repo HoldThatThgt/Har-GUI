@@ -176,7 +176,7 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 | `Tap`、`DoubleClick`、`Scroll`、`DragAndDrop` | 复用 Midscene 官方 Harmony 输入；项目选择启用 |
 | `Input` | 定位同窗口内的原生输入控件，用官方 Hypium 粘贴或清空，并逐字读回验证 |
 | `KeyboardPress` | 用 Midscene Harmony 的受支持单键作用于当前焦点；不支持组合键 |
-| `ToggleWindowSize` | 按窗口无障碍树中唯一可操作的 `EnhanceMaximizeBtn` 切换最大化或还原，并核验实际 WMS 边界 |
+| `ToggleWindowSize` | 按系统标题栏中唯一可操作的最大化控件切换大小，并核验实际 WMS 边界；支持普通及兼容窗口按钮 |
 | `MoveWindow` | 按当前系统标题栏的无障碍身份定位拖动点，用官方 `uinput` 鼠标拖动到指定屏幕像素坐标 |
 | `ResizeWindow` | 拖动浮动窗口右下边框到指定宽高，保持左上角不变，并核验实际尺寸 |
 | `OccludeWindow` | 移动一个真实应用窗口，使其位于目标窗口前方并形成部分矩形交集 |
@@ -208,7 +208,8 @@ Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任�
 当前只实现显示器零。移动、指定尺寸和主动遮挡要求被操作窗口处于浮动模式（WMS `window_mode=102`），
 目标矩形完整位于屏幕内，拖动起点不被另一普通应用窗口覆盖。
 移动按 `hostWindowId`、`containerModalButtonRowId` 及唯一 `ContainerModal` 的标题栏祖先关系定位，
-不要求窗口具有最大化按钮；还原或最大化仍必须找到 `EnhanceMaximizeBtn`。
+不要求窗口具有最大化按钮；还原或最大化从 `EnhanceMaximizeBtn`、`EnhanceCompatibleMaximizeBtn`
+构成的同一集合中要求唯一可操作控件，完整检查系统装饰层祖先及点击归属，见[窗口按钮验证](docs/window-size-control.md)。
 几何操作要求 WMS 连续两次返回请求的精确矩形；系统因应用最小尺寸等限制未达到目标时明确失败，
 不会改用近似尺寸或其他操作。`OccludeWindow` 另外核验前景窗口的 `z_order` 与部分矩形交集，
 返回的 `bounding_box_overlap_fraction` 是几何比例，不是透明度、圆角或真实遮挡像素的测量结果。
