@@ -1,0 +1,27 @@
+schema_version = 1
+
+[run]
+name = "harmony-pc-sound"
+output = "../output"
+max_actions = 25
+max_duration_seconds = 900
+
+[agent]
+llm = "default"
+
+[tools]
+enabled = ["ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll", "ToggleWindowSize", "Capture"]
+
+[[tasks]]
+name = "settings-sound"
+instruction = """
+自主找到这台电脑系统设置中的“声音”页面。当前可能停在其他页面，必须根据截图寻找入口并打开声音设置。
+查询窗口后，用 ToggleWindowSize 切换设置窗口的最大化或还原状态，使它与本任务开始时不同。
+声音设置页面可见且加载完成后采集一次。仅查看页面，不改变音量、设备、账户或任何系统选项。
+"""
+acceptance = """
+截图中系统设置的“声音”页面清晰可见，包含声音、音量或音频设备相关设置内容。
+页面不是显示和亮度页面，不是空白页或错误页。
+"""
+target_count = 1
+bundle_names = ["com.huawei.hmos.settings"]

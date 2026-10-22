@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.tools/
+artifacts/
+captures/
+node_modules/
+output/
+config.toml
+.env
+.env.*
+*.env
+midscene_run/

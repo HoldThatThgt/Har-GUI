@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Har-GUI · 采集结果检查器</title>
+  <style>{{STYLES}}</style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <div class="brand"><strong>Har-GUI</strong><span>采集结果检查器</span></div>
+    <span class="header-divider"></span>
+    <div class="capture-heading"><span class="eyebrow">CAPTURE</span><span id="capture-time"></span></div>
+    <div class="header-stats" id="header-stats"></div>
+  </header>
+
+  <main class="workspace">
+    <section class="visual-pane" aria-label="截图与窗口">
+      <div class="section-toolbar">
+        <div><h1>屏幕与窗口</h1><p id="screen-subtitle"></p></div>
+        <div class="canvas-actions">
+          <label class="checkbox-label"><input id="show-labels" type="checkbox" checked>窗口标注</label>
+          <button id="fit-view" class="quiet-button" type="button">适应画布</button>
+          <button id="zoom-in" class="quiet-button square" type="button" aria-label="放大截图">＋</button>
+        </div>
+      </div>
+      <div class="canvas-viewport" id="canvas-viewport">
+        <div class="canvas-content" id="canvas-content">
+          <div class="screen" id="screen" aria-label="点击截图中的窗口查看控件树">
+            <img id="screenshot" alt="本次采集的设备屏幕截图" draggable="false">
+            <div id="window-overlays" class="overlay-layer"></div>
+            <div id="selection-outline" class="selection-outline" hidden></div>
+            <div id="node-outline" class="node-outline" hidden><span>选中控件</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="canvas-caption">
+        <span><i class="cursor-symbol" aria-hidden="true">↖</i>点击截图中的窗口，查看对应控件树</span>
+        <span id="zoom-level"></span>
+      </div>
+
+      <section class="windows-section" aria-labelledby="windows-title">
+        <div class="subheading"><h2 id="windows-title">应用窗口</h2><span>按 z_order 从前到后</span></div>
+        <div class="window-list" id="window-list"></div>
+        <div class="capture-notes" id="capture-notes"></div>
+      </section>
+    </section>
+
+    <aside class="inspector" aria-label="控件树检查器">
+      <div class="inspector-heading">
+        <div class="eyebrow">WINDOW INSPECTOR</div>
+        <div class="selected-heading"><span id="selected-dot" class="color-dot"></span>
+          <h2 id="selected-name"></h2><span id="selected-z" class="z-badge"></span></div>
+        <p id="selected-bundle" class="bundle-name"></p>
+        <div class="window-facts" id="window-facts"></div>
+      </div>
+      <section class="tree-section" aria-labelledby="tree-title">
+        <div class="tree-heading"><h2 id="tree-title">控件树</h2><span id="node-count" class="count-badge"></span>
+          <div class="tree-actions"><button id="expand-all" type="button">全部展开</button>
+            <button id="collapse-all" type="button">收起</button></div></div>
+        <div class="tree-sources" role="group" aria-label="控件树来源">
+          <button id="source-accessibility" data-source="accessibility" type="button" aria-pressed="true">
+            无障碍控件树</button>
+          <button id="source-arkui" data-source="arkui" type="button" aria-pressed="false">ArkUI组件树</button>
+        </div>
+        <p id="tree-source-note" class="tree-source-note"></p>
+        <p id="tree-source-scope" class="tree-source-scope" hidden></p>
+        <label class="search-box"><span aria-hidden="true">⌕</span>
+          <input id="tree-search" type="search" placeholder="搜索 text、id、type" autocomplete="off">
+        </label>
+        <div id="search-summary" class="search-summary" aria-live="polite"></div>
+        <div id="tree-container" class="tree-container" aria-label="窗口控件层级"></div>
+      </section>
+      <section class="attributes-section" aria-labelledby="attributes-title">
+        <div class="attributes-heading"><h2 id="attributes-title">节点属性</h2>
+          <label class="checkbox-label"><input id="highlight-node" type="checkbox" checked>在截图中高亮</label></div>
+        <p id="node-path" class="node-path"></p>
+        <div class="attributes-scroll">
+          <details id="raw-node" class="raw-node" hidden>
+            <summary>原始节点文本</summary><pre id="raw-node-text"></pre>
+          </details>
+          <dl id="node-attributes" class="node-attributes"></dl>
+        </div>
+      </section>
+    </aside>
+  </main>
+  <div id="error-message" class="error-message" role="alert" hidden></div>
+  <script id="capture-data" type="application/json">{{DATA}}</script>
+  <script>{{SCRIPT}}</script>
+</body>
+</html>

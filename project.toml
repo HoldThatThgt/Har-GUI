@@ -1,0 +1,29 @@
+schema_version = 1
+
+[run]
+name = "harmony-pc-settings"
+output = "./output"
+max_actions = 30
+max_duration_seconds = 900
+
+[agent]
+llm = "default"
+
+[tools]
+enabled = ["ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll", "ToggleWindowSize", "Capture"]
+
+[[tasks]]
+name = "settings-display"
+instruction = """
+在这台鸿蒙电脑上自主找到系统设置的显示设置页面。
+通过查询已安装应用确认设置应用，必要时启动；根据屏幕找到显示设置入口。
+用 ReadWindows 确定设置窗口，再用 ToggleWindowSize 点击真实的最大化或还原按钮，
+让窗口边界与开始时不同。保持显示设置页面可见，完成一次采集。
+只查看设置，不修改亮度、分辨率、账户或其他系统选项，不打开私人内容。
+"""
+acceptance = """
+截图中系统设置的显示设置页面可见，可以辨认显示相关选项或显示器设置内容。
+设置窗口内容已加载，不是错误页、空白页或仅有设置首页。
+"""
+target_count = 1
+bundle_names = ["com.huawei.hmos.settings"]

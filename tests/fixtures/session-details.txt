@@ -1,0 +1,15 @@
+----------------------------------SessionDetailedInfo-----------------------------------
+Session:
+callingPid callingUid isSystem reuse lockedState time type isSystemCalling topmost
+Life: state isActive isSystemActive isVisible uiNodeId showRecent bufferAvailable foregroundInteractiveStatus isAttach isPersistentRecover
+Display: snapshotScale vpr screenId brightness displayId
+----------------------------------ExampleReader|80----------------------------------
+Session:
+201|10000|0|0|0||1|0|0|
+Life: 3|1|0|1|800|0|1|1|1|0|
+Display: 0.5|2|0|-1|0|
+----------------------------------ExampleSettings|92----------------------------------
+Session:
+202|10000|0|0|0||1|0|0|
+Life: 3|1|0|1|920|0|1|1|1|0|
+Display: 0.5|2|0|-1|0|

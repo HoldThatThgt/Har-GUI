@@ -1,0 +1,39 @@
+schema_version = 1
+
+[run]
+name = "harmony-pc-window-occlusion"
+output = "../output"
+max_actions = 35
+max_duration_seconds = 1200
+
+[agent]
+llm = "default"
+
+[tools]
+enabled = [
+  "ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll",
+  "ToggleWindowSize", "MoveWindow", "ResizeWindow", "OccludeWindow", "Capture"
+]
+
+[[tasks]]
+name = "settings-display-partial-occlusion"
+instruction = """
+首先启动设置应用使它置前，再调用 ReadWindows，确认设置窗口 focused=true 后再继续。
+此时不做页面导航。若设置窗口处于最大化，先还原。使用 ResizeWindow 改为与当前不同的尺寸，
+宽度选在 1900 至 2100、高度选在 1450 至 1550 物理像素之间，且窗口完整位于屏幕内。
+再使用 MoveWindow 移动到与当前不同的位置，左上角 x 选在 200 至 600、y 选在 100 至 250。
+窗口变化完成后，根据屏幕自主找到系统设置的“显示和亮度”页面。
+只查看，不修改系统选项，不打开私人内容。每一步根据新的观察与工具反馈继续操作。
+找到并启动计算器，用 ReadWindows 取得计算器和设置的真实窗口标识。
+使用 OccludeWindow 把计算器移到设置窗口的前方，部分遮挡设置内容；
+自行选择放置坐标，使设置的显示页面仍可识别且计算器完整可见。
+计算器必须移动到与当前不同的位置，形成新的遮挡变化。
+完成一次采集，保留设置、计算器以及屏幕上其他可见窗口的信息。
+"""
+acceptance = """
+设置的显示设置页面已加载且仍可识别；设置为浮动窗口。
+计算器窗口完整可见，位于设置窗口前方，并遮挡了设置窗口的一部分。
+设置窗口没有被完全覆盖；没有错误页、空白页或意外弹窗。
+"""
+target_count = 1
+bundle_names = ["com.huawei.hmos.settings", "com.huawei.hmos.calculator"]
