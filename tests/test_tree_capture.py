@@ -8,7 +8,7 @@ from pathlib import Path
 
 from har_capture.hdc import CaptureError
 from har_capture.metadata import parse_windows
-from har_capture.tree_capture import collect_accessibility, collect_arkui, collect_trees
+from har_capture.tree_capture import collect_accessibility, collect_arkui, collect_trees, dump_files
 from tests.support import (
     FIXTURES, fake_hdc, layout_data, raw_accessibility, raw_arkui, raw_system_arkui,
     system_session_details, window_node,
@@ -89,6 +89,30 @@ class TreeCaptureTests(unittest.TestCase):
             self.collect_component_tree(hdc)
         self.assertFalse((self.stage / "arkui/window-92.txt").exists())
         self.assertEqual([call.args[2] for call in hdc.receive.call_args_list], ["receive_arkui_response_92"])
+
+    def test_fresh_dump_in_el5_is_selected_while_unchanged_el2_is_retained_as_evidence(self):
+        protected = "/proc/202/root/data/storage/el5/base/haps/NotepadPhone/files/arkui.dump"
+        stale = self.file_state([self.app_dump])
+        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
+            "arkui_before_92": stale, "arkui_after_92": stale + self.file_state([protected])})
+        result = self.collect_component_tree(hdc)
+        self.assertEqual(result["origin"]["path"], protected)
+        self.assertEqual(result["node_count"], 2)
+
+    def test_fresh_dumps_in_distinct_protection_areas_are_ambiguous(self):
+        protected = "/proc/202/root/data/storage/el5/base/files/arkui.dump"
+        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
+            "arkui_after_92": self.file_state([self.app_dump, protected])})
+        with self.assertRaises(CaptureError):
+            self.collect_component_tree(hdc)
+
+    def test_dump_paths_outside_process_private_protection_areas_are_rejected(self):
+        for path in ("/proc/203/root/data/storage/el5/base/files/arkui.dump",
+                     "/proc/202/root/data/storage/el2/auth_groups/other/arkui.dump",
+                     "/proc/202/root/data/storage/el6/base/files/arkui.dump"):
+            hdc = fake_hdc(command_outputs={"arkui_before_92": self.file_state([path])})
+            with self.subTest(path=path), self.assertRaises(CaptureError):
+                dump_files(hdc, self.window, "before")
 
     def test_multiple_new_application_dumps_are_ambiguous(self):
         other = "/proc/202/root/data/storage/el2/base/cache/arkui.dump"

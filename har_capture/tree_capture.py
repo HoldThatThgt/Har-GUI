@@ -37,15 +37,18 @@ def dump_files(hdc: Hdc, window: dict, phase: str) -> dict:
     """@brief 读取目标进程命名空间内已有组件树文件状态。 @param hdc 连接。
     @param window 窗口记录。 @param phase 采集阶段。 @return 文件路径到修改时间和大小的映射。
     """
-    root = f"/proc/{window['process_id']}/root/data/storage/el2/base"
-    command = f"find {root} -maxdepth 5 -type f -name arkui.dump -exec stat -c '%n|%y|%s' {{}} \\;"
+    root = f"/proc/{window['process_id']}/root/data/storage"
+    command = f'set -e; for base in {root}/el[1-5]/base; do if test -d "$base"; then '
+    command += 'find "$base" -maxdepth 5 -type f -name arkui.dump -exec stat -c \'%n|%y|%s\' {} \\; '
+    command += '; fi; done'
     output = hdc.run(["shell", command], f"arkui_{phase}_{window['window_id']}")
     files = {}
     for line in output.splitlines():
         if not line.strip():
             continue
         fields = line.split("|")
-        if len(fields) != 3 or not fields[0].startswith(root + "/") or not fields[0].endswith("/arkui.dump"):
+        pattern = re.escape(root) + r"/el[1-5]/base/(?:[^/]+/)*arkui\.dump"
+        if len(fields) != 3 or re.fullmatch(pattern, fields[0]) is None:
             fail(f"Cannot identify ArkUI dump files for window {window['window_id']}: {line}")
         files[fields[0]] = {"modified_at": fields[1], "bytes": int(fields[2])}
     return files

@@ -428,6 +428,9 @@ flowchart LR
 
 普通窗口 `-element` 的官方输出有两种位置：小树写入命令输出，大树写入应用的 `files/arkui.dump`。
 工具在每条 `-element` 命令前后记录目标进程命名空间下文件的修改时间和大小；
+搜索应用私有的 `el1` 至 `el5` 数据区 `base` 目录，不假定所有应用都使用 `el2`。
+这些加密数据区由[官方应用沙箱目录](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/file-management/app-sandbox-directory.md)定义；
+实机备忘录的导出位于 `el5/base/haps/NotepadPhone/files/arkui.dump`。
 只有唯一文件新建或发生变化才接收，并立即保存，避免不同窗口覆盖同一文件或复用旧结果。
 文件不变、多个文件变化、窗口或进程不匹配都会使本次采集失败。
 
