@@ -12,6 +12,31 @@ export interface DeviceOptions {
   serial: string;
 }
 
+/** @brief 传递 Python 标准输出中的安全错误与结构化诊断。 */
+export class DeviceOperationError extends Error {
+  /** Python 原生输入边界生成的不含正文的诊断。 */
+  readonly diagnostics?: object;
+
+  /** @brief 绑定桥接错误的安全消息与可选诊断。 */
+  constructor(message: string, diagnostics?: object) {
+    super(message);
+    this.diagnostics = diagnostics;
+  }
+}
+
+/** @brief 无论退出码如何均只解释标准输出 JSON，不以 stderr 作为替代协议。 */
+function readResponse(output: string, code: number | null): any {
+  let message: any;
+  try { message = JSON.parse(output); }
+  catch { throw new Error('Device response is not valid JSON'); }
+  if (message.error) {
+    if (typeof message.error.message !== 'string') throw new Error('Device response has no error message');
+    throw new DeviceOperationError(message.error.message, message.error.diagnostics);
+  }
+  if (code !== 0) throw new Error(`Device operation exited (${code}) without a structured error`);
+  return message.result;
+}
+
 /** @brief 运行受限 Python 桥接，错误时保留英文诊断。 */
 export async function bridge(options: DeviceOptions, request: object, signal?: AbortSignal): Promise<any> {
   return executeBridge(options.python, ['--hdc', options.hdc, '--device', options.serial], request, signal);
@@ -32,16 +57,12 @@ async function executeBridge(
       cwd: path.dirname(script), windowsHide: true, signal, env: { ...process.env, PYTHONUTF8: '1' },
     });
     let output = '';
-    let errorOutput = '';
     child.stdout.setEncoding('utf8').on('data', (part: string) => { output += part; });
-    child.stderr.setEncoding('utf8').on('data', (part: string) => { errorOutput += part; });
+    child.stderr.resume();
     child.on('error', (error) => { console.error('Device process failed:', error.message); reject(error); });
     child.on('close', (code) => {
       try {
-        if (code !== 0) throw new Error(`Device operation failed (${code}): ${errorOutput.trim()}`);
-        const message = JSON.parse(output);
-        if (message.error) throw new Error(message.error.message);
-        resolve(message.result);
+        resolve(readResponse(output, code));
       } catch (error) { console.error('Device response failed:', String(error)); reject(error); }
     });
     child.stdin.end(JSON.stringify(request));

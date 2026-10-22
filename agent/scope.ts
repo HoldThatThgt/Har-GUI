@@ -17,9 +17,11 @@ interface InputLocations {
 }
 
 /** @brief 对范围拒绝记录英文错误，并阻止后续原生输入。 */
-function rejectScope(message: string): never {
-  console.error('Input scope rejected:', message);
-  throw new Error(message);
+function rejectScope(message: string, window?: WindowInfo): never {
+  console.error('Action scope rejected:', message);
+  throw Object.assign(new Error(message), { diagnostics: { phase: 'task_scope',
+    window: window ? { window_id: window.window_id, bundle_name: window.bundle_name,
+      display_id: window.display_id, z_order: window.z_order } : undefined } });
 }
 
 /** @brief 按 SDK 实际取整坐标查找矩形内最高 z_order 的普通应用；不推断系统窗口透明像素。 */
@@ -49,13 +51,13 @@ export function assertInputScope(
     if (locations.some((location) => !location)) rejectScope(`${name} requires located targets within task scope`);
     targets = locations.map((location) => {
       const window = windowAt(location!, windows);
-      if (!window) rejectScope('Input target is outside known application window rectangles');
+      if (!window) rejectScope(`${name} target is outside known application window rectangles`);
       return window;
     });
   }
   for (const window of targets) {
     if (!bundleNames.includes(window.bundle_name)) {
-      rejectScope(`Input target is outside task scope: ${window.bundle_name}`);
+      rejectScope(`${name} target is outside task scope: ${window.bundle_name}`, window);
     }
   }
 }

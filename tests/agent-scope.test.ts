@@ -30,7 +30,7 @@ test('all located point actions use the highest z_order ordinary application rec
   for (const name of ['Tap', 'DoubleClick', 'Input', 'Scroll']) {
     assert.doesNotThrow(() => assertInputScope(name, { locate: locate(20, 20) }, [other, allowed], ['app.allowed']));
     assert.throws(() => assertInputScope(name, { locate: locate(60, 20) }, [allowed, other], ['app.allowed']),
-      /outside task scope: app.other/);
+      new RegExp(`^Error: ${name} target is outside task scope: app.other$`));
     assert.doesNotThrow(() => assertInputScope(name, { locate: locate(60, 20) }, [allowed, other], ['app.other']));
   }
 });

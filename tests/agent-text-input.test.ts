@@ -10,16 +10,28 @@ import { RunState, type WindowInfo } from '../agent/state.js';
 import { createRegistry } from '../agent/tools.js';
 
 /** @brief 在真实标准输入边界截获正文，使用进程替身提供不含正文的验证结果。 */
-function interceptBridge(t: TestContext, changes: object = {}) {
+function interceptBridge(t: TestContext, changes: object = {}, failure?: object) {
   const requests: any[] = [];
   const original = childProcess.spawn;
   const script = `let text='';process.stdin.on('data',part=>text+=part);process.stdin.on('end',()=>{
-    const request=JSON.parse(text);const result={window_id:request.window_id,mode:request.mode,verified:true,
+    const request=JSON.parse(text);const failure=JSON.parse(process.argv[2]);
+    if(failure){process.stdout.write(JSON.stringify({error:failure}));process.exitCode=1;return;}
+    const result={window_id:request.window_id,mode:request.mode,verified:true,
       character_count:Array.from(request.value).length,
       text_sha256:require('node:crypto').createHash('sha256').update(request.value).digest('hex'),
       ...JSON.parse(process.argv[1])};process.stdout.write(JSON.stringify({result}));});`;
+  const python = `import json,sys
+import agent_device
+from har_capture.native_input import NativeInputError
+failure=json.loads(sys.argv[1]);sys.argv=[sys.argv[0]]
+def reject(connection,request):
+    raise NativeInputError(failure['message'],failure['diagnostics'])
+agent_device.execute_operation=reject
+sys.exit(agent_device.main())`;
   const spawn = t.mock.method(childProcess, 'spawn', () => {
-    const child = original(process.execPath, ['-e', script, JSON.stringify(changes)]);
+    const child = failure
+      ? original('python', ['-B', '-c', python, JSON.stringify(failure)])
+      : original(process.execPath, ['-e', script, JSON.stringify(changes), 'null']);
     const end = child.stdin.end.bind(child.stdin);
     t.mock.method(child.stdin, 'end', (data: any) => {
       requests.push(JSON.parse(String(data)));
@@ -33,7 +45,7 @@ function interceptBridge(t: TestContext, changes: object = {}) {
 }
 
 /** @brief 建立真实注册器与窗口观察，仅替换通信、键盘关闭和审计落盘。 */
-function fixture(t: TestContext, changes: object = {}) {
+function fixture(t: TestContext, changes: object = {}, failure?: object) {
   const errors = t.mock.method(console, 'error', () => {});
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 100 },
     tools: { enabled: ['Input'] }, tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
@@ -51,7 +63,7 @@ function fixture(t: TestContext, changes: object = {}) {
   const getDevice = t.mock.fn(() => device);
   const action = createRegistry(getDevice).actions(state)[0];
   device.planningObservation = { id: 'planned', revision: 0, windows: [window] };
-  const bridge = interceptBridge(t, changes);
+  const bridge = interceptBridge(t, changes, failure);
   return { action, device, state, getDevice, windows, hide, native, current, window, audit, errors, ...bridge };
 }
 
@@ -118,7 +130,7 @@ test('resolved Input routes the full text to the highest app window and returns 
   assert.deepEqual(result, { window_id: 8, mode: 'replace', verified: true,
     character_count: Array.from(value).length, text_sha256: createHash('sha256').update(value).digest('hex'),
     resolved_parameters: { value: '[redacted]', mode: 'replace', autoDismissKeyboard: false,
-      locate: { ...locate, prompt: '[redacted]' } } });
+      locate: { center: locate.center, prompt: '[redacted]' } } });
   assert.deepEqual(JSON.parse(context.task.planningFeedback!), result);
   assert.equal(f.hide.mock.callCount(), 0);
   assert.equal(f.native.mock.callCount(), 0);
@@ -180,4 +192,27 @@ test('Input rejects stale observations and out-of-scope targets before the text 
       assert.equal(f.hide.mock.callCount(), 0);
     });
   }
+});
+
+test('failed native Input records exact request scope and safe phases through the nonzero bridge response', async (t) => {
+  const diagnostics = { request: { x: 10, y: 20, mode: 'replace', window_id: 1,
+    bundle_name: 'app.allowed', display_id: 0 }, phase: 'compare_text',
+    comparison: { expected: { type: 'str', length: 18, sha256: 'a'.repeat(64) },
+      actual: { type: 'NoneType', length: null, sha256: null }, equal: false, actual_equals_before: false },
+    input: { status: 'failed', error_type: 'CaptureError' }, close: { status: 'completed' } };
+  const f = fixture(t, {}, { message: 'Native input text does not exactly match the requested content', diagnostics });
+  const parameters = { value: 'PRIVATE_INPUT_BODY', locate: { center: [9.6, 20.4], prompt: 'PRIVATE_LOCATOR' } };
+  await assert.rejects(async () => f.action.call(parameters), /does not exactly match/);
+  const failed = f.audit.mock.calls.find((call) => call.arguments[0] === 'action_failed')!
+    .arguments[1] as Record<string, unknown>;
+  assert.deepEqual(failed.diagnostics, diagnostics);
+  assert.deepEqual(failed.parameters, { value: '[redacted]',
+    locate: { center: [9.6, 20.4], prompt: '[redacted]' } });
+  assert.equal(f.requests[0].value, parameters.value);
+  assert.equal(f.requests[0].mode, 'replace');
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.hide.mock.callCount(), 0);
+  assert.equal(f.state.revision, 0);
+  assert.ok(!JSON.stringify(f.audit.mock.calls).includes('PRIVATE'));
+  assert.ok(!JSON.stringify(f.errors.mock.calls).includes('PRIVATE'));
 });

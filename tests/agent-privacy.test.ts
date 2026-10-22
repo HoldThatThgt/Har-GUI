@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { safeActionParameters } from '../agent/privacy.js';
+import { safeActionParameters, safeFailedActionParameters } from '../agent/privacy.js';
 
 test('input feedback preserves coordinates without persisting input body', () => {
   const input = { value: 'BODY_SENTINEL', text: 'BODY_SENTINEL', locate: { center: [100, 200] } };
@@ -39,5 +39,29 @@ test('tap and drag locator prose cannot copy screen content into action records'
     assert.deepEqual(safe.from.center, [10, 20]);
     assert.deepEqual(safe.to.center, [30, 40]);
     assert.deepEqual(input, original);
+  }
+});
+
+test('invalid Input parameters cannot expose scalar bodies, invalid modes or unknown top-level fields', () => {
+  for (const parameters of ['PRIVATE_BODY', ['PRIVATE_BODY'], { mode: 'PRIVATE_BODY',
+    autoDismissKeyboard: 'PRIVATE_BODY', locate: 'PRIVATE_BODY', unknown: 'PRIVATE_BODY', value: 'PRIVATE_BODY' }]) {
+    const original = structuredClone(parameters);
+    const safe = safeActionParameters('Input', parameters);
+    assert.ok(!JSON.stringify(safe).includes('PRIVATE_BODY'));
+    assert.deepEqual(parameters, original);
+  }
+});
+
+test('failed action geometry never persists malformed centers, rectangles or arbitrary locator attributes', () => {
+  for (const name of ['Input', 'Tap', 'DragAndDrop']) {
+    const parameters = { mode: 'replace', value: 'PRIVATE_BODY', unknown: 'PRIVATE_BODY',
+      locate: { center: [10, 'PRIVATE_BODY'], id: 'PRIVATE_BODY', extra: 'PRIVATE_BODY',
+        rect: { left: 'PRIVATE_BODY', top: 2, width: 3, height: 4 }, prompt: 'PRIVATE_BODY' },
+      from: { center: [30, 40], id: 'PRIVATE_BODY' }, to: 'PRIVATE_BODY' };
+    const original = structuredClone(parameters);
+    const safe = safeFailedActionParameters(name, parameters);
+    assert.ok(!JSON.stringify(safe).includes('PRIVATE_BODY'));
+    assert.deepEqual(parameters, original);
+    if (name !== 'Input') assert.deepEqual(safe.from.center, [30, 40]);
   }
 });

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from har_capture.agent_device import execute_operation
 from har_capture.hdc import Hdc
+from har_capture.native_input import NativeInputError
 
 
 def arguments() -> argparse.Namespace:
@@ -36,6 +37,8 @@ def main() -> int:
     except Exception as error:
         logging.error("Device operation failed: %s", error)
         response = {"operation": operation, "error": {"message": str(error)}}
+        if isinstance(error, NativeInputError):
+            response["error"]["diagnostics"] = error.diagnostics
         print(json.dumps(response, ensure_ascii=True))
         return 1
     print(json.dumps(response, ensure_ascii=True))

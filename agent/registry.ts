@@ -1,7 +1,7 @@
 import type { DeviceAction, ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
 import type { RunState } from './state.js';
-import { safeActionParameters } from './privacy.js';
+import { safeActionParameters, safeFailedActionParameters } from './privacy.js';
 
 /** @brief 注册项在 SDK 动作之外声明结果校验和变更语义。 */
 export interface RegisteredTool {
@@ -52,7 +52,9 @@ export class ToolRegistry {
     } catch (error) {
       const message = String(error);
       console.error(`Tool ${tool.action.name} failed: ${message}`);
-      state.event('action_failed', { name: tool.action.name, error: message });
+      const diagnostics = error instanceof Error && 'diagnostics' in error ? error.diagnostics : undefined;
+      state.event('action_failed', { name: tool.action.name, error: message,
+        parameters: safeFailedActionParameters(tool.action.name, parameters), diagnostics });
       state.controller.abort(new Error(message));
       throw error;
     } finally { state.leave(); }

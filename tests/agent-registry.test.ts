@@ -220,3 +220,25 @@ test('window identity comparison rejects replaced windows and changed routing ge
     { bounding_box: { ...initial.bounding_box, width: 1000 } }];
   for (const change of changes) assert.equal(sameWindow(initial, { ...initial, ...change }), false);
 });
+
+test('failed actions retain their own resolved parameters and native phases without input or locator prose', async (t) => {
+  const { state, directory } = fixture(t, ['Input']);
+  const registry = new ToolRegistry();
+  const diagnostics = { phase: 'focus_leaf_selection', request: {
+    x: 41, y: 72, mode: 'append', window_id: 100, bundle_name: 'app.browser', display_id: 0 } };
+  const failure = Object.assign(new Error('Native input binding failed'), { diagnostics });
+  let received: unknown;
+  registry.register(registered('Input', (parameters) => { received = parameters; throw failure; }, true));
+  const parameters = { mode: 'append', value: 'PRIVATE_INPUT_BODY',
+    locate: { center: [40.6, 72.1], prompt: 'PRIVATE_LOCATOR_PROSE' } };
+  const original = structuredClone(parameters);
+  await assert.rejects(async () => registry.actions(state)[0].call(parameters), (error) => error === failure);
+  const failed = events(directory).find((item) => item.type === 'action_failed')!;
+  assert.deepEqual(failed.diagnostics, diagnostics);
+  assert.deepEqual(failed.parameters, { ...original, value: '[redacted]',
+    locate: { center: [40.6, 72.1], prompt: '[redacted]' } });
+  assert.deepEqual(received, original);
+  assert.deepEqual(parameters, original);
+  assert.ok(!readFileSync(join(directory, 'events.jsonl'), 'utf8').includes('PRIVATE'));
+  assert.equal(state.revision, 0);
+});
