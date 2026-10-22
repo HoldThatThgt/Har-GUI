@@ -68,15 +68,19 @@ def compare_capture_states(before: dict, after: dict, stability: dict | None = N
         fail(f"Capture state changed during collection: {', '.join(changed)}")
     return {"atomic": False, "stable": True, "status": "verified",
             "method": "bracketed_wms_and_accessibility", "checks": checks,
-            "canonicalization": {"rule_version": "uitest-semantic-state-v1",
+            "canonicalization": {"rule_version": "uitest-semantic-state-v2",
                 "rules": ["Only attributes.blur empty and 0.00px represent the same default zero radius.",
-                          "Within Web subtrees only, compare elementId low 40 bits without runtime treeId namespace."],
+                          "Within each verified Web or XComponent host, rename positive treeIds by first occurrence.",
+                          "Preserve host identity, low 40-bit elementId, and namespace partitions; retain all text."],
                 "source": "https://github.com/openharmony/arkui_ace_engine/blob/"
                           "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
                           "adapter/ohos/osal/js_accessibility_manager.cpp",
                 "identity_source": "https://github.com/openharmony/accessibility/blob/"
                     "3ffbe3513f07cb1df2bd98d74089582dff5eb33a/"
-                    "interfaces/innerkits/asacfwk/include/accessibility_system_ability_client.h#L207-L243"}}
+                    "interfaces/innerkits/asacfwk/include/accessibility_system_ability_client.h#L207-L243",
+                "provider_source": "https://github.com/openharmony/arkui_ace_engine/blob/"
+                    "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
+                    "adapter/ohos/osal/js_third_provider_interaction_operation.cpp#L309-L348"}}
 
 
 def verify_pixel_receipt(pixels: dict, stability: dict) -> None:
@@ -104,27 +108,48 @@ def verify_pixel_receipt(pixels: dict, stability: dict) -> None:
         fail("Capture without stability regions must compare every raw pixel")
 
 
-def canonical_state(value: object, inside_web: bool = False) -> object:
-    """@brief 仅规范原生等价表示和 Web 注册命名空间。 @param value 原始状态。
-    @param inside_web 当前节点是否属于 Web 子树。 @return 不改变内容、几何或顺序的比较副本。
+def native_identity(attributes: dict) -> tuple | None:
+    """@brief 验证 UITest 的窗口与原生拼接身份格式。 @param attributes 原始节点属性。
+    @return 窗口、注册树和低位元素标识；格式不成立时不应用语义规范化。
+    """
+    identity, host = attributes.get("accessibilityId"), attributes.get("hostWindowId")
+    if not all(isinstance(value, str) and value.isascii() and value.isdecimal() for value in (identity, host)):
+        return None
+    if not 0 <= int(identity) < (1 << 53) or int(host) <= 0 or attributes.get("hashcode") != f"{host}:{identity}":
+        return None
+    return host, int(identity) >> 40, int(identity) & ((1 << 40) - 1)
+
+
+def canonical_state(value: object, scope: tuple | None = None) -> object:
+    """@brief 按宿主规范注册树身份，保留树分区、元素身份及全部页面属性。 @param value 原始状态。
+    @param scope 当前宿主窗口、宿主树标识及子树顺序映射。 @return 不改写原始内容、几何或顺序的比较副本。
     """
     if isinstance(value, list):
-        return [canonical_state(item, inside_web) for item in value]
+        return [canonical_state(item, scope) for item in value]
     if not isinstance(value, dict):
         return value
-    descendants_web = inside_web or value.get("attributes", {}).get("type") == "Web"
-    result = {key: canonical_state(item, descendants_web if key == "children" else False)
-              for key, item in value.items()}
+    result = {key: canonical_state(item) for key, item in value.items() if key != "children"}
     attributes = result.get("attributes")
     if isinstance(attributes, dict):
         if attributes.get("blur") in ("", "0.00px"):
             attributes["blur"] = "0.00px"
-        identity = attributes.get("accessibilityId", "")
-        host = attributes.get("hostWindowId", "")
-        if (inside_web and isinstance(identity, str) and identity.isdecimal()
-                and attributes.get("hashcode") == f"{host}:{identity}"):
-            element_id = str(int(identity) & ((1 << 40) - 1))
-            attributes.update(accessibilityId=element_id, hashcode=f"{host}:{element_id}")
+        identity = native_identity(attributes)
+        for key in ("accessibilityId", "hashcode"):
+            if key in attributes:
+                attributes[key] = {"raw": attributes[key]}
+        boundary = attributes.get("type") in ("Web", "XComponent")
+        if scope is not None and attributes.get("hostWindowId") != scope[0]:
+            scope = None
+        if (not boundary and scope is not None and identity is not None
+                and identity[0] == scope[0] and identity[1] > 0 and identity[1] != scope[1]):
+            host, tree_id, element_id = identity
+            ordinal = scope[2].setdefault(tree_id, len(scope[2]) + 1)
+            attributes["accessibilityId"] = {"tree_id": ordinal, "element_id": element_id}
+            attributes["hashcode"] = {"window_id": host, "tree_id": ordinal, "element_id": element_id}
+        if boundary:
+            scope = (identity[0], identity[1], {}) if identity is not None else None
+    if "children" in value:
+        result["children"] = canonical_state(value["children"], scope)
     return result
 
 
