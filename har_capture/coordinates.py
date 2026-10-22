@@ -251,8 +251,13 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
         attrs = node["attributes"]
         node_id = str(attrs.get("ID"))
         overlay = overlay or attrs.get("Description") == "OverlayNode"
-        if overlay and attrs.get("LastParentId") != parent_id:
+        if overlay and "FrameRect" in attrs and attrs.get("LastParentId") != parent_id:
             raise ValueError("overlay_parent_evidence_mismatch:" + node_id)
+        if overlay and "FrameRect" not in attrs and node_id not in native:
+            # 官方结构节点不输出 LastParentId，Children 已核对其当前 GetParent()。
+            if attrs.get("Description") != "Children":
+                raise ValueError("overlay_non_layout_parent_unverified:" + node_id)
+            overlays.add(node_id)
         if "FrameRect" in attrs:
             projection, rect = local_projection(node, projection)
             if node_id not in native or "$rect" not in native[node_id]:
@@ -530,7 +535,7 @@ def normalize_nodes(root: dict, context: dict) -> tuple[list, dict]:
                 node["geometry"] = frame_geometry(node, context, inherited)
                 clips = node["geometry"]["clip_chain"]
                 counts["verified_frame_nodes"] += 1
-            elif attrs["type"].split(",", 1)[0] in NON_LAYOUT and "$rect" not in native:
+            elif attrs["type"].split(",", 1)[0] in NON_LAYOUT and (overlay or "$rect" not in native):
                 node["geometry"] = {"status": "not_applicable", "reason": "non_layout_arkui_node"}
                 counts["non_layout_nodes"] += 1
             else:

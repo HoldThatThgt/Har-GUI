@@ -39,6 +39,17 @@ def fixture():
         "arkui_geometry": native, "render_tree": render, "render_detached_tree": "-- Render Node Not On Tree\n"}
 
 
+def overlay_syntax_fixture():
+    args = fixture()
+    overlay = args[0]["children"][0]["children"][0]
+    overlay["attributes"].update(Description="OverlayNode", LastParentId="1")
+    syntax = {"attributes": {"ID": "3", "type": "IfElse", "Description": "Children"},
+              "raw": "", "children": [], "source_line": 4}
+    overlay["children"] = [syntax]
+    args[3]["arkui_geometry"]["$children"][0]["$children"] = []
+    return args
+
+
 class CoordinateTests(unittest.TestCase):
     def test_native_parent_coordinates_and_scroll_offset_are_not_added_twice(self):
         args = fixture()
@@ -97,6 +108,54 @@ class CoordinateTests(unittest.TestCase):
         self.assertFalse(source["native_rect_cross_checked"])
         args[3]["render_tree"] = args[3]["render_tree"].replace("Bounds[5 -10 20 30]", "Bounds[9 -10 20 30]")
         self.assert_failed(args, "overlay_render_projection_mismatch")
+
+    def test_overlay_syntax_node_without_frame_parent_field_is_preserved(self):
+        args = overlay_syntax_fixture()
+        before = copy.deepcopy(args[0])
+        result = normalize_arkui(*args)
+        syntax = result["children"][0]["children"][0]["children"][0]
+        self.assertEqual(result["coordinate_validation"]["status"], "verified")
+        self.assertEqual(result["coordinate_validation"]["non_layout_nodes"], 1)
+        self.assertEqual(syntax["geometry"], {"status": "not_applicable", "reason": "non_layout_arkui_node"})
+        self.assertNotIn("LastParentId", syntax["attributes"])
+        self.assertNotIn("screen_bounds", syntax["geometry"])
+        self.assertEqual(args[0], before)
+
+    def test_overlay_frame_below_syntax_retains_render_projection_checks(self):
+        args = overlay_syntax_fixture()
+        syntax = args[0]["children"][0]["children"][0]["children"][0]
+        syntax["children"] = [component(4, "Button", "RectT (2.00, 3.00) - [8.00 x 9.00]",
+                                          properties={"Description": "Children", "LastParentId": "3"})]
+        args[3]["render_tree"] += (
+            "      | CANVAS_NODE[104], Properties: Bounds[2 3 8 9] Frame[2 3 8 9], OtherModifiers:[]\n")
+        result = normalize_arkui(*args)
+        leaf = result["children"][0]["children"][0]["children"][0]["children"][0]
+        self.assertEqual(result["coordinate_validation"]["status"], "verified")
+        self.assertEqual(leaf["geometry"]["screen_bounds"], {"x": 117, "y": 63, "width": 8, "height": 9})
+        self.assertTrue(leaf["geometry"]["source"]["overlay_render_cross_checked"])
+        args[3]["render_tree"] = args[3]["render_tree"].replace("Bounds[2 3 8 9]", "Bounds[4 3 8 9]")
+        self.assert_failed(args, "overlay_render_projection_mismatch")
+
+    def test_overlay_syntax_requires_verified_parent_edge_and_known_node_type(self):
+        for description in (None, "BrokenChildren", "DisappearingChildren"):
+            with self.subTest(description=description):
+                args = overlay_syntax_fixture()
+                syntax = args[0]["children"][0]["children"][0]["children"][0]
+                syntax["attributes"]["Description"] = description
+                self.assert_failed(args, "overlay_non_layout_parent_unverified")
+        args = overlay_syntax_fixture()
+        args[0]["children"][0]["children"][0]["children"][0]["attributes"]["type"] = "UnknownNode"
+        self.assert_failed(args, "layout_geometry_missing")
+
+    def test_overlay_layout_nodes_still_require_parent_and_render_evidence(self):
+        for parent in (None, "99"):
+            with self.subTest(parent=parent):
+                args = overlay_syntax_fixture()
+                args[0]["children"][0]["children"][0]["attributes"]["LastParentId"] = parent
+                self.assert_failed(args, "overlay_parent_evidence_mismatch")
+        args = overlay_syntax_fixture()
+        args[3]["render_tree"] = "\n".join(args[3]["render_tree"].splitlines()[:-1])
+        self.assert_failed(args, "overlay_render_parent_unavailable")
 
     def test_recycle_dummy_ids_are_parent_scoped_and_preserved(self):
         args = fixture()
