@@ -208,7 +208,7 @@ def local_projection(node: dict, parent: tuple) -> tuple:
     scale = list(map(number, attrs.get("scale(x,y)", "1,1").split(",")))
     translate = list(map(number, attrs.get("translate(x,y)", "0,0").split(",")))
     pivot = list(map(number, re.findall(NUMBER, attrs.get("Center", "x:0.5 y:0.5"))))
-    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2 or min(scale) <= 0:
+    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2 or any(value == 0 for value in scale):
         raise ValueError("invalid_local_axis_transform")
     px, py, psx, psy, error = parent
     tx = px + psx * (x + width * pivot[0] * (1 - scale[0]) + translate[0])
@@ -244,7 +244,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
     """@brief 建立 ArkUI 到渲染节点的几何索引。 @param raw 原始根。 @param native 原生索引。
     @param mapping 屏幕映射。 @return 节点关联、原生窗口投影和渲染矩形。
     """
-    links, rectangles, projections, overlays = {}, {}, {}, set()
+    links, rectangles, projections, directions, overlays = {}, {}, {}, {}, set()
     pending = [(raw, (0, 0, 1, 1, 0), False, None)]
     while pending:
         node, projection, overlay, parent_id = pending.pop()
@@ -273,10 +273,15 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
         if link["id"] in rectangles:
             raise ValueError("ambiguous_render_geometry_mapping")
         rectangles[link["id"]] = screen_rect(projections[node_id], mapping)
+        directions[link["id"]] = tuple(math.copysign(1, value) for value in projection[2:4])
     native_frames = {node_id for node_id, node in native.items() if "$rect" in node}
-    if native_frames != set(links) - overlays:
-        raise ValueError("native_geometry_frame_set_mismatch")
-    return {"links": links, "rectangles": rectangles, "projections": projections, "overlays": overlays}
+    raw_frames = set(links) - overlays
+    if native_frames != raw_frames:
+        native_only = ",".join(sorted(native_frames - raw_frames))
+        raw_only = ",".join(sorted(raw_frames - native_frames))
+        raise ValueError(f"native_geometry_frame_set_mismatch:native_only={native_only};raw_only={raw_only}")
+    return {"links": links, "rectangles": rectangles, "projections": projections,
+            "directions": directions, "overlays": overlays}
 
 
 def render_ancestors(node_id: str, nodes: dict) -> list[dict]:
@@ -292,9 +297,9 @@ def render_ancestors(node_id: str, nodes: dict) -> list[dict]:
     return result
 
 
-def render_clip(render: dict, values: dict, rectangles: dict) -> dict | None:
+def render_clip(render: dict, values: dict, rectangles: dict, directions: dict) -> dict | None:
     """@brief 解析实际生效的矩形及圆角裁剪。 @param render 渲染节点。 @param values 修饰器。
-    @param rectangles 已关联整屏矩形。 @return 裁剪记录或空。
+    @param rectangles 已关联整屏矩形。 @param directions 原生父链轴方向。 @return 裁剪记录或空。
     """
     bounds_clip = "ClipToBounds[True]" in render["line"]
     frame_clip = "ClipToFrame[True]" in render["line"]
@@ -315,12 +320,13 @@ def render_clip(render: dict, values: dict, rectangles: dict) -> dict | None:
     return {"source": "RenderService.RSTree", "render_node_id": render["id"],
             "kind": "rounded_rectangle" if any(radii) else "rectangle", "bounds": rectangles[render["id"]],
             "corner_radius_local": radii,
+            "local_axis_directions": dict(zip(("x", "y"), directions[render["id"]])),
             "mode": "bounds" if bounds_clip else "frame"}
 
 
-def content_clip(render: dict, values: dict, rectangles: dict) -> dict | None:
+def content_clip(render: dict, values: dict, rectangles: dict, directions: dict) -> dict | None:
     """@brief 转换官方内容裁剪矩形，保留内容与子节点作用范围。 @param render 渲染节点。
-    @param values 修饰器。 @param rectangles 整屏框。 @return 内容裁剪或空。
+    @param values 修饰器。 @param rectangles 整屏框。 @param directions 原生父链轴方向。 @return 内容裁剪或空。
     """
     entries = values.get("CustomClipToFrame")
     if entries is None:
@@ -332,12 +338,15 @@ def content_clip(render: dict, values: dict, rectangles: dict) -> dict | None:
     if len(local) != 4 or match is None or match[1] != match[2]:
         raise ValueError("unsupported_content_clip_frame")
     bounds = list(map(number, match[1].split()))
-    if min(bounds[2:]) <= 0 or local[2] < local[0] or local[3] < local[1]:
+    if len(bounds) != 4 or min(bounds[2:]) <= 0 or local[2] < local[0] or local[3] < local[1]:
         raise ValueError("invalid_content_clip_rectangle")
     screen = rectangles[render["id"]]
-    sx, sy = screen["width"] / bounds[2], screen["height"] / bounds[3]
-    rect = {"x": screen["x"] + local[0] * sx, "y": screen["y"] + local[1] * sy,
-            "width": (local[2] - local[0]) * sx, "height": (local[3] - local[1]) * sy}
+    rect = {}
+    for index, (axis, dimension) in enumerate((("x", "width"), ("y", "height"))):
+        scale = directions[render["id"]][index] * screen[dimension] / bounds[index + 2]
+        origin = screen[axis] + (screen[dimension] if scale < 0 else 0)
+        first, last = origin + local[index] * scale, origin + local[index + 2] * scale
+        rect[axis], rect[dimension] = min(first, last), abs(last - first)
     return {"source": "RenderService.RSTree.CustomClipToFrame", "render_node_id": render["id"],
             "kind": "rectangle", "bounds": rect, "local_bounds_ltrb": local,
             "mode": "content_and_children"}
@@ -374,15 +383,19 @@ def frame_clips(link: dict, context: dict, inherited: list) -> list:
     ancestors = render_ancestors(link["id"], context["render"])
     if context["root_render_id"] not in {node["id"] for node in ancestors}:
         raise ValueError("render_node_window_mismatch")
+    verify_render_directions(ancestors, context)
     for render in ancestors:
         if render["kind"] == "RS_NODE":
             continue
         values = verify_modifiers(render)
         rectangles = context["rectangles"] if inside_root else bind_window_render_clip(render, context)
-        clip = render_clip(render, values, rectangles)
+        # 窗口外祖先通过 WMS 正缩放及尺寸校核，窗口内方向来自完整 ArkUI 父链。
+        directions = (context["directions"] if inside_root
+                      else {**context["directions"], render["id"]: (1, 1)})
+        clip = render_clip(render, values, rectangles, directions)
         if clip:
             clips.append(clip)
-        custom = content_clip(render, values, rectangles)
+        custom = content_clip(render, values, rectangles, directions)
         if custom:
             clips.append(custom)
         if render["id"] == context["root_render_id"]:
@@ -414,6 +427,24 @@ def render_bounds(render: dict) -> list:
     return bounds
 
 
+def verify_render_directions(ancestors: list, context: dict) -> None:
+    """@brief 用实际渲染父链交叉验证反射方向，防止同包围框掩盖方向变化。
+    @param ancestors 当前节点至根的渲染链。 @param context 原生坐标证据。
+    """
+    direction, inside_root = [1, 1], False
+    for render in reversed(ancestors):
+        inside_root = inside_root or render["id"] == context["root_render_id"]
+        if not inside_root or render["kind"] == "RS_NODE":
+            continue
+        scale = render_vector(verify_modifiers(render), "Scale", (1, 1))
+        if any(value == 0 for value in scale):
+            raise ValueError("unsupported_render_zero_scale")
+        direction = [previous * math.copysign(1, value) for previous, value in zip(direction, scale)]
+        expected = context["directions"].get(render["id"])
+        if expected is not None and tuple(direction) != expected:
+            raise ValueError("render_axis_direction_mismatch")
+
+
 def verify_overlay_render(node_id: str, context: dict) -> None:
     """@brief 用实际 RS 父子局部框独立校验官方省略的 Overlay。 @param node_id 原始节点标识。
     @param context 本批证据。
@@ -433,12 +464,18 @@ def verify_overlay_render(node_id: str, context: dict) -> None:
     parent_screen = context["rectangles"][parent["id"]]
     expected = context["rectangles"][render_id]
     for index, (axis, dimension) in enumerate((("x", "width"), ("y", "height"))):
-        parent_scale = parent_screen[dimension] / parent_bounds[index + 2]
+        parent_direction = context["directions"][parent["id"]][index]
+        parent_scale = parent_direction * parent_screen[dimension] / parent_bounds[index + 2]
         position = bounds[index] + bounds[index + 2] * pivot[index] * (1 - scale[index]) + translate[index]
-        observed = parent_screen[axis] + position * parent_scale
+        origin = parent_screen[axis] + (parent_screen[dimension] if parent_scale < 0 else 0)
+        first = origin + position * parent_scale
         size = bounds[index + 2] * scale[index] * parent_scale
+        observed = min(first, first + size)
         tolerance = 0.21 * max(abs(parent_scale), 1)
-        if abs(observed - expected[axis]) > tolerance or abs(size - expected[dimension]) > tolerance:
+        direction = math.copysign(1, scale[index] * parent_scale)
+        if scale[index] == 0 or direction != context["directions"][render_id][index]:
+            raise ValueError("overlay_render_axis_direction_mismatch")
+        if abs(observed - expected[axis]) > tolerance or abs(abs(size) - expected[dimension]) > tolerance:
             raise ValueError("overlay_render_projection_mismatch")
 
 

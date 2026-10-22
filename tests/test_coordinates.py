@@ -84,6 +84,79 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(result["geometry"]["screen_bounds"],
                          {"x": 60, "y": 82.5, "width": 300, "height": 75})
 
+    def test_reflected_leaf_pivot_translation_and_content_clip_use_signed_axes(self):
+        args = fixture()
+        leaf = args[0]["children"][0]["children"][0]
+        leaf["attributes"].update({"scale(x,y)": "-2,-0.5", "Center": "x:0.25 y:0.75",
+                                    "translate(x,y)": "3,-2"})
+        native = args[3]["arkui_geometry"]["$children"][0]["$children"][0]
+        native["$rect"] = "[-7,26.75],[33,41.75]"
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "Frame[5 -10 20 30], OtherModifiers:[]",
+            "Frame[5 -10 20 30], ClipToBounds[True], OtherModifiers:[Scale:[x:-2 y:-0.5], "
+            "Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2], CornerRadius:[x:1 y:2 z:3 w:4], "
+            "CustomClipToFrame:[x:2 y:4 z:8 w:18]]")
+        result = normalize_arkui(*args)
+        geometry = result["children"][0]["children"][0]["geometry"]
+        self.assertEqual(result["coordinate_validation"]["status"], "verified")
+        self.assertEqual(geometry["screen_bounds"], {"x": 93, "y": 76.75, "width": 40, "height": 15})
+        clip = next(item for item in geometry["clip_chain"] if "local_bounds_ltrb" in item)
+        self.assertEqual(clip["bounds"], {"x": 117, "y": 82.75, "width": 12, "height": 7})
+        rounded = next(item for item in geometry["clip_chain"] if item["kind"] == "rounded_rectangle")
+        self.assertEqual(rounded["corner_radius_local"], [1, 2, 3, 4])
+        self.assertEqual(rounded["local_axis_directions"], {"x": -1, "y": -1})
+        self.assertEqual(geometry["rectangular_clip_bounds"], clip["bounds"])
+
+    def test_reflection_does_not_bypass_native_projection_or_render_direction_checks(self):
+        args = fixture()
+        args[0]["children"][0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
+        self.assert_failed(args, "render_axis_direction_mismatch")
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "Frame[5 -10 20 30], OtherModifiers:[]", "Frame[5 -10 20 30], OtherModifiers:[Scale:[x:-1 y:1]]")
+        args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[16,10],[36,40]"
+        self.assert_failed(args, "native_geometry_local_projection_mismatch")
+
+    def test_zero_scale_remains_unsupported(self):
+        for scale in ("0,1", "1,-0", "-1,0"):
+            args = fixture()
+            args[0]["children"][0]["children"][0]["attributes"]["scale(x,y)"] = scale
+            self.assert_failed(args, "invalid_local_axis_transform")
+
+    def test_native_ancestor_envelope_conflicting_with_reflection_is_rejected(self):
+        args = fixture()
+        args[0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "ClipToBounds:[true]", "ClipToBounds:[true], Scale:[x:-1 y:1]")
+        # 官方祖先包围框偏移计算保留负尺寸，ToBounds 不对端点排序，必须拒收。
+        args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[5,10],[-15,40]"
+        self.assert_failed(args, "negative_native_geometry_size")
+
+    def test_overlay_below_reflected_parent_is_checked_against_render_transform(self):
+        args = fixture()
+        args[0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
+        leaf = args[0]["children"][0]["children"][0]
+        leaf["attributes"].update({"Description": "OverlayNode", "LastParentId": "1", "scale(x,y)": "-1,1"})
+        args[3]["arkui_geometry"]["$children"][0]["$children"] = []
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "ClipToBounds:[true]", "ClipToBounds:[true], Scale:[x:-1 y:1]")
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "Frame[5 -10 20 30], OtherModifiers:[]", "Frame[5 -10 20 30], OtherModifiers:[Scale:[x:-1 y:1]]")
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified")
+        self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
+                         {"x": 185, "y": 60, "width": 20, "height": 30})
+        args[3]["render_tree"] = args[3]["render_tree"].replace("Bounds[5 -10 20 30]", "Bounds[6 -10 20 30]")
+        self.assert_failed(args, "overlay_render_projection_mismatch")
+
+    def test_inactive_geometry_only_frames_still_require_raw_render_evidence(self):
+        args = fixture()
+        args[3]["arkui_geometry"]["$children"].append(
+            {"$ID": 9, "$type": "ListItem", "$rect": "[0,200],[100,300]", "active": "false"})
+        result = self.assert_failed(args, "frame_set_mismatch")
+        self.assertEqual(len(result["children"]), 1)
+        self.assertEqual(result["coordinate_validation"]["issues"][0]["code"],
+                         "native_geometry_frame_set_mismatch:native_only=9;raw_only=")
+
     def test_system_root_global_origin_is_not_added_twice(self):
         args = fixture()
         args[0]["attributes"].update(type="WindowScene,0,1000", compid="session9")
