@@ -13,11 +13,12 @@ import { checkWindows } from './observation.js';
 import { registerGeometry } from './geometry.js';
 import { safeActionParameters } from './privacy.js';
 import { harmonyKeyboardContract } from './keyboard.js';
+import { registerTextInput } from './text-input.js';
 
 /** @brief 只注册当前已验证的 SDK 输入动作，保持名称与 Midscene 一致。 */
 function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
   const definitions = new HarmonyDevice('configuration-only', {}).actionSpace();
-  const names = ['Tap', 'Input', 'Scroll', 'DragAndDrop', 'KeyboardPress', 'DoubleClick'];
+  const names = ['Tap', 'Scroll', 'DragAndDrop', 'KeyboardPress', 'DoubleClick'];
   for (const name of names) {
     const definition = definitions.find((action) => action.name === name);
     if (!definition) throw new Error(`Required SDK action is missing: ${name}`);
@@ -166,6 +167,7 @@ function registerCapture(registry: ToolRegistry, getDevice: () => CollectionDevi
 export function createRegistry(getDevice: () => CollectionDevice): ToolRegistry {
   const registry = new ToolRegistry();
   registerInput(registry, getDevice);
+  registerTextInput(registry, getDevice);
   registerApplications(registry, getDevice);
   registerWindows(registry, getDevice);
   registerGeometry(registry, getDevice);

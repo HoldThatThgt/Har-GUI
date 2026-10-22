@@ -23,7 +23,7 @@ function rejectScope(message: string): never {
 }
 
 /** @brief 按 SDK 实际取整坐标查找矩形内最高 z_order 的普通应用；不推断系统窗口透明像素。 */
-function windowAt(location: ResolvedLocation, windows: readonly WindowInfo[]): WindowInfo | undefined {
+export function windowAt(location: ResolvedLocation, windows: readonly WindowInfo[]): WindowInfo | undefined {
   const [x, y] = location.center.map(Math.round);
   return windows.filter((window) => {
     const box = window.bounding_box;
