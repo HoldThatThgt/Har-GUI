@@ -234,10 +234,6 @@ h2 { font-size: 13px; font-weight: 650; }
 .node-attributes dt { color: #8290a3; }
 .node-attributes dd { color: #3f556e; overflow-wrap: anywhere; white-space: pre-wrap; }
 .node-attributes dd.empty { color: #b7bfca; }
-.raw-node { margin: 0 0 9px; font-size: 11px; color: #627b9b; }
-.raw-node summary { cursor: pointer; padding: 6px 0; }
-.raw-node pre { padding: 9px; background: #f4f7fb; color: #52677f; border-radius: 5px; }
-.raw-node pre { font: 10px/1.6 Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
 .empty-state { padding: 25px 10px; color: #96a1b1; font-size: 12px; text-align: center; }
 .error-message { margin: 30px; padding: 20px; border: 1px solid #e8b5b5; color: #a93636; background: #fff3f3; }
 [hidden] { display: none !important; }

@@ -1,0 +1,53 @@
+schema_version = 1
+
+[run]
+name = "mail-reading"
+output = "../output/mail-reading/runs"
+max_actions = 20
+max_duration_seconds = 900
+
+[dataset]
+root = "../output/mail-reading/dataset"
+canvas = { width = 3120, height = 2080 }
+# 下列标识来自已验证设备；在其他设备上须先核实系统叶子与正文容器。
+stability_regions = [
+  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_time" },
+  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_date" },
+  { bundle_name = "com.ohos.sceneboard", resource_id = "plugin_image_plugin_wifi_icon" }
+]
+
+[agent]
+llm = "default"
+
+[tools]
+enabled = [
+  "ListApplications", "ReadApplication", "LaunchApplication", "ReadWindows", "Tap", "Scroll",
+  "ToggleWindowSize", "Capture"
+]
+
+[[tasks]]
+name = "mail-reading"
+app = "华为邮箱"
+scene = "邮件页面"
+bundle_names = ["com.huawei.hmos.email"]
+target_count = 1
+instruction = """
+在已登录的华为邮箱中找到一封已收到的邮件，打开阅读页面。
+只查看现有内容，禁止发送、回复、删除、转发、下载附件或修改账号。
+先 ReadWindows；已有邮箱窗口则使用现有窗口，否则通过 ReadApplication 选择界面入口再启动。
+当前最大化时先还原再最大化，当前浮动时直接最大化，并核实实际窗口变化。
+选择已有邮件阅读，等待正文加载稳定，再调用 Capture，target_bundle_name 使用真实包名。
+未登录或没有邮件则明确停止，不创建账号、不编造正文。
+"""
+acceptance = """
+邮箱阅读界面可见，有收件箱侧栏和邮件阅读工具栏。
+不是登录、设置、空白、错误页或菜单。
+"""
+
+[tasks.privacy]
+enabled = true
+reason = "覆盖已核实的邮件正文 Web 容器及含正文摘要的邮件列表"
+regions = [
+  { bundle_name = "com.huawei.hmos.email", resource_id = "detailWebHtml" },
+  { bundle_name = "com.huawei.hmos.email", resource_id = "CONTENT_AREA_EMAIL_LIST_VIEW" }
+]

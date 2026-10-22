@@ -9,11 +9,18 @@ max_duration_seconds = 900
 [agent]
 llm = "default"
 
+[dataset]
+root = "../output/settings-sound/dataset"
+canvas = { width = 3120, height = 2080 }
+
 [tools]
 enabled = ["ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll", "ToggleWindowSize", "Capture"]
 
 [[tasks]]
 name = "settings-sound"
+app = "系统设置"
+scene = "声音设置"
+privacy = { enabled = false, reason = "仅系统声音设置，无聊天或邮件正文" }
 instruction = """
 自主找到这台电脑系统设置中的“声音”页面。当前可能停在其他页面，必须根据截图寻找入口并打开声音设置。
 查询窗口后，用 ToggleWindowSize 切换设置窗口的最大化或还原状态，使它与本任务开始时不同。

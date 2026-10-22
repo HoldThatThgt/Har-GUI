@@ -10,14 +10,19 @@ from har_capture.metadata import parse_windows
 from har_capture.sessions import SESSION_BLOCK, parse_sessions, pipe_values
 from har_capture.window_control import window_size_control
 from har_capture.window_title_bar import window_title_bar
+from har_capture.delivery_operations import execute_local
 
 OPERATIONS = {
     "read_windows": {"display_id"},
     "list_applications": {"query", "offset", "limit"},
+    "read_application": {"bundle_name"},
     "launch_application": {"bundle_name", "ability_name"},
-    "capture": {"output_dir", "display_id"},
+    "capture": {"output_dir", "display_id", "stability_regions"},
     "window_size_control": {"window_id"},
     "window_title_bar": {"window_id"},
+    "dataset_status": {"root", "identity"},
+    "prepare_delivery": {"directory", "options", "privacy"},
+    "publish_sample": {"root", "identity", "directory", "evidence_directory", "acceptance"},
 }
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 ABILITY_HEADER = "callingBundleName bundleName moduleName abilityName"
@@ -197,6 +202,22 @@ def launcher_skill(ability: dict) -> bool:
                and "entity.system.home" in skill.get("entities", []) for skill in skills)
 
 
+def read_application(hdc: Hdc, request: dict) -> dict:
+    """@brief 返回包声明的界面入口供代理明确选择，不猜默认启动能力。 @param hdc 连接。
+    @param request 包名。 @return 可见能力与桌面入口标志。
+    """
+    bundle = identifier(request.get("bundle_name"), "bundle_name")
+    data = bundle_details(hdc, bundle)
+    abilities = []
+    for module in data["hapModuleInfos"]:
+        for ability in module["abilityInfos"]:
+            if ability.get("enabled") is True and ability.get("visible") is True and ability.get("type") == 1:
+                abilities.append({"ability_name": identifier(ability["name"], "ability_name"),
+                                  "module_name": identifier(module["moduleName"], "module_name"),
+                                  "launcher": launcher_skill(ability)})
+    return {"bundle_name": bundle, "abilities": abilities}
+
+
 def launch_target(data: dict, ability_name: str | None) -> dict:
     """@brief 唯一选择真实存在的可见界面入口。 @param data 包元数据。
     @param ability_name 可选显式能力名。 @return 启动目标。
@@ -246,17 +267,22 @@ def capture_frame(hdc: Hdc, request: dict) -> dict:
     if not isinstance(output, str) or not output.strip():
         fail("Capture requires a nonempty output_dir")
     display = integer_parameter(request, "display_id", 0)
-    destination = capture(hdc, Path(output), display)
+    destination = capture(hdc, Path(output), display, request.get("stability_regions", []))
     metadata_path = destination / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     keys = ("capture_id", "started_at", "finished_at", "display", "windows")
     return {"path": str(destination), "metadata_path": str(metadata_path), **{key: metadata[key] for key in keys}}
 
 
-def execute_operation(hdc: Hdc, request: object) -> dict:
+def execute_operation(hdc: Hdc | None, request: object) -> dict:
     """@brief 派发单次白名单操作，禁止任意命令。 @param hdc 连接。 @param request 请求。 @return 完整操作结果。"""
     operation = validate_request(request)
+    if operation in ("dataset_status", "prepare_delivery", "publish_sample"):
+        return {"operation": operation, "result": execute_local(request)}
+    if hdc is None:
+        fail("Device operations require both --hdc and --device")
     handlers = {"read_windows": read_windows, "list_applications": list_applications,
+                "read_application": read_application,
                 "launch_application": launch_application, "capture": capture_frame,
                 "window_size_control": window_size_control, "window_title_bar": window_title_bar}
     if operation != "capture":

@@ -1,6 +1,7 @@
 """验证零退出码错误、缺失文件与设备选择的失败行为。"""
 
 import subprocess
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +27,8 @@ class HdcTests(unittest.TestCase):
             self.hdc.run(["shell", "test"], "test")
         record = self.hdc.records[0]
         self.assertEqual(record["return_code"], 0)
-        self.assertIn("Permission denied", record["stdout"])
+        self.assertNotIn("stdout", record)
+        self.assertEqual(record["stdout_sha256"], hashlib.sha256(result.stdout).hexdigest())
         self.assertIn("finished_at", record)
 
     def test_receive_requires_new_nonempty_file(self):

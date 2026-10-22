@@ -117,9 +117,15 @@ def fake_hdc(payloads=None, failure=None, command_outputs=None):
     hdc = Mock(spec=Hdc)
     hdc.records = []
     hdc.device_info.return_value = {"serial": "test-device", "model": "test-model"}
-    files = {"layout": raw_layout(), "screenshot": png_bytes(),
+    files = {"layout": raw_layout(), "screenshot": png_bytes(size=(3120, 2080)),
              "accessibility": raw_accessibility(), "arkui_response_92": raw_arkui(),
              "arkui_response_80": raw_arkui(80, 201), "arkui_92": raw_arkui(), "arkui_80": raw_arkui(80, 201)}
+    for window_id, process_id in ((92, 202), (80, 201)):
+        geometry = {"$type": "root", "$ID": 0, "$rect": "[0.00, 0.00],[1596.00,1468.00]"}
+        files[f"geometry_{window_id}"] = (f"WinId: {window_id}\nPid: {process_id}\n"
+                                           + json.dumps(geometry)).encode()
+    files["render_geometry"] = b"| ROOT_NODE[1], Properties: Bounds[0 0 1 1] Frame[0 0 1 1], OtherModifiers:[]\n"
+    files["render_detached_geometry"] = b"-- Render Node Not On Tree\n"
     files.update(payloads or {})
     timing = {"started_at": "2026-10-22T12:00:00.000000+00:00",
               "finished_at": "2026-10-22T12:00:00.010000+00:00", "duration_seconds": 0.01}
@@ -130,13 +136,17 @@ def fake_hdc(payloads=None, failure=None, command_outputs=None):
             raise CaptureError("Injected command failure")
         if name in (command_outputs or {}):
             return command_outputs[name]
-        if name == "screenshot":
+        if name in ("screenshot", "closing_screen"):
             return "ScreenCap saved to " + arguments[-1]
-        if name in ("layout", "accessibility"):
+        if name in ("layout", "accessibility", "closing_layout"):
             return "DumpLayout saved to:" + arguments[-1]
         if name.startswith("dump_arkui_"):
             return "HAR_CAPTURE_DUMP_READY\n"
-        if name == "windows":
+        if name.startswith("geometry_"):
+            return "HAR_CAPTURE_GEOMETRY_READY\n"
+        if name in ("render_geometry", "render_detached_geometry"):
+            return "HAR_CAPTURE_RENDER_READY\n"
+        if name in ("windows", "closing_windows"):
             return (FIXTURES / "windows.txt").read_text(encoding="utf-8")
         if name == "session_details":
             return (FIXTURES / "session-details.txt").read_text(encoding="utf-8")
@@ -148,7 +158,10 @@ def fake_hdc(payloads=None, failure=None, command_outputs=None):
         hdc.records.append({"name": name, "remote": remote, "return_code": 0, **timing})
         if name == failure:
             raise CaptureError("Injected transfer failure")
-        local.write_bytes(files[name.removeprefix("receive_")])
+        key = name.removeprefix("receive_")
+        if key in ("closing_layout", "closing_screen") and key not in files:
+            key = {"closing_layout": "layout", "closing_screen": "screenshot"}[key]
+        local.write_bytes(files[key])
 
     hdc.run.side_effect = run
     hdc.receive.side_effect = receive

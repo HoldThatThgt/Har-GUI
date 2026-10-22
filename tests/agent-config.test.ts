@@ -11,6 +11,9 @@ const TOOLS = ['Observe', 'Capture'];
 const TASK = `
 [[tasks]]
 name = "calendar-week"
+app = "Calendar"
+scene = "Week"
+privacy = { enabled = false, reason = "Synthetic fixture" }
 instruction = "寻找日历周视图并改变窗口大小"
 acceptance = "显示可读的日期和活动"
 target_count = 3
@@ -24,6 +27,9 @@ max_actions = 12
 max_duration_seconds = 3.5
 [agent]
 llm = "chosen"
+[dataset]
+root = "./dataset"
+canvas = { width = 3120, height = 2080 }
 [tools]
 enabled = ["Observe", "Capture"]
 ${TASK}`;
@@ -79,12 +85,77 @@ test('loads generic tasks without reading credentials and preserves original fil
   assert.equal(loaded.project.tasks[0].instruction, '寻找日历周视图并改变窗口大小');
   assert.equal(loaded.profile.model, 'deployment-specific-model');
   assert.equal(loaded.profile.pricing, undefined);
+  assert.deepEqual(loaded.project.dataset.stability_regions, []);
   for (const [name, path] of [['project', f.projectPath], ['config', f.configPath]] as const) {
     assert.equal(loaded.digests[name], createHash('sha256').update(readFileSync(path)).digest('hex'));
   }
   assert.ok(Object.isFrozen(loaded.project.tasks[0]));
   assert.ok(Object.isFrozen(loaded.project.tools.enabled));
   assert.throws(() => { loaded.project.tasks[0].name = 'changed'; }, TypeError);
+});
+
+test('explicit stability selectors are frozen in the project without device-specific defaults', (t) => {
+  const selectors = 'stability_regions = [{ bundle_name = "system.fixture", resource_id = "clock" }]\n';
+  const f = fixture(t, PROJECT.replace('[tools]', selectors + '[tools]'));
+  const config = loadConfiguration(f.projectPath, f.configPath, TOOLS);
+  assert.deepEqual(config.project.dataset.stability_regions, [{ bundle_name: 'system.fixture', resource_id: 'clock' }]);
+  assert.ok(Object.isFrozen(config.project.dataset.stability_regions));
+  assert.ok(Object.isFrozen(config.project.dataset.stability_regions[0]));
+});
+
+test('privacy requires an explicit switch and preserves configured regions when switched off', async (t) => {
+  for (const enabled of [false, true]) {
+    for (const withRegions of [false, true]) {
+      await t.test(`enabled ${enabled}, regions ${withRegions}`, (child) => {
+        const regions = [{ bundle_name: 'app.fixture', resource_id: 'mail-body' }];
+        const selector = withRegions ? ', regions = [{ bundle_name = "app.fixture", resource_id = "mail-body" }]' : '';
+        const policy = `{ enabled = ${enabled}, reason = "Synthetic fixture"${selector} }`;
+        const f = fixture(child, PROJECT.replace(/^privacy = .+$/m, `privacy = ${policy}`));
+        const loaded = loadConfiguration(f.projectPath, f.configPath, TOOLS);
+        assert.deepEqual(loaded.project.tasks[0].privacy,
+          { enabled, reason: 'Synthetic fixture', ...(withRegions ? { regions } : {}) });
+        assert.ok(Object.isFrozen(loaded.project.tasks[0].privacy));
+        if (withRegions) assert.ok(Object.isFrozen(loaded.project.tasks[0].privacy.regions));
+      });
+    }
+  }
+});
+
+test('privacy rejects legacy modes, missing or non-boolean switches, and invalid region declarations', async (t) => {
+  const values = [
+    '{ mode = "none", reason = "fixture" }',
+    '{ enabled = false, mode = "none", reason = "fixture" }',
+    '{ reason = "fixture" }', '{ enabled = "false", reason = "fixture" }',
+    '{ enabled = 0, reason = "fixture" }', '{ enabled = false, reason = " " }',
+    '{ enabled = false, reason = "fixture", extra = true }',
+    '{ enabled = false, reason = "fixture", regions = [] }',
+    '{ enabled = true, reason = "fixture", regions = {} }',
+    '{ enabled = false, reason = "fixture", regions = [{}] }',
+    '{ enabled = true, reason = "fixture", regions = [{ bundle_name = "app", resource_id = " " }] }',
+    '{ enabled = true, reason = "fixture", regions = [{ bundle_name = " ", resource_id = "body" }] }',
+    '{ enabled = false, reason = "fixture", regions = [{ bundle_name = "app", resource_id = "body", x = 0 }] }',
+  ];
+  for (const value of values) {
+    await t.test(value, (child) => {
+      const log = child.mock.method(console, 'error', () => {});
+      const f = fixture(child, PROJECT.replace(/^privacy = .+$/m, `privacy = ${value}`));
+      assert.throws(() => loadConfiguration(f.projectPath, f.configPath, TOOLS), /tasks.0.privacy/);
+      assert.equal(log.mock.callCount(), 1);
+    });
+  }
+});
+
+test('stability selectors reject blank, missing, unknown fields and non-array declarations', async (t) => {
+  const values = ['{}', '[{}]', '[{ bundle_name = "system.fixture" }]',
+    '[{ bundle_name = " ", resource_id = "clock" }]', '[{ bundle_name = "system.fixture", resource_id = "" }]',
+    '[{ bundle_name = "system.fixture", resource_id = "clock", tolerance = 1 }]'];
+  for (const value of values) {
+    await t.test(value, (child) => {
+      child.mock.method(console, 'error', () => {});
+      const f = fixture(child, PROJECT.replace('[tools]', `stability_regions = ${value}\n[tools]`));
+      assert.throws(() => loadConfiguration(f.projectPath, f.configPath, TOOLS), /dataset.stability_regions/);
+    });
+  }
 });
 
 test('an unrestricted task has no invented application filter or fixed sample count', (t) => {

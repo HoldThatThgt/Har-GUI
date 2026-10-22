@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { HarmonyDevice } from '@midscene/harmony';
 import type { ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
@@ -9,6 +11,7 @@ import { assertInputScope } from './scope.js';
 import { windowSchema } from './state.js';
 import { checkWindows } from './observation.js';
 import { registerGeometry } from './geometry.js';
+import { safeActionParameters } from './privacy.js';
 
 /** @brief 只注册当前已验证的 SDK 输入动作，保持名称与 Midscene 一致。 */
 function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
@@ -26,7 +29,7 @@ function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice
         assertInputScope(name, parameters, observation.windows, device.state.task.bundle_names);
         const native = device.nativeActions().find((action) => action.name === name)!;
         await native.call(parameters, context);
-        return { completed: true, resolved_parameters: parameters };
+        return { completed: true, resolved_parameters: safeActionParameters(name, parameters) };
       },
     } });
   }
@@ -44,6 +47,15 @@ function registerApplications(registry: ToolRegistry, getDevice: () => Collectio
       limit: z.number().int().min(1).max(50).optional() }),
     call: (parameters) => bridge(getDevice().connection,
       { operation: 'list_applications', ...parameters }, getDevice().state.signal),
+  } });
+  registry.register({ mutates: false, resultSchema: z.object({ bundle_name: z.string(),
+    abilities: z.array(z.object({ ability_name: z.string(), module_name: z.string(), launcher: z.boolean() })),
+  }), action: {
+    name: 'ReadApplication', description: 'Read declared UI abilities before launching an application. '
+      + 'Choose the appropriate ability_name explicitly when multiple desktop entries exist.',
+    paramSchema: z.object({ bundle_name: z.string() }),
+    call: (parameters) => bridge(getDevice().connection,
+      { operation: 'read_application', ...parameters }, getDevice().state.signal),
   } });
   registry.register({ mutates: true, resultSchema: z.object({ bundle_name: z.string(),
     module_name: z.string(), ability_name: z.string(), launched: z.literal(true) }), action: {
@@ -121,16 +133,27 @@ function registerCapture(registry: ToolRegistry, getDevice: () => CollectionDevi
   registry.register({ mutates: false, resultSchema: z.object({
     capture_id: z.string(), path: z.string(), pending_acceptance: z.literal(true),
   }), action: {
-    name: 'Capture', description: 'Capture the completed page once. Saves one screenshot, WMS, ArkUI JSON '
-      + 'and accessibility trees. Call only after the task and its variations are complete. Then finish.',
-    paramSchema: z.object({ page_name: z.string().min(1), variation: z.string().min(1) }),
+    name: 'Capture', description: 'Persist the current screen as a dataset candidate with WMS and both UI trees. '
+      + 'This tool is the ONLY operation that saves a sample. Observing screenshots does NOT save samples. '
+      + 'You MUST execute Capture before reporting task completion; wait for pending_acceptance=true feedback.',
+    paramSchema: z.object({ page_name: z.string().min(1).describe('A short page category, without path separators'),
+      variation: z.string().min(1).describe('The actual page/window state collected'),
+      target_bundle_name: z.string().min(1).describe('The main task application bundle returned by ReadWindows') }),
     call: async (parameters, context) => {
       const device = getDevice();
-      await checkWindows(device);
+      const observation = await checkWindows(device);
+      if (!observation.windows.some((window) => !window.is_system
+        && window.bundle_name === parameters.target_bundle_name)) {
+        throw new Error('Capture target bundle is not a visible application');
+      }
+      const allowed = device.state.task.bundle_names;
+      if (allowed && !allowed.includes(parameters.target_bundle_name)) throw new Error('Bundle is outside task scope');
       const result = await bridge(device.connection, { operation: 'capture',
-        output_dir: `${device.state.directory}/captures` }, device.state.signal);
+        output_dir: `${device.state.directory}/captures`,
+        stability_regions: device.state.config.project.dataset.stability_regions }, device.state.signal);
       device.state.candidate = { ...result, ...parameters, task_name: device.state.task.name,
         sample_id: randomUUID(), window_changes: [...device.state.changes] };
+      await writeFile(path.join(result.path, 'candidate.json'), JSON.stringify(device.state.candidate, null, 2) + '\n');
       return { capture_id: result.capture_id, path: result.path, pending_acceptance: true };
     },
   } });

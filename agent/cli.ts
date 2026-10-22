@@ -24,10 +24,11 @@ async function main(): Promise<void> {
     project: { type: 'string', default: 'project.toml' }, config: { type: 'string', default: 'config.toml' },
     device: { type: 'string' }, hdc: { type: 'string' }, python: { type: 'string', default: 'python' },
     'env-file': { type: 'string' },
+    capture: { type: 'string' }, task: { type: 'string' }, 'target-bundle': { type: 'string' },
   } });
   const command = positionals[0];
-  if (positionals.length !== 1 || !['run', 'validate', 'tools'].includes(command)) {
-    throw new Error('Usage: npm run agent -- <validate|run|tools> --project PATH --config PATH [--device SERIAL]');
+  if (positionals.length !== 1 || !['run', 'validate', 'tools', 'finalize'].includes(command)) {
+    throw new Error('Usage: npm run agent -- <validate|run|tools|finalize> --project PATH --config PATH');
   }
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'har-gui-sdk-'));
   isolateSdk(temporary);
@@ -37,9 +38,16 @@ async function main(): Promise<void> {
     if (command === 'tools') { console.log(JSON.stringify(registry.names(), null, 2)); return; }
     const config = loadConfiguration(values.project, values.config, registry.names());
     if (command === 'validate') { console.log(JSON.stringify({ valid: true, ...config }, null, 2)); return; }
-    if (!values.device || !/^[A-Za-z0-9_.:-]+$/.test(values.device)) throw new Error('A valid --device is required');
     if (values['env-file']) process.loadEnvFile(path.resolve(values['env-file']));
     isolateSdk(temporary);
+    if (command === 'finalize') {
+      if (!values.capture || !values.task) throw new Error('Finalize requires --capture and --task');
+      const { finalize } = await import('./finalize.js');
+      console.log(await finalize(config, { python: values.python }, { directory: path.resolve(values.capture),
+        taskName: values.task, targetBundleName: values['target-bundle'] }));
+      return;
+    }
+    if (!values.device || !/^[A-Za-z0-9_.:-]+$/.test(values.device)) throw new Error('A valid --device is required');
     const hdc = values.hdc ?? fileURLToPath(new URL('../.tools/openharmony/toolchains/hdc.exe', import.meta.url));
     const { run } = await import('./runner.js');
     console.log(await run(config, { python: values.python, hdc: path.resolve(hdc), serial: values.device }));

@@ -10,6 +10,8 @@ from har_capture.arkui_selection import select_system_tree
 from har_capture.hdc import fail
 from har_capture.metadata import count_nodes, file_info, image_info, load_layout
 from har_capture.sessions import parse_sessions
+from har_capture.privacy import viewer_tree
+from har_capture.system_accessibility import read_window_accessibility
 
 TEMPLATES = Path(__file__).resolve().parent.parent / "viewer"
 
@@ -42,13 +44,17 @@ def read_capture(directory: Path) -> dict:
     if metadata["status"] != "complete":
         fail(f"Capture is not complete: {directory}")
     verify_file(directory, metadata["files"]["layout"], "layout.json")
-    verify_file(directory, metadata["files"]["screenshot"], "screenshot.png")
-    image = image_info(directory / "screenshot.png")
+    screenshot_file = metadata["files"]["screenshot"]["file"]
+    verify_file(directory, metadata["files"]["screenshot"], screenshot_file)
+    image = image_info(directory / screenshot_file)
     if any(image[key] != metadata["display"][key] for key in ("width", "height")):
         fail("Screenshot dimensions do not match capture metadata")
-    screenshot = base64.b64encode((directory / "screenshot.png").read_bytes()).decode("ascii")
-    return {"metadata": metadata, "layout": load_layout(directory / "layout.json"),
-            "screenshot": "data:image/png;base64," + screenshot, "trees": read_trees(directory, metadata)}
+    screenshot = base64.b64encode((directory / screenshot_file).read_bytes()).decode("ascii")
+    trees = read_trees(directory, metadata)
+    trees = {"accessibility": {key: viewer_tree(tree) for key, tree in trees["accessibility"].items()},
+             "arkui": {key: viewer_tree(tree) for key, tree in trees["arkui"].items()}}
+    return {"metadata": metadata, "layout": viewer_tree(load_layout(directory / "layout.json")),
+            "screenshot": "data:image/png;base64," + screenshot, "trees": trees}
 
 
 def read_trees(directory: Path, metadata: dict) -> dict:
@@ -56,20 +62,13 @@ def read_trees(directory: Path, metadata: dict) -> dict:
     @param metadata 采集记录。 @return 无障碍原始数组与按窗口索引的 ArkUI 树。
     """
     verify_file(directory, metadata["files"]["accessibility"], "accessibility.json")
-    accessibility = json.loads((directory / "accessibility.json").read_bytes())
+    accessibility = {}
     verify_file(directory, metadata["files"]["session_details"], "session-details.txt")
     sessions = parse_sessions((directory / "session-details.txt").read_text(encoding="utf-8"))
     arkui = {}
     for window in metadata["windows"]:
         window_id = window["window_id"]
-        access = window["trees"]["accessibility"]
-        match = re.fullmatch(r"/(\d+)", access["json_pointer"])
-        if match is None:
-            fail(f"Invalid accessibility pointer for window {window_id}")
-        access_root = accessibility[int(match[1])]
-        if (count_nodes(access_root, window_id, window["display_id"]) != access["node_count"]
-                or access_root["attributes"]["bundleName"] != window["bundle_name"]):
-            fail(f"Accessibility tree does not match window {window_id}")
+        accessibility[str(window_id)] = read_window_accessibility(directory, window)
         evidence = window["trees"]["arkui"]
         verify_arkui_scope(window, evidence, sessions)
         filename = f"arkui/window-{window_id}.json"
@@ -84,6 +83,14 @@ def read_trees(directory: Path, metadata: dict) -> dict:
         if count_arkui_nodes(root) != evidence["node_count"]:
             fail(f"ArkUI node count does not match window {window_id}")
         arkui[str(window_id)] = root
+    if metadata.get("delivery"):
+        manifest = metadata["delivery"]
+        record = manifest["files"]["windows_akui"]
+        destination = Path(manifest["path"])
+        verify_file(destination, record, record["file"])
+        normalized = json.loads((destination / record["file"]).read_bytes())
+        for item in normalized["windows"]:
+            arkui[str(item["window_id"])] = item["tree"]
     return {"accessibility": accessibility, "arkui": arkui}
 
 
@@ -96,7 +103,8 @@ def verify_arkui_scope(window: dict, evidence: dict, sessions: dict) -> None:
         fail(f"Session details are missing window {window_id}")
     session = sessions[window_id]
     source = "WindowManagerService.-default.-all" if session["is_system"] else "WindowManagerService.-element"
-    if (evidence["session"] != session or evidence["scope"] != "window" or evidence["source"] != source
+    identity_matches = all(evidence["session"].get(key) == value for key, value in session.items())
+    if (not identity_matches or evidence["scope"] != "window" or evidence["source"] != source
             or evidence["display_id"] != window["display_id"]
             or any(session[key] != window[key] for key in ("process_id", "display_id"))):
         fail(f"ArkUI scope does not match session details for window {window_id}")
@@ -107,7 +115,7 @@ def verify_system_selection(directory: Path, window: dict, evidence: dict) -> No
     @param window 窗口记录。 @param evidence 原文和切片元数据。
     """
     window_id = window["window_id"]
-    filename = f"arkui/window-{window_id}-response.txt"
+    filename = evidence["response"]["file"]
     verify_file(directory, evidence["response"], filename)
     raw = (directory / filename).read_bytes()
     subtree, selection = select_system_tree(raw, window, evidence["session"])

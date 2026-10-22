@@ -3,6 +3,12 @@ Session:
 callingPid callingUid isSystem reuse lockedState time type isSystemCalling topmost
 Life: state isActive isSystemActive isVisible uiNodeId showRecent bufferAvailable foregroundInteractiveStatus isAttach isPersistentRecover
 Display: snapshotScale vpr screenId brightness displayId
+----------------------------------ExampleDock|9----------------------------------
+Session:
+200|10000|1|0|0||2116|0|0|
+Life: 0|0|1|1|90|0|0|1|0|0|
+Display: 0.5|2|0|-1|0|
+Visible: 0|3|
 ----------------------------------ExampleReader|80----------------------------------
 Session:
 201|10000|0|0|0||1|0|0|

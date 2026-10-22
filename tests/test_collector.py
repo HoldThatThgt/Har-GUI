@@ -11,6 +11,7 @@ from har_capture.collector import capture
 from har_capture.hdc import CaptureError
 from tests.support import (FIXTURES, fake_hdc, png_bytes, raw_accessibility, raw_arkui, raw_layout,
                            raw_system_arkui, system_session_details)
+from tests.test_system_accessibility import application_inspector
 
 
 class CollectorTests(unittest.TestCase):
@@ -52,7 +53,9 @@ class CollectorTests(unittest.TestCase):
             metadata = self.read_metadata(directory)
             self.assertEqual(metadata["status"], "complete")
             self.assertEqual(metadata["files"]["layout"]["sha256"], hashlib.sha256(original).hexdigest())
-            self.assertEqual(metadata["consistency"], {"atomic": False})
+            self.assertFalse(metadata["consistency"]["atomic"])
+            self.assertEqual(metadata["consistency"]["status"], "verified")
+            self.assertEqual(metadata["coverage"]["status"], "verified")
             self.assertEqual(metadata["z_order_source"], "WindowManagerService.ZOrd")
             self.assertTrue(metadata["device_cleanup"]["success"])
             self.assertEqual(set(metadata["capture_times"]),
@@ -134,21 +137,25 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(metadata["status"], "complete")
                 self.assertFalse(metadata["device_cleanup"]["success"])
                 self.assertEqual(set(metadata["device_cleanup"]["remote_files"]),
-                                 {"screenshot", "layout", "accessibility", "arkui_92", "arkui_80"})
+                                 {"screenshot", "layout", "accessibility", "arkui_92", "arkui_80",
+                                  "geometry_92", "geometry_80", "render_geometry", "render_detached_geometry",
+                                  "closing_layout", "closing_screen"})
                 self.assertEqual((directory / "layout.json").read_bytes(), raw_layout())
 
-    def test_one_screenshot_is_captured_first_and_paired_with_all_window_evidence(self):
+    def test_only_one_screenshot_is_saved_and_closing_pixels_are_checked_in_memory(self):
         hdc = fake_hdc()
         directory = capture(hdc, self.output)
         metadata = self.read_metadata(directory)
         self.assertEqual(metadata["status"], "complete")
         self.assertEqual(metadata["capture_id"], directory.name)
-        self.assertEqual(metadata["consistency"], {"atomic": False})
+        self.assertFalse(metadata["consistency"]["atomic"])
+        self.assertEqual(metadata["consistency"]["status"], "verified")
+        self.assertEqual(metadata["consistency"]["pixels"]["status"], "verified")
         self.assertEqual(list(directory.rglob("*.png")), [directory / "screenshot.png"])
         commands = json.loads((directory / "commands.json").read_bytes())
         screenshots = [record for record in commands if "screenCap" in record.get("command", [])]
-        self.assertEqual(len(screenshots), 1)
-        self.assertEqual(commands[0]["name"], "screenshot")
+        self.assertEqual(len(screenshots), 2)
+        self.assertEqual(commands[0]["name"], "windows")
         self.assertEqual([call.args[2] for call in hdc.receive.call_args_list].count("receive_screenshot"), 1)
         self.assertNotIn("screenshot_after", metadata["files"])
         self.assertNotIn("screenshot_after", metadata["capture_times"])
@@ -159,6 +166,91 @@ class CollectorTests(unittest.TestCase):
         for artifact in metadata["files"].values():
             self.assertTrue((directory / artifact["file"]).is_file())
         self.assertEqual((directory / "layout.json").read_bytes(), raw_layout())
+
+    def test_screen_content_change_rejects_frame_without_saving_a_second_image(self):
+        hdc = fake_hdc({"closing_screen": png_bytes("black", size=(3120, 2080))})
+        with self.assertRaisesRegex(CaptureError, "Screen content changed"):
+            capture(hdc, self.output)
+        directory = self.assert_failed_only()
+        self.assertEqual(len(list(directory.rglob("*.png"))), 1)
+        pixels = json.loads((directory / "pixel-consistency.json").read_bytes())
+        self.assertEqual(pixels["status"], "failed")
+        self.assertTrue(hdc.run.call_args_list[-1].args[1] == "cleanup")
+
+    def test_tree_text_change_without_structure_change_rejects_frame(self):
+        layout = json.loads(raw_layout())
+        layout["children"][0]["attributes"]["text"] = "New content on the same page"
+        hdc = fake_hdc({"closing_layout": raw_layout(layout)})
+        with self.assertRaisesRegex(CaptureError, "state changed"):
+            capture(hdc, self.output)
+        self.assert_failed_only()
+
+    def test_unmatched_system_window_requires_explicit_nonvisibility_evidence(self):
+        details = (FIXTURES / "session-details.txt").read_text(encoding="utf-8").replace("Visible: 0|3|", "Visible: 1|0|")
+        hdc = fake_hdc(command_outputs={"session_details": details})
+        with self.assertRaisesRegex(CaptureError, "Inspector"):
+            capture(hdc, self.output)
+        directory = self.assert_failed_only()
+        coverage = json.loads((directory / "coverage.json").read_bytes())
+        self.assertEqual([window["window_id"] for window in coverage["unresolved_windows"]], [9])
+
+    def test_exposed_application_missing_from_uitest_is_collected_through_native_window_interfaces(self):
+        layout = json.loads(raw_layout())
+        layout["children"] = [layout["children"][0]]
+        hdc = fake_hdc({"layout": raw_layout(layout), "accessibility": raw_accessibility(layout["children"]),
+                        "inspector_window-92": application_inspector()}, command_outputs={
+                            "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
+        directory = capture(hdc, self.output)
+        metadata = self.read_metadata(directory)
+        self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
+        self.assertEqual(metadata["foreground_window_ids_without_tree"], [9])
+        window = next(window for window in metadata["windows"] if window["window_id"] == 92)
+        self.assertEqual(window["bundle_name"], "com.example.app")
+        self.assertEqual(window["trees"]["accessibility"]["node_count"], 2)
+        self.assertEqual(window["trees"]["arkui"]["node_count"], 2)
+        self.assertEqual(window["trees"]["accessibility"]["selection"]["kind"], "window_response")
+        self.assertEqual(len(list(directory.rglob("*.png"))), 1)
+        self.assertEqual((directory / "layout.json").read_bytes(), raw_layout(layout))
+
+    def test_layout_window_missing_from_unfiltered_accessibility_uses_verified_native_tree(self):
+        layout = json.loads(raw_layout())
+        hdc = fake_hdc({"accessibility": raw_accessibility([layout["children"][0]]),
+                        "inspector_window-92": application_inspector(bundle="com.example.settings")},
+                       command_outputs={"inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
+        directory = capture(hdc, self.output)
+        metadata = self.read_metadata(directory)
+        self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
+        window = next(window for window in metadata["windows"] if window["window_id"] == 92)
+        self.assertIn("AccessibilityManager", window["trees"]["accessibility"]["source"])
+        self.assertEqual(window["bundle_name"], "com.example.settings")
+        self.assertEqual((directory / "layout.json").read_bytes(), raw_layout(layout))
+
+    def test_empty_uitest_window_sets_still_require_all_exposed_wms_windows(self):
+        layout = json.loads(raw_layout())
+        layout["children"] = []
+        hdc = fake_hdc({"layout": raw_layout(layout), "accessibility": raw_accessibility([]),
+                        "inspector_window-92": application_inspector(bundle="com.example.settings"),
+                        "inspector_window-80": application_inspector(80, 201, 0, "com.example.reader")},
+                       command_outputs={"inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY",
+                                        "inspector_window-80": "HAR_CAPTURE_INSPECTOR_READY"})
+        directory = capture(hdc, self.output)
+        metadata = self.read_metadata(directory)
+        self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
+        self.assertEqual({window["bundle_name"] for window in metadata["windows"]},
+                         {"com.example.settings", "com.example.reader"})
+        self.assertEqual((directory / "accessibility.json").read_bytes(), raw_accessibility([]))
+        self.assertTrue(all(window["trees"]["accessibility"]["selection"]["kind"] == "window_response"
+                            for window in metadata["windows"]))
+
+    def test_native_inspector_cannot_substitute_another_window_response(self):
+        layout = json.loads(raw_layout())
+        layout["children"] = [layout["children"][0]]
+        hdc = fake_hdc({"layout": raw_layout(layout), "accessibility": raw_accessibility(layout["children"]),
+                        "inspector_window-92": application_inspector(93)}, command_outputs={
+                            "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
+        with self.assertRaisesRegex(CaptureError, "does not match WinId"):
+            capture(hdc, self.output)
+        self.assert_failed_only()
 
     def test_required_stage_failures_never_publish_complete_capture(self):
         for stage in ("screenshot", "layout", "windows", "receive_layout", "accessibility",

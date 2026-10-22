@@ -17,6 +17,7 @@ from har_capture.agent_device import (
     launch_target,
     list_applications,
     parse_applications,
+    read_application,
     read_windows,
 )
 from har_capture.hdc import CaptureError, Hdc
@@ -141,6 +142,65 @@ class AgentDeviceTests(unittest.TestCase):
         self.assertEqual(hdc.run.call_args.args[0], ["shell", "aa", "start", "-b", "com.example.notes",
                                                    "-m", "pc", "-a", "WorkspaceAbility"])
 
+    def test_read_application_dispatch_preserves_multiple_ui_entries_without_launching(self):
+        data = bundle_fixture()
+        ability = data["hapModuleInfos"][0]["abilityInfos"][0]
+        secondary = {**copy.deepcopy(ability), "name": "ReaderAbility", "moduleName": "reader", "skills": []}
+        data["hapModuleInfos"].append({"moduleName": "reader", "abilityInfos": [secondary]})
+        data["hapModuleInfos"][0]["abilityInfos"].extend([
+            {**ability, "name": "DisabledAbility", "enabled": False},
+            {**ability, "name": "HiddenAbility", "visible": False},
+            {**ability, "name": "BackgroundService", "type": 2},
+        ])
+        hdc = Mock(spec=Hdc)
+        hdc.run.return_value = "com.example.notes:\n" + json.dumps(data)
+        response = execute_operation(hdc, {"operation": "read_application", "bundle_name": "com.example.notes"})
+        self.assertEqual(response["operation"], "read_application")
+        result = response["result"]
+        self.assertEqual(result, {"bundle_name": "com.example.notes", "abilities": [
+            {"ability_name": "WorkspaceAbility", "module_name": "pc", "launcher": True},
+            {"ability_name": "ReaderAbility", "module_name": "reader", "launcher": False},
+        ]})
+        hdc.connect.assert_called_once_with()
+        hdc.run.assert_called_once_with(["shell", "bm", "dump", "-n", "com.example.notes"], "bundle_details")
+
+    def test_read_application_marks_only_declared_home_actions_and_entities_as_launchers(self):
+        for skills in ([], [{"actions": ["action.system.home"], "entities": []}],
+                       [{"actions": [], "entities": ["entity.system.home"]}]):
+            data = bundle_fixture()
+            data["hapModuleInfos"][0]["abilityInfos"][0]["skills"] = skills
+            hdc = Mock(spec=Hdc)
+            hdc.run.return_value = "com.example.notes:\n" + json.dumps(data)
+            with self.subTest(skills=skills):
+                result = read_application(hdc, {"bundle_name": "com.example.notes"})
+                self.assertFalse(result["abilities"][0]["launcher"])
+
+    def test_read_application_with_no_visible_ui_does_not_invent_an_entry(self):
+        data = bundle_fixture()
+        data["hapModuleInfos"][0]["abilityInfos"][0]["visible"] = False
+        hdc = Mock(spec=Hdc)
+        hdc.run.return_value = "com.example.notes:\n" + json.dumps(data)
+        self.assertEqual(read_application(hdc, {"bundle_name": "com.example.notes"}),
+                         {"bundle_name": "com.example.notes", "abilities": []})
+
+    def test_read_application_rejects_unproven_bundle_and_missing_skill_metadata(self):
+        data = bundle_fixture()
+        del data["hapModuleInfos"][0]["abilityInfos"][0]["skills"]
+        for output in ("com.example.other:\n" + json.dumps(bundle_fixture()),
+                       "com.example.notes:\n" + json.dumps(data)):
+            hdc = Mock(spec=Hdc)
+            hdc.run.return_value = output
+            with self.subTest(output=output[:60]), self.assertRaises(CaptureError):
+                read_application(hdc, {"bundle_name": "com.example.notes"})
+            self.assertEqual(hdc.run.call_count, 1)
+
+    def test_read_application_invalid_bundle_never_reaches_device_query(self):
+        for bundle in ("", "com.example.notes; touch /data/foo", None):
+            hdc = Mock(spec=Hdc)
+            with self.subTest(bundle=bundle), self.assertRaises(CaptureError):
+                read_application(hdc, {"bundle_name": bundle})
+            hdc.run.assert_not_called()
+
     def test_ambiguous_launcher_requires_explicit_existing_ability(self):
         data = bundle_fixture()
         second = copy.deepcopy(data["hapModuleInfos"][0]["abilityInfos"][0])
@@ -189,7 +249,7 @@ class AgentDeviceTests(unittest.TestCase):
             hdc = Mock(spec=Hdc)
             with patch("har_capture.agent_device.capture", return_value=path) as collector:
                 response = capture_frame(hdc, {"output_dir": temporary})
-            collector.assert_called_once_with(hdc, path, 0)
+            collector.assert_called_once_with(hdc, path, 0, [])
             self.assertEqual(response["windows"], metadata["windows"])
             self.assertEqual(response["metadata_path"], str(path / "metadata.json"))
 

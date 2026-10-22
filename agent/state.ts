@@ -44,6 +44,17 @@ export class RunState {
   /** @brief 读取项目中正在执行的任务。 */
   get task() { return this.config.project.tasks[this.taskIndex]; }
 
+  /** @brief 由配置原始字节和任务配额固定数据集身份，禁止恢复时混入新规则。 */
+  get datasetIdentity() {
+    return { project_sha256: this.config.digests.project, config_sha256: this.config.digests.config,
+      tasks: this.config.project.tasks.map((task) => ({ name: task.name, target_count: task.target_count })) };
+  }
+
+  /** @brief 配额只来自已发布且恢复时重新校验的样本。 */
+  acceptedCount(taskName: string): number {
+    return this.accepted.filter((sample: any) => sample.task_name === taskName).length;
+  }
+
   /** @brief 追加不含截图和密钥的本地执行证据。 */
   event(type: string, data: object): void {
     appendFileSync(path.join(this.directory, 'events.jsonl'),

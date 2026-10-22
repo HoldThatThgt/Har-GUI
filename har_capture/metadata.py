@@ -56,6 +56,8 @@ def parse_window_row(match: re.Match) -> dict:
         "process_id": int(match["pid"]),
         "window_type": int(match["type"]),
         "window_mode": int(match["mode"]),
+        "window_flags": int(match["flag"]),
+        "orientation": int(match["orientation"]),
         "z_order": int(match["z"]),
         "bounding_box": bounding_box([int(match[key]) for key in ("x", "y", "width", "height")]),
         "transform": parse_window_transform(match),
@@ -94,8 +96,8 @@ def load_layout(path: Path) -> dict:
     data = json.loads(path.read_bytes())
     if not isinstance(data, dict) or not isinstance(data.get("attributes"), dict):
         fail("Layout must have an attributes object")
-    if not isinstance(data.get("children"), list) or not data["children"]:
-        fail("Layout does not contain any window trees")
+    if not isinstance(data.get("children"), list):
+        fail("Layout does not contain a window tree array")
     return data
 
 

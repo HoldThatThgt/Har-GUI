@@ -1,6 +1,7 @@
 import type { DeviceAction, ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
 import type { RunState } from './state.js';
+import { safeActionParameters } from './privacy.js';
 
 /** @brief 注册项在 SDK 动作之外声明结果校验和变更语义。 */
 export interface RegisteredTool {
@@ -45,7 +46,8 @@ export class ToolRegistry {
       if (tool.mutates) state.revision += 1;
       const feedback = JSON.stringify(result ?? { completed: true });
       if (context) context.task.planningFeedback = feedback;
-      state.event('action_finished', { name: tool.action.name, parameters, result });
+      state.event('action_finished', { name: tool.action.name,
+        parameters: safeActionParameters(tool.action.name, parameters), result });
       return result;
     } catch (error) {
       const message = String(error);

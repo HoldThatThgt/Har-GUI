@@ -1,6 +1,7 @@
 """验证可视化页面的证据完整性、离线资源和数据嵌入边界。"""
 
 import base64
+import copy
 import hashlib
 import json
 import tempfile
@@ -12,11 +13,14 @@ from unittest.mock import patch
 from har_capture.arkui import count_arkui_nodes, parse_arkui
 from har_capture.collector import capture
 from har_capture.hdc import CaptureError
-from har_capture.visualization import build_viewer, encode_data, latest_capture
+from har_capture.visualization import build_viewer, encode_data, latest_capture, verify_arkui_scope
+from har_capture.sessions import parse_sessions
+from har_capture.privacy import viewer_tree
 from tests.support import (
     FIXTURES, fake_hdc, layout_data, raw_accessibility, raw_arkui, raw_layout, raw_system_arkui,
     system_session_details,
 )
+from tests.test_system_accessibility import application_inspector
 
 
 class EmbeddedDataParser(HTMLParser):
@@ -98,7 +102,7 @@ class VisualizationTests(unittest.TestCase):
         for window in payload["metadata"]["windows"]:
             self.assertEqual(window["trees"]["arkui"]["session"]["window_id"], window["window_id"])
 
-    def test_viewer_embeds_original_evidence_and_window_pointer_associations(self):
+    def test_viewer_embeds_sanitized_structure_with_original_window_associations(self):
         directory = self.new_capture()
         original = {path.relative_to(directory): hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in directory.rglob("*") if path.is_file()}
@@ -108,9 +112,10 @@ class VisualizationTests(unittest.TestCase):
         metadata = json.loads((directory / "metadata.json").read_bytes())
         layout = json.loads((directory / "layout.json").read_bytes())
         self.assertEqual(payload["metadata"], metadata)
-        self.assertEqual(payload["layout"], layout)
+        self.assertEqual(payload["layout"], viewer_tree(layout))
         self.assertEqual(payload["trees"]["accessibility"],
-                         json.loads((directory / "accessibility.json").read_bytes()))
+                         {node["attributes"]["hostWindowId"]: viewer_tree(node)
+                          for node in json.loads((directory / "accessibility.json").read_bytes())})
         self.assertEqual([window["window_id"] for window in metadata["windows"]], [92, 80])
         for window in payload["metadata"]["windows"]:
             index = int(window["layout"]["json_pointer"].removeprefix("/children/"))
@@ -118,15 +123,14 @@ class VisualizationTests(unittest.TestCase):
             self.assertEqual(attrs["hostWindowId"], str(window["window_id"]))
             self.assertEqual(attrs["bundleName"], window["bundle_name"])
             accessibility = window["trees"]["accessibility"]
-            index = int(accessibility["json_pointer"].removeprefix("/"))
-            root = payload["trees"]["accessibility"][index]
+            root = payload["trees"]["accessibility"][str(window["window_id"])]
             self.assertEqual(root["attributes"]["hostWindowId"], str(window["window_id"]))
             self.assertEqual(root["attributes"]["bundleName"], window["bundle_name"])
             arkui = payload["trees"]["arkui"][str(window["window_id"])]
             saved = json.loads((directory / window["trees"]["arkui"]["file"]).read_bytes())
-            self.assertEqual(arkui, saved)
+            self.assertEqual(arkui, viewer_tree(saved))
             self.assertEqual(count_arkui_nodes(arkui), window["trees"]["arkui"]["node_count"])
-            self.assertEqual(arkui["children"][0]["attributes"]["Content"], "原始组件数据")
+            self.assertNotIn("Content", arkui["children"][0]["attributes"])
         prefix, encoded = payload["screenshot"].split(",", 1)
         self.assertEqual(prefix, "data:image/png;base64")
         self.assertEqual(base64.b64decode(encoded), (directory / "screenshot.png").read_bytes())
@@ -153,9 +157,10 @@ class VisualizationTests(unittest.TestCase):
         page = build_viewer(directory)
         html = page.read_text(encoding="utf-8")
         payload = self.embedded_data(page)
-        self.assertEqual(payload["layout"]["children"][0]["attributes"]["text"], text)
-        self.assertEqual(payload["trees"]["accessibility"][0]["attributes"]["text"], text)
-        self.assertEqual(payload["trees"]["arkui"]["92"]["children"][0]["attributes"]["Content"], text)
+        self.assertNotIn("text", payload["layout"]["children"][0]["attributes"])
+        self.assertNotIn("text", payload["trees"]["accessibility"]["80"]["attributes"])
+        self.assertNotIn("Content", payload["trees"]["arkui"]["92"]["children"][0]["attributes"])
+        self.assertNotIn(text, json.dumps(payload))
         self.assertNotIn('</script><script>alert("sample")', html)
         self.assertIn('const templateLiteral = "{{DATA}}";', html)
         self.assertEqual(html.count("body { color: red; }"), 1)
@@ -215,12 +220,12 @@ class VisualizationTests(unittest.TestCase):
         self.assertEqual(root["attributes"]["AccessibilityId"], "920")
         self.assertEqual(root["attributes"]["ID"], "192")
         self.assertEqual(count_arkui_nodes(root), 2)
-        self.assertEqual(root["children"][0]["attributes"]["Content"], "原始系统组件数据")
+        self.assertNotIn("Content", root["children"][0]["attributes"])
         self.assertEqual((directory / evidence["response"]["file"]).read_bytes(), raw_system_arkui())
         selection = evidence["origin"]["selection"]
         start, length = selection["byte_offset"], selection["byte_length"]
         self.assertEqual((directory / evidence["raw"]["file"]).read_bytes(), raw_system_arkui()[start:start + length])
-        self.assertEqual(json.loads((directory / evidence["file"]).read_bytes()), root)
+        self.assertEqual(viewer_tree(json.loads((directory / evidence["file"]).read_bytes())), root)
 
     def test_system_original_response_digest_is_verified_before_visualization(self):
         directory = self.new_system_capture()
@@ -314,6 +319,40 @@ class VisualizationTests(unittest.TestCase):
         with self.assertRaises(CaptureError):
             build_viewer(directory)
         self.assertFalse((directory / "viewer.html").exists())
+
+    def test_native_window_visibility_details_do_not_change_arkui_identity(self):
+        layout = layout_data()
+        layout["children"] = layout["children"][:1]
+        directory = self.new_capture({"layout": raw_layout(layout),
+                                      "accessibility": raw_accessibility(layout["children"]),
+                                      "inspector_window-92": application_inspector()}, command_outputs={
+            "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY\n"})
+        original = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+        payload = self.embedded_data(build_viewer(directory))
+        window = next(item for item in payload["metadata"]["windows"] if item["window_id"] == 92)
+        self.assertIn("visibility_state", window["trees"]["arkui"]["session"])
+        self.assertEqual(payload["trees"]["accessibility"]["92"]["attributes"]["hostWindowId"], "92")
+        self.assertIn("92", payload["trees"]["arkui"])
+        for path, data in original.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_each_session_identity_field_remains_strict_with_visibility_details(self):
+        directory = self.new_capture()
+        metadata = json.loads((directory / "metadata.json").read_bytes())
+        window = metadata["windows"][0]
+        evidence = window["trees"]["arkui"]
+        evidence["session"].update(is_visible=True, rs_visible=True, buffer_available=True, visibility_state=1)
+        sessions = parse_sessions((directory / "session-details.txt").read_text(encoding="utf-8"))
+        verify_arkui_scope(window, evidence, sessions)
+        for key, value in sessions[window["window_id"]].items():
+            with self.subTest(field=key):
+                changed = copy.deepcopy(evidence)
+                changed["session"][key] = not value if isinstance(value, bool) else value + 1
+                with self.assertRaises(CaptureError):
+                    verify_arkui_scope(window, changed, sessions)
+                del changed["session"][key]
+                with self.assertRaises(CaptureError):
+                    verify_arkui_scope(window, changed, sessions)
 
     def test_display_dimensions_must_match_the_actual_image(self):
         directory = self.new_capture()

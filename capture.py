@@ -2,10 +2,12 @@
 
 import argparse
 import logging
+import tomllib
 from pathlib import Path
 
 from har_capture.collector import capture
 from har_capture.hdc import Hdc
+from har_capture.stability import validate_rules
 
 
 def arguments() -> argparse.Namespace:
@@ -16,6 +18,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--device", help="Connected device serial; required when more than one device is connected")
     parser.add_argument("--display", type=int, default=0, help="Display ID (default: 0)")
     parser.add_argument("--output", type=Path, default=Path("captures"), help="Capture directory (default: captures)")
+    parser.add_argument("--project", type=Path, help="Read declared dataset.stability_regions from project TOML")
     args = parser.parse_args()
     if args.display < 0:
         logging.error("Display ID must be non-negative")
@@ -28,7 +31,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = arguments()
     try:
-        destination = capture(Hdc(args.hdc, args.device), args.output, args.display)
+        project = tomllib.loads(args.project.read_text(encoding="utf-8")) if args.project else {}
+        rules = validate_rules(project.get("dataset", {}).get("stability_regions", []))
+        destination = capture(Hdc(args.hdc, args.device), args.output, args.display, rules)
     except KeyboardInterrupt:
         logging.error("Capture interrupted")
         return 130

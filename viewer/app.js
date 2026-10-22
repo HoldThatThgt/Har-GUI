@@ -20,15 +20,6 @@ function create(tag, className, text) {
   return item;
 }
 
-/** @brief 按原始 JSON Pointer 定位窗口子树，不依赖窗口排序。 */
-function resolvePointer(root, pointer) {
-  return pointer.split("/").slice(1).reduce((node, part) => {
-    const key = part.replace(/~1/g, "/").replace(/~0/g, "~");
-    if (!node || !Object.hasOwn(node, key)) throw new Error(`Invalid layout pointer: ${pointer}`);
-    return node[key];
-  }, root);
-}
-
 /** @brief 将原始控件层级索引为带路径的节点列表。 */
 function indexTree(node, pointer, depth = 0) {
   const entry = { node, pointer, depth };
@@ -90,8 +81,8 @@ function renderSourceNotice() {
   const arkui = state.source === "arkui";
   const reference = state.selected.trees[state.source];
   const note = element("tree-source-note");
-  note.textContent = arkui ? "FrameRect 为局部布局坐标，ArkUI组件不在截图中高亮。"
-    : "显示无障碍接口返回的控件与语义属性。";
+  note.textContent = arkui ? "有已验证 geometry 的节点可高亮整屏坐标；FrameRect 保留局部值。正文不嵌入页面。"
+    : "显示无障碍控件层级、类型和边界；正文仅保存在本地原始树文件中。";
   const scope = element("tree-source-scope");
   scope.hidden = false;
   scope.textContent = `source: ${reference.source}`;
@@ -111,7 +102,7 @@ function renderNotes() {
 /** @brief 为每个窗口绘制边界和包名、层叠顺序标注。 */
 function renderOverlays() {
   const layer = element("window-overlays");
-  state.windows.slice().reverse().forEach((window) => {
+  state.windows.filter((window) => !window.is_system).slice().reverse().forEach((window) => {
     const overlay = create("div", "window-overlay");
     overlay.dataset.windowId = String(window.window_id);
     overlay.style.setProperty("--window-color", window.color);
@@ -176,15 +167,13 @@ function loadSelectedTree() {
   const reference = state.selected.trees[state.source];
   renderSourceNotice();
   state.entries = [];
-  state.rootPointer = state.source === "accessibility" ? reference.json_pointer : "";
-  const root = state.source === "accessibility"
-    ? resolvePointer(state.data.trees.accessibility, reference.json_pointer)
-    : state.data.trees.arkui[String(state.selected.window_id)];
+  state.rootPointer = "";
+  const root = state.data.trees[state.source][String(state.selected.window_id)];
   indexTree(root, state.rootPointer);
   state.expanded = new Set(state.entries.filter((entry) => entry.depth < 4).map((entry) => entry.pointer));
   element("tree-search").value = "";
   element("tree-search").placeholder = state.source === "arkui"
-    ? "搜索 tag、ID、AccessibilityId 或原始属性" : "搜索 text、id、type";
+    ? "搜索 tag、ID、AccessibilityId 或结构属性" : "搜索 id、type";
   element("tree-container").scrollTop = 0;
   selectNode(state.entries[0]);
 }
@@ -206,7 +195,7 @@ function selectSource(source) {
   for (const name of Object.keys(sourceNames)) {
     element(`source-${name}`).setAttribute("aria-pressed", String(name === source));
   }
-  element("highlight-node").disabled = source === "arkui";
+  element("highlight-node").disabled = false;
   renderHeader();
   selectWindow(state.selected);
 }
@@ -214,14 +203,11 @@ function selectSource(source) {
 /** @brief 获取适合树节点行的控件内容。 */
 function nodeDescription(attributes) {
   if (state.source === "arkui") {
-    if (attributes.textContent) return `“${attributes.textContent}”`;
     if (attributes.ID !== undefined) return `ID ${attributes.ID}`;
     return attributes.AccessibilityId !== undefined ? `AccessibilityId ${attributes.AccessibilityId}` : "";
   }
-  const text = attributes.text || attributes.originalText;
-  if (text) return `“${text}”`;
   if (attributes.id) return `#${attributes.id}`;
-  return attributes.description || "";
+  return "";
 }
 
 /** @brief 创建一个节点行，展开操作和节点选择互不干扰。 */
@@ -247,12 +233,12 @@ function renderTreeRow(entry, search) {
   return row;
 }
 
-/** @brief 判断当前节点是否匹配文本、标识或类型搜索。 */
+/** @brief 仅按公开的结构标识与类型搜索。 */
 function matchesSearch(entry, query) {
   const attrs = entry.node.attributes;
   const fields = state.source === "arkui"
-    ? [attrs.type, attrs.ID, attrs.AccessibilityId, JSON.stringify(attrs), entry.node.raw]
-    : [attrs.text, attrs.originalText, attrs.id, attrs.type];
+    ? [attrs.type, attrs.ID, attrs.AccessibilityId, attrs.compid]
+    : [attrs.id, attrs.type];
   return fields
     .some((value) => String(value ?? "").toLocaleLowerCase().includes(query));
 }
@@ -288,10 +274,11 @@ function toggleNode(entry) {
 /** @brief 展示选中节点的全部原始属性，不过滤空值。 */
 function selectNode(entry) {
   state.node = entry;
-  const fields = Object.entries(entry.node.attributes);
+  const fields = Object.entries({ ...entry.node.attributes,
+    ...(entry.node.geometry ? { geometry: entry.node.geometry } : {}) });
   const preferred = state.source === "arkui"
-    ? ["type", "ID", "AccessibilityId", "FrameRect", "textContent"]
-    : ["type", "text", "id", "bounds", "accessibilityId", "hostWindowId", "displayId"];
+    ? ["type", "ID", "AccessibilityId", "geometry", "FrameRect"]
+    : ["type", "id", "bounds", "hostWindowId", "displayId"];
   const priority = (key) => preferred.includes(key) ? preferred.indexOf(key) : preferred.length;
   fields.sort(([left], [right]) => priority(left) - priority(right));
   const fragment = document.createDocumentFragment();
@@ -310,9 +297,6 @@ function selectNode(entry) {
   }
   element("attributes-title").textContent = `节点属性 · ${entry.node.attributes.type || "(空类型)"}`;
   element("attributes-title").title = "值来自原始控件树；(空) 表示空字符串。";
-  element("raw-node").hidden = state.source !== "arkui";
-  element("raw-node").open = false;
-  element("raw-node-text").textContent = state.source === "arkui" ? entry.node.raw : "";
   element("node-attributes").parentElement.scrollTop = 0;
   renderTree();
   highlightNode();
@@ -322,8 +306,12 @@ function selectNode(entry) {
 function highlightNode() {
   const outline = element("node-outline");
   outline.hidden = true;
-  if (state.source === "arkui") return;
   if (!element("highlight-node").checked || !state.node) return;
+  if (state.source === "arkui") {
+    const geometry = state.node.node.geometry;
+    if (geometry?.status === "verified" && geometry.rendered !== false) positionBox(outline, geometry.screen_bounds);
+    return;
+  }
   if (state.node.pointer === state.rootPointer) return;
   const bounds = state.node.node.attributes.bounds;
   const match = /^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$/.exec(bounds);
@@ -341,7 +329,7 @@ function selectAtPoint(event) {
   const display = state.data.metadata.display;
   const x = (event.clientX - rect.left) / rect.width * display.width;
   const y = (event.clientY - rect.top) / rect.height * display.height;
-  const target = state.windows.find((window) => {
+  const target = state.windows.filter((window) => !window.is_system).find((window) => {
     const box = window.bounding_box;
     return x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height;
   });

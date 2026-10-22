@@ -9,11 +9,18 @@ max_duration_seconds = 900
 [agent]
 llm = "default"
 
+[dataset]
+root = "./output/settings-display/dataset"
+canvas = { width = 3120, height = 2080 }
+
 [tools]
 enabled = ["ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll", "ToggleWindowSize", "Capture"]
 
 [[tasks]]
 name = "settings-display"
+app = "系统设置"
+scene = "显示设置"
+privacy = { enabled = false, reason = "仅系统显示设置，无聊天或邮件正文" }
 instruction = """
 在这台鸿蒙电脑上自主找到系统设置的显示设置页面。
 通过查询已安装应用确认设置应用，必要时启动；根据屏幕找到显示设置入口。

@@ -119,14 +119,15 @@ def collect_accessibility(hdc: Hdc, stage: Path, remote: dict, display_id: int) 
     destination = stage / "accessibility.json"
     hdc.receive(path, destination, "receive_accessibility")
     roots = json.loads(destination.read_bytes())
-    if not isinstance(roots, list) or not roots:
-        fail("Accessibility dump must contain a nonempty window array")
+    if not isinstance(roots, list):
+        fail("Accessibility dump must contain a window array")
     trees = {}
     for index, root in enumerate(roots):
         window_id = int(root["attributes"]["hostWindowId"])
         if window_id in trees:
             fail(f"Duplicate accessibility window: {window_id}")
         trees[window_id] = {"file": "accessibility.json", "json_pointer": f"/{index}",
+                            "artifact": artifact_info(stage, destination),
                             "node_count": count_nodes(root, window_id, display_id),
                             "bundle_name": root["attributes"]["bundleName"], "source": "UITest.dumpLayout.-i"}
     return trees
@@ -169,7 +170,9 @@ def collect_trees(hdc: Hdc, stage: Path, remote: dict, windows: list[dict], disp
     result = {}
     for window in windows:
         window_id = window["window_id"]
-        if window_id not in accessibility or accessibility[window_id]["bundle_name"] != window["bundle_name"]:
+        if window_id not in accessibility:
+            continue
+        if accessibility[window_id]["bundle_name"] != window["bundle_name"]:
             fail(f"Accessibility tree does not match window {window_id}")
         if window_id not in sessions:
             fail(f"Session details are missing window {window_id}")

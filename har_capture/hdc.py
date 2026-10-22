@@ -1,6 +1,7 @@
 """@brief 执行 HDC 命令并保存时间与错误证据。"""
 
 import logging
+import hashlib
 import re
 import subprocess
 import time
@@ -58,9 +59,11 @@ class Hdc:
             record.update(finished_at=utc_now(), duration_seconds=time.perf_counter() - started)
         output = result.stdout.decode("utf-8", errors="replace")
         stderr = result.stderr.decode("utf-8", errors="replace")
-        record.update(return_code=result.returncode, stdout=output, stderr=stderr)
+        record.update(return_code=result.returncode, stdout_bytes=len(result.stdout),
+                      stdout_sha256=hashlib.sha256(result.stdout).hexdigest(),
+                      stderr_bytes=len(result.stderr), stderr_sha256=hashlib.sha256(result.stderr).hexdigest())
         if result.returncode != 0 or re.search(r"(?mi)^\s*\[Fail\]", output + stderr):
-            fail(f"HDC operation {name} failed: {output.strip()} {stderr.strip()}")
+            fail(f"HDC operation {name} failed with return code {result.returncode}; inspect local operation evidence")
         LOGGER.info("%s completed in %.3fs", name, record["duration_seconds"])
         return output
 

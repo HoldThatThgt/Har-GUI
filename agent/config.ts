@@ -6,6 +6,12 @@ import { parse } from 'smol-toml';
 import { z } from 'zod';
 
 const nonEmpty = z.string().regex(/\S/, 'Must not be blank');
+const privacySchema = z.object({
+  enabled: z.boolean(), reason: nonEmpty,
+  regions: z.array(z.object({
+    bundle_name: nonEmpty, resource_id: nonEmpty,
+  }).strict()).min(1).optional(),
+}).strict();
 const profileSchema = z.object({
   provider: z.literal('openai_compatible'),
   base_url: z.string().url().regex(/^https?:\/\//, 'Must use HTTP or HTTPS'),
@@ -33,9 +39,17 @@ const projectSchema = z.object({
     max_duration_seconds: z.number().finite().positive(),
   }).strict(),
   agent: z.object({ llm: nonEmpty }).strict(),
+  dataset: z.object({ root: nonEmpty, canvas: z.object({
+    width: z.number().int().positive(), height: z.number().int().positive(),
+  }).strict(), stability_regions: z.array(z.object({
+    bundle_name: nonEmpty, resource_id: nonEmpty,
+  }).strict()).default([]) }).strict(),
   tools: z.object({ enabled: z.array(nonEmpty).min(1) }).strict(),
   tasks: z.array(z.object({
     name: nonEmpty,
+    app: nonEmpty,
+    scene: nonEmpty,
+    privacy: privacySchema,
     instruction: nonEmpty,
     acceptance: nonEmpty,
     target_count: z.number().int().positive(),
@@ -66,6 +80,8 @@ export interface LoadedConfiguration {
   configPath: string;
   /** 相对项目目录解析后的输出目录。 */
   outputPath: string;
+  /** 正式样本和持久化登记所在目录。 */
+  datasetPath: string;
   /** 两份配置文件的 SHA-256 十六进制摘要。 */
   digests: { project: string; config: string };
 }
@@ -92,7 +108,7 @@ function readDocument(path: string): { raw: Buffer; data: unknown } {
 }
 
 /** @brief 校验配置结构。 @param schema 字段约束。 @param data 解析对象。 @param path 来源文件。 */
-function validate<T>(schema: z.ZodType<T>, data: unknown, path: string): T {
+function validate<T extends z.ZodTypeAny>(schema: T, data: unknown, path: string): z.output<T> {
   const result = schema.safeParse(data);
   if (!result.success) {
     const details = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`);
@@ -148,6 +164,7 @@ export function loadConfiguration(
     projectPath: projectFile,
     configPath: configFile,
     outputPath: resolve(dirname(projectFile), project.run.output),
+    datasetPath: resolve(dirname(projectFile), project.dataset.root),
     digests: {
       project: createHash('sha256').update(projectDocument.raw).digest('hex'),
       config: createHash('sha256').update(configDocument.raw).digest('hex'),

@@ -8,7 +8,8 @@ ArkUI 组件树和窗口信息。两类树分别保存，保留来源与作用�
 
 `project.toml` 描述要找什么页面、怎样变化和收多少样本；`config.toml` 选择视觉模型。
 核心不预置应用或场景名单。当前最小闭环使用 Midscene HarmonyAgent 寻找页面，
-通过已注册工具操作设备，再复用 Python 采集器保存正式样本。
+通过已注册工具操作设备，再采集原始证据、按开关独立打码、验证坐标和完整性，最后发布正式五件套。
+配置字段和后处理、恢复契约见[五件套与后处理接口](docs/delivery-contract.md)。
 
 ```mermaid
 flowchart LR
@@ -16,8 +17,9 @@ flowchart LR
     Model[config.toml 模型部署] --> Agent
     Agent --> Tools[注册工具 查询 输入 窗口操作]
     Tools --> Capture[一张截图 窗口事实 ArkUI 无障碍树]
-    Capture --> Check[文件完整性校验 保存截图上的视觉验收]
-    Check --> Result[通过才计入目标数量 生成可视化]
+    Capture --> Privacy[按配置开关打码或保留原图]
+    Privacy --> Check[覆盖 坐标 稳定性 最终图片视觉验收]
+    Check --> Result[去重 原子发布 五件套 持久化配额]
 ```
 
 需要 Node.js 24、Python 3.11 或更新版本，以及已授权调试连接的鸿蒙设备。
@@ -49,27 +51,100 @@ npm run agent -- run --project project.toml --config config.toml `
 更换应用、页面、数量和视觉验收条件只需修改项目任务；省略 `bundle_names` 即可让 agent 发现应用。
 远程模型会接收导航截图和工具反馈；原始组件树只留在本地。
 
-输出位于 `project.toml` 的 `run.output`（相对项目文件目录）：
+运行证据位于 `run.output`，正式数据位于 `dataset.root`；路径均相对 `project.toml`。
+项目必须声明 `dataset.canvas` 的宽高，每个任务必须声明 `app`、`scene`、`privacy`。
+画布不符时拒收，不拉伸图像。输出结构如下：
 
 ```text
 output/<运行时间>-<随机标识>/
   configuration.json    已冻结的任务、模型名称、凭据变量名和配置摘要，不包含密钥
-  events.jsonl          规划提示、观察摘要、工具参数与结果、窗口变化及验收记录
+  events.jsonl          固定规划阶段、观察摘要、工具参数与结果、窗口变化及验收记录
   model-usage.jsonl     每次模型调用的实际模型、时间、状态和服务商原始用量计数
   run.json              complete / failed 状态、已验收样本和失败原因
   captures/<capture_id>/
-    screenshot.png      唯一正式截图
+    screenshot.png      尚未导出时的唯一截图，按打码开关处理后移动到正式目录
     metadata.json       窗口边界、包名、层叠顺序、采集时间和文件摘要
     accessibility.json  原始无障碍控件树
     arkui/              ArkUI JSON 及原始文本
-    sample.json         任务、页面、变化证据和视觉模型验收结果
+    candidate.json      任务、目标包名和窗口变化证据，用于离线后处理
+    privacy.json        打码区域、规则摘要和图片前后摘要
+    sample.json         任务、页面、变化证据和最终图片验收结果
     model-usage-summary.json  本样本导航、执行和验收的模型用量及可计算的费用估算
     viewer.html         可离线打开的窗口与双树检查页面
+
+dataset/
+  dataset.sqlite3       项目身份、页面与状态签名、验收收据和已发布配额
+  samples/<capture_id>/
+    <App>_<页面ID>_<场景>_<状态序号>_tree.json
+    <App>_<页面ID>_<场景>_<状态序号>_windows_tree.json
+    <App>_<页面ID>_<场景>_<状态序号>_windows_akui.json
+    <App>_<页面ID>_<场景>_<状态序号>_shot.png
+    <App>_<页面ID>_<场景>_<状态序号>_wms.json
 ```
 
-导航截图和 SDK 临时日志在运行结束时清理。样本验收使用已经保存的 `screenshot.png`，
-不会为验收再次抓屏。失败保留证据，退出码为 `1`，不会把失败候选计入配额。
-截图、窗口与双树仍是顺序采集，元数据明确标记非原子快照。
+正式样本目录严格只有五个文件。开启打码时覆盖唯一截图，关闭时保留原图，随后移动到正式目录；
+不另存原图副本或 screenshot-after。
+`_tree.json` 包含系统窗口；两份应用窗口树使用同一窗口集合，包含子窗口和对话框。
+`_wms.json` 保留全部 WMS 窗口、`app_windows` 和六种整屏窗口模式。
+页面编号由目标应用结构签名生成，状态序号在数据库事务中分配，跨运行稳定。
+
+导航截图和 SDK 临时日志在运行结束时清理。视觉验收只读取最终保存的 PNG，不重拍当前设备；
+Midscene 会在内存中将其编码为模型使用的图片表示。验收收据绑定 PNG 摘要。
+失败保留本地证据并返回非零退出码，不增加配额。
+采集前后核对窗口、可见树属性和截图像素；末帧仅临时用于检查后删除。
+原始树保持不变，比较会规范化等价的零模糊值和 Web 子树中易变的运行身份，具体规则随采集记录保存。
+默认整屏像素零差。项目可在 `dataset.stability_regions` 显式声明系统动态叶子，
+只在稳定性比较时忽略其矩形像素及 `text`、`originalText`，原图和树保持原样。
+应用节点、非叶子容器及采集后改变的规则均拒绝；字段与设备标识示例见[交付契约](docs/delivery-contract.md)。
+顺序采集始终标记 `atomic=false`，一致性检查不等于硬件原子快照。
+
+### 采后打码与独立发布
+
+使用设备已有登录状态采集，通过任务 `privacy.enabled` 控制是否打码：
+
+```toml
+[tasks.privacy]
+enabled = false
+reason = "本次保留原始截图"
+# 已核实的 regions 可以保留；改为 true 时启用它们。
+```
+
+`enabled=false` 时不修改图片，最终视觉验收读取原图；`enabled=true` 时按 `regions` 中实际的
+`bundle_name` 和 `resource_id` 打码。字段配置与示例见[交付契约](docs/delivery-contract.md)。
+独立后处理和发布命令如下：
+
+```powershell
+python redact.py selectors PATH_TO_CAPTURE
+python redact.py apply PATH_TO_CAPTURE --project project.toml --task TASK_NAME
+npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
+  --project project.toml --config config.toml --env-file C:\config\deepseek.env
+```
+
+`selectors` 只列资源标识、类型和坐标，不打印正文。`apply` 不调用模型或设备，按同一个开关处理，
+开启时原地覆盖唯一截图、更新摘要并删除含旧图的查看页。`finalize` 在最终图片上调用视觉模型，验证通过后登记五件套，
+无需连接设备；它不导航、不输入，也不读取当前屏幕。直接使用 `capture.py` 得到的采集没有
+`candidate.json`，需要额外传 `--target-bundle` 明确主任务应用。
+选择器读取前核对原始无障碍文件摘要；所有动作的日志与反馈隐藏定位描述，Input 另隐藏输入正文，保留已解析坐标。
+
+开启打码但未提供 `regions` 时，保留原始采集等待核实选择器，不计配额；任何已声明选择器未匹配都停止后处理。
+关闭打码可保留已配置的区域，便于下一次切换开关；所有配置都必须填写 `reason`。
+邮箱示例的视觉验收只判断页面场景，打码要求由开关与确定性检查执行；只切开关即可选择打码或原图。
+自定义 `acceptance` 若明确要求打码，应与开关一致。工具不假设任意应用都暴露正文容器。
+原始双树正文仍保存在本地证据与五件套 JSON 内，用于训练和审计；查看器只复制结构属性。
+导航截图会发送给配置的视觉模型，采后打码不改变已经发生的导航请求。
+
+### 去重与恢复
+
+同一项目再次运行相同命令，会重新核验五文件摘要、配置身份、验收和状态签名，恢复已完成配额。
+新采集始终读取当前设备，不复用旧坐标或旧树。页面签名忽略绝对位置和临时身份；
+状态签名包含窗口模式、边界、相对层级、滚动、编辑及阅读正文的内容摘要，时钟文字和光标闪烁不产生新状态。
+同一状态只计入一个主任务。
+
+首次查询不建立空数据库；首份正式样本发布时才绑定项目与模型配置摘要。
+仅留下待核实选择器的原始采集时，可补充 `regions` 并沿用该目录执行 `finalize`，绑定修改后的配置。
+已有数据集拒绝不同配置，不静默重置配额；独立项目各用独立 `dataset.root`。
+发布先持久化完整收据，再重命名五文件和移动目录；中断恢复重新核验实际字节并幂等登记。
+存活进程的设备锁会拒绝第二个运行，只有确认原进程退出才回收旧锁。
 
 ### 模型用量与费用
 
@@ -90,14 +165,14 @@ output/<运行时间>-<随机标识>/
 
 | 工具 | 当前行为 |
 | --- | --- |
-| `ListApplications`、`LaunchApplication` | 查询安装包、分页筛选；从包元数据解析真实启动入口 |
+| `ListApplications`、`ReadApplication`、`LaunchApplication` | 查询安装包及声明的界面入口；多入口时由 agent 明确选择 |
 | `ReadWindows` | 读取显示器零的 WMS 前台会话、真实包名、窗口边界、进程与层叠顺序 |
 | `Tap`、`DoubleClick`、`Input`、`Scroll`、`DragAndDrop`、`KeyboardPress` | 复用 Midscene 官方 Harmony 输入；项目选择启用 |
 | `ToggleWindowSize` | 按窗口无障碍树中唯一可操作的 `EnhanceMaximizeBtn` 切换最大化或还原，并核验实际 WMS 边界 |
 | `MoveWindow` | 按当前系统标题栏的无障碍身份定位拖动点，用官方 `uinput` 鼠标拖动到指定屏幕像素坐标 |
 | `ResizeWindow` | 拖动浮动窗口右下边框到指定宽高，保持左上角不变，并核验实际尺寸 |
 | `OccludeWindow` | 移动一个真实应用窗口，使其位于目标窗口前方并形成部分矩形交集 |
-| `Capture` | 调用已有采集器；完整性校验和视觉验收通过后计数 |
+| `Capture` | 明确主任务包名，持久化候选；打码、导出、验收、去重和发布通过后计数 |
 
 Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任意 shell 与结束应用工具未公开。
 查询结果通过 SDK 的规划反馈进入下一轮。动作绑定实际规划截图，窗口身份或边界变化时中止；
@@ -117,16 +192,46 @@ Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任�
 不会改用近似尺寸或其他操作。`OccludeWindow` 另外核验前景窗口的 `z_order` 与部分矩形交集，
 返回的 `bounding_box_overlap_fraction` 是几何比例，不是透明度、圆角或真实遮挡像素的测量结果。
 内容缩放仍未实现专用工具。应用范围、任务数量和验收条件均属于项目，
-Issue #8 的应用清单及五文件导出不属于当前最小闭环的固定规则。
+Issue #8 的应用清单不进入核心；五文件命名中的应用与场景由项目提供。
 
 `bundle_names` 限制显式应用启动、窗口操作和原生输入的目标应用。坐标范围检查依据普通应用的
 WMS 矩形与层叠顺序，不将透明系统窗口的矩形当作像素遮挡证明。限定范围时 `Input`、`Scroll`
 必须提供定位目标；按键始终校验实际聚焦应用。运行失败会保存原因，不会绕开范围检查继续执行。
 
-### 已验证的实机闭环
+### 当前五件套实机验证
 
-2026-10-22 使用连接的 Harmony PC 和 `deepseek-flash` 完成三个项目任务，均通过文件完整性和
-保存截图上的视觉验收。实际导航和动作由模型决定，任务文件中没有导航坐标。
+2026-10-22 在加入显式打码开关前的版本中，已登录华为邮箱完成了一份邮件阅读样本。
+Agent 自主读取窗口、还原、最大化并采集，
+随后独立遮盖阅读正文与邮件列表摘要，视觉模型验收最终保存的 PNG，正式目录只有五个文件。
+任务现已更新为 `privacy.enabled` 配置，见 `examples/mail-reading.project.toml`；其中资源标识需在目标设备核实。
+下表数字对应当时的已发布证据，原始证据与配置未改写；新开关关闭时的验证另列在表后。
+
+| 检查 | 本次实测 |
+| --- | --- |
+| 窗口与双树 | 八个实际可见窗口均有双树，其中两个应用窗口进入应用双树文件 |
+| ArkUI 整屏坐标 | 邮箱 338/338、文件管理器 530/530 个 Frame 节点验证通过；非布局节点另行保留 |
+| 截图打码 | 两个正文容器全部像素为不透明黑色；账号名称等其他区域未纳入本次正文规则 |
+| 稳定性 | 原始差异为 WiFi 图标的 78 个像素，落在预先声明的系统叶子内；其他区域零差 |
+| 重复发布与续采 | 再次执行 `finalize` 和 `run` 均完成，零设备动作、零模型调用，数据库仍只有一份样本 |
+| 模型用量 | 六次请求，输入 51928、输出 993 token；按配置单价估算 $0.00491592 |
+
+`privacy.enabled=false` 也已在真机完成五件套发布：项目保留选择器但未执行打码，原图处理前后 SHA-256 相同。
+此次离线验收调用模型一次，按配置估算 $0.000550572；重复 `finalize` 和 `run` 均为零动作、零模型调用，
+数据库仍只有该关闭配置的一份样本。此前一次捕获因邮件文字动态变化被拒收，重新采集后成功，失败证据未改写。
+
+上表开启打码样本的正式采集耗时 27.007 秒，表中费用覆盖该样本的导航、执行和验收，不包含此前开发调试失败。
+该样本初次运行在发布成功后遇到查看页会话校验错误；修复后已生成查看页，原始失败记录没有改写，
+后续恢复运行已完成。页面生成及相关测试通过；本轮浏览器工具禁止打开本地文件，未记录交互验收通过。
+原始证据及五件套共 60 个文件在查看页修复前后摘要一致，真实截图、正文和账号资料不随仓库发布。
+
+上述验证覆盖邮件阅读场景与打码开关，不代表所有应用或整批场景已验证。
+任意路径裁剪在原生输出缺少完整路径时仍会拒收；例如含某些图片缩略图的页面需要单独确认。
+
+### 早期实机验证记录
+
+以下记录来自加入正式五件套检查之前的版本，只证明设备操作和原始采集路径，
+不能作为当前坐标、全窗覆盖和后处理门槛已通过的证据。
+实际导航和动作由模型决定，任务文件中没有导航坐标。
 
 | 任务 | 实际执行 | 保存结果 |
 | --- | --- | --- |
@@ -206,7 +311,7 @@ python visualize.py captures\YOUR_CAPTURE_DIRECTORY
 ```
 
 命令输出本次生成的 `viewer.html` 路径，用浏览器打开即可。
-页面将截图、元数据和控件树保存在一个 HTML 文件中，支持离线查看；可视化文件与原始证据放在同一目录。
+页面将最终截图、元数据和去正文的控件结构保存在一个 HTML 文件中，支持离线查看。
 生成前校验截图和控件树的文件摘要、图片尺寸及采集状态，原始采集文件保持不变。
 ArkUI 组件树直接读取本次保存的 JSON，并核对对应原文；节点位置显示 JSON Pointer，
 悬停可查看原文文件与行号。
@@ -214,8 +319,8 @@ ArkUI 组件树直接读取本次保存的 JSON，并核对对应原文；节点
 - 截图按采集坐标标注每个窗口的 `bounding_box`、`bundle_name` 和 `z_order`。
 - 点击截图中的窗口，查看对应控件树；重叠区域按实际 `z_order` 选择最前方窗口。
 - 窗口列表可以选择被覆盖的窗口；展开控件树、搜索控件、点击节点可查看原始属性。
-- 在“无障碍控件树”和“ArkUI 组件树”之间切换，查看各自的节点数、来源和节点原文。
-- 无障碍节点可按屏幕坐标高亮；ArkUI 的局部 `FrameRect` 保留原值，不直接当作屏幕坐标。
+- 在“无障碍控件树”和“ArkUI 组件树”之间切换，查看各自节点数、来源和结构属性。
+- 无障碍节点可按屏幕坐标高亮；正式 ArkUI 节点用已验证 `geometry.screen_bounds` 高亮。
 - Dock 等系统窗口从完整 ArkUI 输出中按会话节点精确提取，并保留完整原文和字节切片位置。
 - 页面展示采集时间、顺序采集说明和窗口覆盖信息，窗口关联使用原始树的 JSON Pointer。
 
@@ -225,7 +330,7 @@ ArkUI 组件树直接读取本次保存的 JSON，并核对对应原文；节点
 通过 `project.toml` 描述任务、`config.toml` 配置模型，并使用可扩展工具自主寻找页面和采集的方案见
 [HarmonyOS 通用场景自动化采集设计](docs/design/harmony-gui-agent-collection.md)。
 Issue #8 作为首个项目示例，不限定系统的应用或场景范围。已实现范围和运行方式见上面的 agent 采集说明；
-设计中其他工具与导出要求仍是后续工作，不会作为已支持的配置被静默接受。
+其他尚未注册的工具不会作为已支持的配置被静默接受。
 
 交互组织参考 [Appium Inspector 的截图检查方式](https://appium.github.io/appium-inspector/2026.7/session-inspector/screenshot/)，
 使用浏览器原生 DOM 展示当前采集格式。
@@ -235,16 +340,24 @@ Issue #8 作为首个项目示例，不限定系统的应用或场景范围。�
 ```text
 captures/<UTC时间>-<随机标识>/
   screenshot.png        本次唯一截图，用于页面显示和边界标注
-  layout.json           UITest 按可见边界过滤的原始树，用于确定本次窗口
+  layout.json           UITest 按可见边界过滤的原始树；窗口覆盖以 WMS 清单为准
   accessibility.json    UITest -i 的原始无障碍窗口数组
+  accessibility-inspector/  UITest 未覆盖窗口的原生 Inspector 响应和逐窗口 JSON
   arkui/
     window-<ID>.json          从原文解析的完整窗口 ArkUI 组件树
     window-<ID>.txt           原始窗口树文本；系统窗口保存精确的原文字节片段
     window-<ID>-response.txt  窗口管理器响应；系统窗口保留完整 ArkUI 导出
+    window-<ID>-geometry.json 原生 -allInfo 的已变换布局矩形
+  render-tree.txt       RenderService 已挂载渲染树
+  render-detached-tree.txt  RenderService 未挂载渲染树
   windows.txt           WindowManagerService 的完整文本输出
   session-details.txt   窗口会话详情，提供 isSystem 和 uiNodeId 证据
   metadata.json         应用、窗口、时间和文件摘要
-  commands.json         每条 HDC 命令的时间、退出码和输出
+  commands.json         每条 HDC 命令的时间、退出码、输出字节数和摘要，不复制正文
+  closing-layout.json   采集末尾的树，用于复核页面稳定性
+  closing-windows.txt   采集末尾的 WMS 清单
+  consistency.json      前后语义属性与画面检查结果，始终 atomic=false
+  pixel-consistency.json  像素差异证据；末帧图片只暂存用于比较后删除
 ```
 
 ```mermaid
@@ -275,7 +388,7 @@ flowchart LR
 | `windows` 字段 | 含义和来源 |
 | --- | --- |
 | `window_id` | 窗口管理器的 `WinId`，对应控件树的 `hostWindowId` |
-| `bundle_name` | 原始控件树窗口根节点的 `bundleName` |
+| `bundle_name` | UITest 窗口根的 `bundleName` 或对应窗口原生 Inspector 响应中的包名 |
 | `bounding_box` | 窗口管理器的窗口矩形，格式为 `{x, y, width, height}` |
 | `layout_bounding_box` | 原始控件树窗口根节点的 `bounds`，转换为同样的矩形格式 |
 | `z_order` | 窗口管理器的 `ZOrd`；同一显示器上数值越大越靠前 |
@@ -302,6 +415,7 @@ flowchart LR
 | --- | --- | --- |
 | 可见窗口树 | `uitest dumpLayout -d 0 -m false -p <path>`，保留可见边界过滤 | `hostWindowId` |
 | 无障碍控件树 | `uitest dumpLayout -d 0 -i -p <path>`，关闭可见边界过滤，输出窗口数组 | 原始数组中的 `hostWindowId` 和 `bundleName` |
+| 逐窗口无障碍树 | `hidumper -s WindowManagerService -a '-w <ID> -inspector'`，补齐 UITest 未返回的暴露窗口 | 普通应用独立响应的 `WinId`、`Pid`、包名；系统会话精确选取 `WindowScene` 子树 |
 | 普通窗口 ArkUI 组件树 | `hidumper -s WindowManagerService -a '-w <ID> -element'` | 响应的 `WinId`、`Pid`，加会话详情核定范围 |
 | 系统窗口 ArkUI 组件树 | `hidumper -s WindowManagerService -a '-w <ID> -default -all'` | `WindowScene` 的 `AccessibilityId` 对应会话 `uiNodeId`，且 `compid=session<窗口ID>` |
 | 会话详情 | `hidumper -s WindowManagerService -a '-c'` | `PersistentId`、`callingPid`、`isSystem`、`uiNodeId`、`displayId` |
@@ -328,7 +442,9 @@ flowchart LR
 ## ArkUI JSON 节点
 
 每个 `arkui/window-<ID>.json` 保存一个窗口根节点，通过 `children` 递归保存全部后代。
-它可独立用于数据处理；可视化页面也直接使用这个文件。
+它可独立用于数据处理。正式 `_windows_akui.json` 在完整原树上附加经过验证的 `geometry`，
+不改写 `FrameRect`；查看器在交付完成后使用该坐标数据，只嵌入结构属性。
+尚未挂载的节点明确保留 `rendered=false`，不会在截图中画出假的可见边框。
 
 | 节点字段 | 含义 |
 | --- | --- |
@@ -361,12 +477,14 @@ flowchart LR
 
 ## 覆盖范围与失败处理
 
-成功结果要求每一棵已返回的窗口控件树都具有有效的包名、窗口边界和层叠顺序，
+成功结果要求 WMS 判定为暴露的窗口全部取得双树，并具有有效的包名、窗口边界和层叠顺序，
 且所有子节点的窗口、显示器归属一致。缺失必需字段或窗口在关联时已离开前景会报错，
 不会补造包名、矩形或层叠顺序。
 
-UiTest 返回系统对外暴露的控件树。完全遮挡的应用、后台应用，以及没有暴露可访问节点的内容，
-可能不在结果中。因此成功表示本次已返回的数据完整有效，并不保证获得所有运行中应用的完整内部界面。
+UiTest 返回系统对外暴露的控件树，其窗口集合可能不完整。
+工具对 WMS 中仍暴露但未被 UiTest 返回的窗口，按窗口取得原生 Inspector 和 ArkUI；
+同进程的普通应用窗口分别读取，不共用另一窗口的树。后台或完全遮挡窗口必须有明确 WMS 证据才排除。
+无法取得暴露窗口双树时拒收整次采集；不把已返回子集当成完整覆盖。
 `foreground_window_ids_without_tree` 明确列出窗口管理器前景列表中未返回控件树的窗口 ID；
 它可能包含系统窗口或完全被遮挡的应用，并不等于屏幕上确实存在遗漏的可见像素。
 可在 `windows.txt` 中继续核对这些窗口；其中 `ZOrd=-1` 是非前景标记，不是实际层叠位置。
@@ -383,22 +501,14 @@ UiTest 返回系统对外暴露的控件树。完全遮挡的应用、后台应�
 
 ```powershell
 python -m unittest discover -s tests -v
+npm run test:agent
+npm run typecheck
 ```
 
-已在连接的 HAD-W32 鸿蒙电脑实测，系统报告 `OpenHarmony-7.0.0.33`、API 26、
-UiTest `7.0.0.1`，主机 HDC `3.2.0b`。设置窗口与 Dock 同屏显示时，
-采集 `20261022T085505.466032Z-bfeae316` 得到以下结果：
-
-| 窗口 | 无障碍节点 | ArkUI 节点 | ArkUI 范围 | z_order |
-| --- | --- | --- | --- | --- |
-| 设置 | 612 | 1664 | 窗口 | 112 |
-| Dock | 211 | 740 | Dock 的 WindowScene 独立子树 | 902 |
-
-本次目录只有一张 `screenshot.png`，命令记录只有一次 `screenCap`。
-83 项自动化测试通过，覆盖单截图配对、JSON 与原文一致性、系统窗口提取、错误归属及页面生成。
-浏览器实测双树切换、中文搜索、节点属性与原文、无障碍节点高亮和截图重叠区域选择；
-Dock 的内部 `SCBSmartDock` 组件可搜索查看。采集是顺序执行的非原子过程。
-这些是当前设备的实测值，不是固定配置。其他系统版本需要提供相同的命令及窗口表字段。
+当前实机为 HAD-W32，系统报告 `OpenHarmony-7.0.0.33`、API 26、UiTest `7.0.0.1`，
+主机 HDC `3.2.0b`。自动化检查覆盖配对导出、正文打码、坐标变换、窗口补齐、最终图片验收、
+重复状态拒绝、发布中断恢复以及配置身份。实机交付结果和已知限制记录在
+[五件套与后处理接口](docs/delivery-contract.md)。其他系统版本需要提供相同的官方证据字段。
 
 ## 官方接口依据
 

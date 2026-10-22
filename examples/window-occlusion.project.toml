@@ -9,6 +9,10 @@ max_duration_seconds = 1200
 [agent]
 llm = "default"
 
+[dataset]
+root = "../output/window-occlusion/dataset"
+canvas = { width = 3120, height = 2080 }
+
 [tools]
 enabled = [
   "ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll",
@@ -17,6 +21,9 @@ enabled = [
 
 [[tasks]]
 name = "settings-display-partial-occlusion"
+app = "系统设置"
+scene = "显示设置"
+privacy = { enabled = false, reason = "系统设置与计算器窗口，无聊天或邮件正文" }
 instruction = """
 首先启动设置应用使它置前，再调用 ReadWindows，确认设置窗口 focused=true 后再继续。
 此时不做页面导航。若设置窗口处于最大化，先还原。使用 ResizeWindow 改为与当前不同的尺寸，

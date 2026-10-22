@@ -128,20 +128,24 @@ class TreeCaptureTests(unittest.TestCase):
         self.assertEqual(trees[92]["node_count"], 1)
         self.assertEqual(self.remote["accessibility"], self.remote["layout"] + "-accessibility.json")
 
-    def test_accessibility_bundle_or_missing_window_cannot_be_attached(self):
+    def test_accessibility_wrong_bundle_cannot_be_attached(self):
         wrong_bundle = [window_node("92", "com.example.other")]
-        missing_window = [window_node("80", "com.example.reader")]
-        for roots in (wrong_bundle, missing_window):
+        hdc = fake_hdc({"accessibility": raw_accessibility(wrong_bundle)})
+        with self.assertRaises(CaptureError):
+            collect_trees(hdc, self.stage, self.remote, [self.window], 0)
+        self.assertNotIn("dump_arkui_92", [record["name"] for record in hdc.records])
+
+    def test_accessibility_missing_windows_remain_for_native_window_collection(self):
+        for roots in ([window_node("80", "com.example.reader")], []):
             with self.subTest(roots=roots), tempfile.TemporaryDirectory() as temporary:
                 hdc = fake_hdc({"accessibility": raw_accessibility(roots)})
-                with self.assertRaises(CaptureError):
-                    collect_trees(hdc, Path(temporary), self.remote, [self.window], 0)
+                self.assertEqual(collect_trees(hdc, Path(temporary), self.remote, [self.window], 0), {})
                 self.assertNotIn("dump_arkui_92", [record["name"] for record in hdc.records])
 
     def test_accessibility_duplicate_windows_and_wrong_descendant_ownership_are_rejected(self):
         wrong_descendant = window_node()
         wrong_descendant["children"] = [window_node("80", "com.example.reader")]
-        cases = ([window_node(), window_node()], [wrong_descendant], [])
+        cases = ([window_node(), window_node()], [wrong_descendant])
         for roots in cases:
             with self.subTest(roots=roots), tempfile.TemporaryDirectory() as temporary:
                 with self.assertRaises(CaptureError):

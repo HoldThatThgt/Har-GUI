@@ -1,0 +1,146 @@
+# 五件套、后处理与恢复的当前接口
+
+原始采集、独立打码、离线视觉验收、去重发布和中断恢复已经接入。
+原生坐标与系统窗口覆盖仍须逐帧通过实机证据验证；功能接入不代表整批采集已经验收。
+在加入显式打码开关前的版本中，已在现有账号的邮件阅读页完成正式五件套、正文打码、
+离线重复发布和恢复运行。新增 `enabled=false` 也已在真机验证原图摘要不变、五件套发布和重复运行不增计数；
+开启与关闭的证据分别保留，不改写历史样本。
+具体测量与限制见 [README 的当前实机验证](../README.md#当前五件套实机验证)。
+
+每份 `project.toml` 必须声明正式数据集位置和画布，以及任务应用名、场景和打码规则：
+
+```toml
+[dataset]
+root = "./output/my-task/dataset"
+canvas = { width = 3120, height = 2080 }
+
+[[tasks]]
+name = "mail-reading"
+app = "华为邮箱"
+scene = "邮件页面"
+instruction = "自主打开已登录邮箱中的一封邮件；只查看，不发送、删除或修改邮件。"
+acceptance = "邮件阅读页面可见，有侧栏与阅读工具栏，不是登录、设置、空白或错误页。"
+target_count = 1
+bundle_names = ["com.huawei.hmos.email"]
+privacy = { enabled = true, reason = "等待在真实页面核实正文容器标识后独立打码" }
+```
+
+`dataset.stability_regions` 可选，省略时为 `[]`：默认比较整屏像素，任何像素变化都会拒收。
+时钟、日期和 WiFi 图标等系统动态叶子若确实需要排除，必须在采集前用包名和资源标识明确声明。
+以下是当前设备观察到的标识示例，应先在目标设备核实；核心没有预置这些标识：
+
+```toml
+[dataset]
+root = "./output/my-task/dataset"
+canvas = { width = 3120, height = 2080 }
+stability_regions = [
+  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_time" },
+  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_date" },
+  { bundle_name = "com.ohos.sceneboard", resource_id = "plugin_image_plugin_wifi_icon" }
+]
+```
+
+每项只接受非空 `bundle_name` 和 `resource_id`。采集器按实际系统窗口与控件树定位，
+拒绝应用节点、非叶子容器和无法确认的选择器。规则只作用于稳定性比较：忽略指定叶子矩形内的像素，
+以及该叶子的 `text`、`originalText`；其他区域与属性继续严格检查。
+保存的截图、原始控件树和正式树不因此改写，规则也不替代截图打码。
+
+采集时的声明保存在 `metadata.stability.rules`，在线验收和离线 `finalize` 都传入项目的同一声明。
+准备五件套时发现规则不一致会直接拒绝，不能在采集后扩大排除范围使旧样本过关。
+规则变更需要重新采集，已有数据集还须遵守配置身份约束；不迁移或改写旧交付。
+
+`privacy.enabled` 是必填布尔开关，`reason` 是必填原因：
+
+| 配置 | 后处理与最终验收 |
+| --- | --- |
+| `enabled=false` | 不改写截图，最终视觉验收使用原图；可以保留 `regions` 供再次启用 |
+| `enabled=true`，省略 `regions` | 保存原始证据后等待核实选择器，不导出、不计配额 |
+| `enabled=true`，提供非空 `regions` | 按全部选择器打码，核验后在最终图片上进行视觉验收 |
+
+只有开启打码时才执行选择器匹配。`regions` 若提供则必须为非空数组；不接受空数组代替待核实状态。
+取得真实控件标识后，可补充如下规则；示例标识不得直接用于实机：
+
+```toml
+privacy = { enabled = true, reason = "覆盖已核实的正文及输入容器", regions = [
+  { bundle_name = "com.huawei.hmos.email", resource_id = "REPLACE_WITH_OBSERVED_BODY_ID" }
+] }
+```
+
+规则匹配本次无障碍树中的 `attributes.id`，采用本次实际屏幕矩形，不复用上一帧坐标。
+所有规则必须匹配并有可见面积；无法提供语义节点的 WebView 不会凭空产生正文标识。
+需要保留原图时，把 `enabled` 改为 `false`，可保留同一组选择器。
+最终视觉验收会收到本次打码开关状态。邮箱示例的 `acceptance` 只判断页面场景，
+打码要求由开关和确定性核验表达，因此切换时不必修改验收描述。
+自定义验收若额外写明“正文必须打码”，应与开关协调，否则原图可能无法通过该自定义断言。
+当前没有自动识别任意应用正文区域的保证，也不把应用无正文标识解释为无需打码。
+
+已有 `capture.py` 可单独采原始证据。以下打码命令不访问设备或模型：
+
+```powershell
+python redact.py selectors PATH_TO_CAPTURE
+python redact.py apply PATH_TO_CAPTURE --project PATH_TO_PROJECT --task TASK_NAME
+```
+
+`selectors` 先核对无障碍原始文件的大小与 SHA-256，再输出包名、窗口、资源标识、类型和矩形，不打印正文。
+`apply` 遵循同一个开关：开启时原地覆盖唯一 PNG，保存区域和前后摘要，移除包含旧图的查看页；
+关闭时记录关闭原因与原图摘要。原始双树留在本地。
+默认 agent 流程在 `Capture` 之后执行同一后处理，再验收最终 PNG，最后登记五件套。
+导航使用设备已有登录状态；导航截图会发送给配置的视觉模型，后处理不会追溯改变既有模型请求。
+动作执行时使用原参数；持久日志与规划反馈隐藏所有动作的定位描述及输入正文，保留已解析坐标。
+
+离线验收与发布使用已实现的 `finalize` 命令：
+
+```powershell
+npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
+  --project PATH_TO_PROJECT --config config.toml --env-file C:\config\deepseek.env
+```
+
+`finalize` 无需设备连接，只使用保存的原始证据与最终 PNG。它先恢复未完成的文件移动，
+重新核验全部原始文件摘要、双树与几何文件引用、窗口覆盖和首尾一致性，再准备五件套。
+视觉模型只验收按开关处理后的保存图片，关闭时就是原图；验收通过后原子发布，配额才增加。直接由 `capture.py`
+生成的采集没有 `candidate.json`，需要额外传 `--target-bundle` 明确主任务应用。
+已有 agent 候选则继续使用其中的任务、目标应用与窗口变化证据，不重做导航。
+
+```mermaid
+flowchart LR
+    Raw[保存原始采集] --> Prepare[finalize 恢复并核验原始证据]
+    Prepare --> Enabled{privacy.enabled}
+    Enabled -->|false| Original[保留原图]
+    Enabled -->|true| Regions{已有 regions}
+    Regions -->|否| Wait[等待核实选择器 不计配额]
+    Regions -->|是| Redact[按本次控件矩形打码]
+    Original --> Assert[视觉验收最终 PNG]
+    Redact --> Assert
+    Assert --> Publish[去重与原子发布]
+    Publish --> Quota[登记配额]
+```
+
+`dataset_status` 在 `dataset.sqlite3` 不存在时只校验配置身份并返回零计数，不创建目录或绑定空库。
+因此仅完成等待选择器的原始采集时，可以补充 `regions`，沿用同一个 `dataset.root`
+执行 `finalize`。首次进入正式发布时，数据库绑定的是修改后的项目和模型配置摘要及任务配额。
+这不会保留旧配置摘要，也不允许已有数据库接受不同配置。无数据库却存在非空 `samples/` 时明确拒绝。
+
+数据库建立后，同一 `dataset.root` 严格属于同一份项目与模型配置；修改规则、模型配置或配额需使用新目录。
+已打码或已准备的单份采集还受打码和准备收据约束，重试必须使用相同开关与规则，不能换规则重新解释旧收据。
+关闭开关不能恢复已经覆盖的像素；需要原图时应以关闭配置重新采集，不能复用旧打码收据。
+独立项目各用独立 `dataset.root`，例如 `out/<task-name>/dataset`；运行证据可放在
+`out/<task-name>/runs`。系统不限定应用或场景数量，项目层汇总应保留各数据集的独立身份和登记记录。
+
+相同配置重复 `run` 会重新核验正式文件、验收收据和状态签名，再从当前设备观察并补齐缺额。
+相同配置重复 `finalize` 会核验并返回已有发布收据，不重复增加配额，也不再次调用模型验收已发布样本。
+准备与发布中断时，恢复过程验证规则摘要和每个文件的实际字节；无法唯一确认的证据明确失败。
+
+正式 `samples/<capture_id>/` 严格只有 `_tree.json`、`_windows_tree.json`、
+`_windows_akui.json`、`_shot.png`、`_wms.json`；四份 JSON 共享采集标识和画布。
+原始证据、打码收据、用量、查看页不放进这个五文件目录。
+页面编号由目标应用结构签名生成，状态序号在发布事务内分配；文件名及 WMS 内部双树引用一起更新。
+`_tree.json` 包含实际可见系统窗口；两份应用树与 `app_windows` 使用同一组实际可见应用窗口。
+原始双树正文保留在本地证据与五件套 JSON 中；打码作用于截图，查看页仅复制结构属性。
+正式登记前必须通过窗口覆盖、原生 ArkUI 坐标、截图后处理、采集稳定性和最终图片视觉验收。
+截图与树仍为顺序读取，`atomic=false`；前后检查不等于硬件原子快照。
+
+原生坐标采用 `-element`、`-allInfo` 的 `$rect` 和 RenderService 渲染树交叉验证。
+不能证明的变换、裁剪或可见窗口缺树将明确拒收，不填假坐标，也不靠忽略节点凑齐。
+应用 ArkUI 的 `screen_bounds` 是裁剪前的轴对齐组件边界；`clip_chain` 保留矩形及圆角裁剪，
+不表示实际遮挡后的像素区域。离屏渲染节点有明确的 `rendered=false` 证据，非布局节点保留为不适用。
+系统窗口保留独立原生双树；当前正式应用 ArkUI 的坐标校验不等于系统树全部节点均已转换坐标。

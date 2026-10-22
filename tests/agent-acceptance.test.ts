@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { acceptCandidate, verifyCapture, verifyWindowChanges, type WindowChange } from '../agent/acceptance.js';
+import { verifyCapture, verifySavedScreenshot, verifyWindowChanges, type WindowChange } from '../agent/acceptance.js';
 import type { CollectionAgent, CollectionDevice } from '../agent/device.js';
 import type { RunState, WindowInfo } from '../agent/state.js';
 
@@ -43,6 +43,9 @@ function fixture(t: TestContext) {
   for (const [file, bytes] of Object.entries(contents)) writeFileSync(join(directory, file), bytes);
   const metadata: any = {
     capture_id: 'fixture-capture', status: 'complete', display: { id: 0, width: 4, height: 3 },
+    coverage: { status: 'verified', covered_window_ids: [92], excluded_windows: [], unresolved_windows: [] },
+    consistency: { status: 'verified', stable: true, atomic: false, pixels: { status: 'verified' } },
+    window_inventory: [{ window_id: 92 }], foreground_window_ids_without_tree: [],
     files: {
       screenshot: { ...fileInfo('screenshot.png', PNG), width: 4, height: 3 },
       layout: fileInfo('layout.json', contents['layout.json']),
@@ -306,20 +309,78 @@ test('rejects touching, separated and fully covering rectangles as partial occlu
   }
 });
 
-test('accepted samples keep the complete multi-change history and final occlusion evidence', async (t) => {
+test('saved-image acceptance binds the final digest without prematurely counting a sample', async (t) => {
   const f = fixture(t);
   const final = { ...geometry(), ...f.metadata.windows[0] };
   const before = geometry({ bounding_box: { x: 10, y: 10, width: 100, height: 100 } });
   const middle = geometry({ bounding_box: { x: 0, y: 0, width: 100, height: 100 } });
   const history = [changed(before, middle), changed(middle, final)];
-  const state = { candidate: { path: f.directory, window_changes: history }, task: { acceptance: 'Fixture passes' },
+  const state = { candidate: { path: f.directory, window_changes: history },
+    task: { acceptance: 'Fixture passes', privacy: { enabled: false, reason: 'Synthetic fixture' } },
     signal: new AbortController().signal, accepted: [], event() {}, save() {} } as unknown as RunState;
   const device = { frozenScreenshot: undefined } as unknown as CollectionDevice;
   const agent = { aiAssert: async () => ({ pass: true, thought: 'Fixture passed' }) } as unknown as CollectionAgent;
-  const accepted = await acceptCandidate(state, device, agent);
-  assert.deepEqual(accepted.window_changes, history);
-  assert.deepEqual(accepted.window_occlusions, []);
-  assert.deepEqual(JSON.parse(readFileSync(join(f.directory, 'sample.json'), 'utf8')).window_changes, history);
+  const accepted = await verifySavedScreenshot(state, device, agent,
+    { path: f.directory, files: { screenshot: f.metadata.files.screenshot } });
+  assert.equal(accepted.accepted_screenshot_sha256, f.metadata.files.screenshot.sha256);
+  assert.deepEqual(state.candidate.window_changes, history);
   assert.equal(device.frozenScreenshot, undefined);
-  assert.equal(state.accepted.length, 1);
+  assert.equal(state.accepted.length, 0);
+});
+
+test('unmatched visible windows and unstable capture evidence cannot reach saved-image acceptance', async (t) => {
+  for (const mutate of [
+    (metadata: any) => { metadata.foreground_window_ids_without_tree = [99]; },
+    (metadata: any) => { metadata.window_inventory.push({ window_id: 99 }); },
+    (metadata: any) => { metadata.coverage.unresolved_windows.push({ window_id: 99 }); },
+    (metadata: any) => { metadata.consistency.status = 'failed'; },
+    (metadata: any) => { metadata.consistency.pixels.status = 'failed'; },
+  ]) {
+    const f = fixture(t);
+    mutate(f.metadata);
+    f.save();
+    await assert.rejects(verifyCapture(f.directory), /coverage|stability/i);
+  }
+});
+
+test('saved-image acceptance describes the privacy switch without changing custom acceptance', async (t) => {
+  for (const enabled of [false, true]) {
+    await t.test(`redaction ${enabled}`, async (child) => {
+      const f = fixture(child);
+      const acceptance = 'The requested custom fixture state is visible';
+      const state = { candidate: { capture_id: 'frame' }, task: { acceptance, privacy: { enabled,
+        reason: 'Synthetic fixture', regions: [{ bundle_name: 'app.fixture', resource_id: 'mail-body' }] } },
+        signal: new AbortController().signal, event() {} } as unknown as RunState;
+      const calls: any[][] = [];
+      const device = { frozenScreenshot: undefined } as unknown as CollectionDevice;
+      const agent = { aiAssert: async (...args: any[]) => {
+        calls.push(args);
+        assert.equal(device.frozenScreenshot, `data:image/png;base64,${PNG.toString('base64')}`);
+        return { pass: true };
+      } } as unknown as CollectionAgent;
+      await verifySavedScreenshot(state, device, agent,
+        { path: f.directory, files: { screenshot: f.metadata.files.screenshot } });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0][0], acceptance);
+      assert.match(calls[0][2].context, enabled
+        ? /Privacy redaction is enabled;.*postprocessed image/
+        : /Privacy redaction is disabled;.*original image without privacy redaction/);
+      assert.match(calls[0][2].context, /Apply the project acceptance statement as provided/);
+      assert.equal(calls[0][2].abortSignal, state.signal);
+      assert.equal(device.frozenScreenshot, undefined);
+    });
+  }
+});
+
+test('saved-image failure clears the frozen screenshot and never increments quota', async (t) => {
+  const f = fixture(t);
+  const state = { candidate: { capture_id: 'frame' },
+    task: { acceptance: 'Must pass', privacy: { enabled: false, reason: 'Synthetic fixture' } },
+    signal: new AbortController().signal, accepted: [], event() {} } as unknown as RunState;
+  const device = { frozenScreenshot: undefined } as unknown as CollectionDevice;
+  const agent = { aiAssert: async () => ({ pass: false, thought: 'Not the requested page' }) } as unknown as CollectionAgent;
+  await assert.rejects(verifySavedScreenshot(state, device, agent,
+    { path: f.directory, files: { screenshot: f.metadata.files.screenshot } }), /Project acceptance failed/);
+  assert.equal(device.frozenScreenshot, undefined);
+  assert.equal(state.accepted.length, 0);
 });

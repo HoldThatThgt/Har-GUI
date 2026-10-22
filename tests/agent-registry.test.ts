@@ -25,13 +25,14 @@ function fixture(t: TestContext, enabled = ['Inspect'], maxActions = 5, duration
       schema_version: 1,
       run: { name: 'isolated-test', output: directory, max_actions: maxActions, max_duration_seconds: duration },
       agent: { llm: 'test' }, tools: { enabled },
+      dataset: { root: directory, canvas: { width: 3120, height: 2080 }, stability_regions: [] },
       tasks: [{ name: 'generic-task', instruction: 'Inspect the fixture', acceptance: 'Fixture is returned',
-        target_count: 1 }],
+        target_count: 1, app: 'Fixture', scene: 'Fixture', privacy: { enabled: false, reason: 'Synthetic fixture' } }],
     },
     profile: { provider: 'openai_compatible', base_url: 'https://model.example.test/v1', model: 'fixture',
       model_family: 'deepseek', api_key_env: 'UNUSED_REGISTRY_TEST_KEY', supports_vision: true },
     projectPath: join(directory, 'project.toml'), configPath: join(directory, 'config.toml'),
-    outputPath: directory, digests: { project: 'fixture-project', config: 'fixture-config' },
+    outputPath: directory, datasetPath: directory, digests: { project: 'fixture-project', config: 'fixture-config' },
   };
   return { state: new RunState(config, directory), directory };
 }

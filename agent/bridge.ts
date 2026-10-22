@@ -14,9 +14,21 @@ export interface DeviceOptions {
 
 /** @brief 运行受限 Python 桥接，错误时保留英文诊断。 */
 export async function bridge(options: DeviceOptions, request: object, signal?: AbortSignal): Promise<any> {
+  return executeBridge(options.python, ['--hdc', options.hdc, '--device', options.serial], request, signal);
+}
+
+/** @brief 离线后处理不传设备参数，不依赖连接设备的存在。 */
+export async function localBridge(python: string, request: object, signal?: AbortSignal): Promise<any> {
+  return executeBridge(python, [], request, signal);
+}
+
+/** @brief 通过标准输入输出执行一次结构化请求，不解释任意 shell 命令。 */
+async function executeBridge(
+  python: string, connection: string[], request: object, signal?: AbortSignal,
+): Promise<any> {
   const script = fileURLToPath(new URL('../agent_device.py', import.meta.url));
   return new Promise((resolve, reject) => {
-    const child = spawn(options.python, [script, '--hdc', options.hdc, '--device', options.serial], {
+    const child = spawn(python, [script, ...connection], {
       cwd: path.dirname(script), windowsHide: true, signal, env: { ...process.env, PYTHONUTF8: '1' },
     });
     let output = '';
