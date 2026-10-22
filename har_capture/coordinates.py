@@ -28,6 +28,12 @@ SOURCES = {
     "arkui_recycle": "https://github.com/openharmony/arkui_ace_engine/blob/"
                      "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
                      "frameworks/core/components_ng/pattern/recycle_view/recycle_dummy_node.h",
+    "scene_window": "https://github.com/openharmony/arkui_ace_engine/blob/"
+                    "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
+                    "frameworks/core/components_ng/pattern/window_scene/scene/window_scene_layout_manager.cpp",
+    "render_envelope": "https://github.com/openharmony/graphic_graphic_2d/blob/"
+                       "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
+                       "rosen/modules/render_service_base/src/common/rs_obj_abs_geometry.cpp",
 }
 
 
@@ -99,8 +105,11 @@ def render_index(text: str) -> dict:
             stack.pop()
         if node_id in nodes:
             raise ValueError("duplicate_render_node_id")
+        parent_id = stack[-1][1] if stack else None
         nodes[node_id] = {"id": node_id, "kind": kind, "line": line,
-                          "parent": stack[-1][1] if stack else None}
+                          "parent": parent_id, "children_count": 0}
+        if parent_id is not None:
+            nodes[parent_id]["children_count"] += 1
         stack.append((depth, node_id))
     if not nodes:
         raise ValueError("missing_render_tree")
@@ -164,35 +173,18 @@ def verify_modifiers(render: dict) -> dict:
     return values
 
 
-def transform_context(root: dict, window: dict, canvas: dict) -> dict:
-    """@brief 根据已验证根和 WMS 建立整屏映射。 @param root 原生根。 @param window 窗口。
-    @param canvas 画布。 @return 映射参数。
-    """
-    rect = native_rect(root["$rect"])
-    box, transform = window["bounding_box"], window["transform"]
-    if any(abs(rect[key] - box[key]) > 0.02 for key in ("width", "height")):
-        raise ValueError("native_root_window_size_mismatch")
-    if window.get("orientation", 0) != 0:
-        raise ValueError("unsupported_window_orientation")
-    if min(canvas["width"], canvas["height"], rect["width"], rect["height"]) <= 0:
-        raise ValueError("invalid_canvas_or_window_size")
-    values = {key: number(str(transform[key])) for key in
-              ("offset_x", "offset_y", "scale_x", "scale_y", "pivot_x", "pivot_y")}
-    if min(values["scale_x"], values["scale_y"]) <= 0:
-        raise ValueError("unsupported_window_scale")
-    return {"root": rect, "box": box, "transform": values, "canvas": canvas}
-
-
 def screen_rect(rect: dict, mapping: dict) -> dict:
-    """@brief 只对原生窗口矩形应用一次 WMS 变换。 @param rect 原生框。 @param mapping 映射。 @return 整屏框。"""
+    """@brief 按已核验 SCB 浮点父链映射窗口局部矩形。 @param rect 原生框。
+    @param mapping 精确映射。 @return 整屏框，系统原生屏幕矩形不再重复缩放。
+    """
+    if mapping["coordinate_space"] == "scene":
+        return dict(rect)
     result = {}
-    root, box, transform = mapping["root"], mapping["box"], mapping["transform"]
-    for axis, dimension in (("x", "width"), ("y", "height")):
-        scale = transform["scale_" + axis]
-        pivot = transform["pivot_" + axis] * box[dimension]
-        result[axis] = box[axis] + transform["offset_" + axis] + pivot * (1 - scale)
-        result[axis] += (rect[axis] - root[axis]) * scale
-        result[dimension] = rect[dimension] * scale
+    for index, (axis, dimension) in enumerate((("x", "width"), ("y", "height"))):
+        scale = mapping["affine"][index + 2]
+        first = mapping["affine"][index] + rect[axis] * scale
+        last = first + rect[dimension] * scale
+        result[axis], result[dimension] = min(first, last), abs(last - first)
     return result
 
 
@@ -220,6 +212,317 @@ def local_projection(node: dict, parent: tuple) -> tuple:
     return (tx, ty, sx, sy, tolerance), rect
 
 
+def scene_projection(node: dict, native: tuple, parent: tuple) -> tuple:
+    """@brief 按完整原生身份和父关系验证一层场景投影。 @param node 原始场景节点。
+    @param native 原生节点及父索引。 @param parent 父标识和轴变换。 @return 标识、变换及可选矩形。
+    """
+    nodes, parents = native
+    parent_id, projection = parent
+    attrs = node["attributes"]
+    tag = attrs["type"].split(",", 1)[0]
+    node_id = node_key(str(attrs["ID"]), tag, parent_id)
+    actual = nodes.get(node_id)
+    if actual is None or actual["$type"] != tag or parents[node_id] != parent_id:
+        raise ValueError("scene_native_identity_or_parent_mismatch:" + node_id)
+    if attrs.get("compid") and actual.get("compid") != attrs["compid"]:
+        raise ValueError("scene_native_component_mismatch:" + node_id)
+    if "FrameRect" not in attrs:
+        if "$rect" in actual:
+            raise ValueError("scene_frame_geometry_missing:" + node_id)
+        return node_id, projection, None
+    if "$rect" not in actual:
+        raise ValueError("scene_native_frame_missing:" + node_id)
+    projection, rect = local_projection(node, projection)
+    observed = native_rect(actual["$rect"])
+    if any(abs(observed[key] - rect[key]) > projection[4] + 0.011 for key in rect):
+        raise ValueError("scene_native_projection_mismatch:" + node_id)
+    return node_id, projection, rect
+
+
+def scene_records(scene: dict) -> dict:
+    """@brief 合成场景祖先及完整会话子树，保留每个真实渲染节点的精确矩形。
+    @param scene 本批已核验来源。 @return 原生索引、轴变换和渲染关联。
+    """
+    native = subtree_index(scene["native"])
+    parent = (None, (0, 0, 1, 1, 0))
+    records, rectangles, directions = {}, {}, {}
+    path = scene["path"]
+    for node in path[:-1]:
+        node_id, projection, rect = scene_projection(node, native, parent)
+        if rect is not None:
+            link = client_render(node)
+            if link["id"] in records:
+                raise ValueError("ambiguous_scene_render_mapping")
+            records[link["id"]] = (node, projection)
+            rectangles[link["id"]] = rect
+            directions[link["id"]] = tuple(math.copysign(1, value) for value in projection[2:4])
+        parent = (node_id, projection)
+    session_parent = parent[1]
+    pending = [(path[-1], parent)]
+    while pending:
+        node, parent = pending.pop()
+        node_id, projection, rect = scene_projection(node, native, parent)
+        if rect is not None:
+            link = client_render(node)
+            if link["id"] in records:
+                raise ValueError("ambiguous_scene_render_mapping")
+            records[link["id"]] = (node, projection)
+            rectangles[link["id"]] = rect
+            directions[link["id"]] = tuple(math.copysign(1, value) for value in projection[2:4])
+        pending.extend((child, (node_id, projection)) for child in node["children"])
+    return {"native": native[0], "parents": native[1], "nodes": records,
+            "rectangles": rectangles, "directions": directions,
+            "parent_projection": session_parent}
+
+
+def printed_number_radius(value: str) -> float:
+    """@brief 读取显式小数文本的舍入半宽，整数文本按精确整数处理。 @param value 原始数值。
+    @return 该打印精度的半宽，不作为几何校验阈值。
+    """
+    mantissa, _, exponent = value.lower().partition("e")
+    if "." not in mantissa:
+        return 0.0
+    return 0.5 * 10 ** (int(exponent or "0") - len(mantissa.split(".", 1)[1]))
+
+
+def component_render_bounds(render: dict, local: list) -> tuple[list | None, bool]:
+    """@brief 区分真实局部矩形和明确无绘制的空叶节点，不把未生效 Bounds 用作屏幕坐标。
+    @param render 已挂载节点。 @param local 原始局部框。 @return 可比较矩形及无绘制状态。
+    """
+    match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
+    if match is None:
+        raise ValueError("render_modifier_evidence_missing")
+    no_draw = (render["children_count"] == 0 and "hasDrawContent: 0," in render["line"]
+               and "hasChildrenDrawContent: 0," in render["line"])
+    if match[1].split() == ["-inf"] * 4 and match[2].split() == ["-inf"] * 4:
+        if local[2:] != [0, 0] or not no_draw:
+            raise ValueError("non_finite_geometry")
+        return None, True
+    bounds = list(map(number, match[1].split()))
+    if len(bounds) != 4:
+        raise ValueError("invalid_render_bounds")
+    if min(bounds[2:] + local[2:]) < 0:
+        same_signs = all((first < 0) == (second < 0) for first, second in zip(bounds[2:], local[2:]))
+        if not no_draw or max(bounds[2:] + local[2:]) > 0 or not same_signs:
+            raise ValueError("invalid_render_bounds")
+    return bounds, no_draw and max(local[2:]) <= 0
+
+
+def verify_render_geometry(render: dict, node: dict) -> bool:
+    """@brief 校验真实 RS 节点与同一原始组件的局部框及变换打印区间。 @param render 渲染节点。
+    @param node 原始组件。 @return 是否为明确无绘制的空叶节点。
+    """
+    attrs = node["attributes"]
+    match = LOCAL_RECT.fullmatch(attrs["PaintRect without transform"])
+    expected = list(map(number, match.groups()))
+    bounds, no_draw = component_render_bounds(render, expected)
+    if bounds is not None and any(abs(a - b) > 0.11 for a, b in zip(bounds, expected, strict=True)):
+        raise ValueError("scene_render_bounds_mismatch:" + render["id"])
+    values = verify_modifiers(render)
+    vectors = (("Scale", attrs.get("scale(x,y)", "1,1")),
+               ("Translate", attrs.get("translate(x,y)", "0,0")),
+               ("Pivot", attrs.get("Center", "x:0.5 y:0.5")))
+    scales = list(map(number, attrs.get("scale(x,y)", "1,1").split(",")))
+    for name, original in vectors:
+        raw = re.findall(NUMBER, original)
+        axes = [index for index in range(2) if name != "Pivot" or scales[index] != 1]
+        entries = values.get(name)
+        if entries is None:
+            expected_default = [1, 1] if name == "Scale" else [0.5, 0.5] if name == "Pivot" else [0, 0]
+            if any(number(raw[index]) != expected_default[index] for index in axes):
+                raise ValueError("scene_render_vector_missing:" + name)
+            continue
+        if len(set(entries)) != 1:
+            raise ValueError("ambiguous_scene_render_vector:" + name)
+        printed = re.findall(NUMBER, entries[0])
+        if len(raw) != 2 or len(printed) != 2:
+            raise ValueError("invalid_scene_render_vector:" + name)
+        for index in axes:
+            first, second = raw[index], printed[index]
+            radius = printed_number_radius(first) + printed_number_radius(second)
+            if abs(number(first) - number(second)) > radius + 1e-12:
+                raise ValueError("scene_render_vector_mismatch:" + name)
+    return no_draw
+
+
+def verify_window_envelope(window: dict, node: dict, screen: dict) -> None:
+    """@brief 将 WMS 整数外包口径与原生两位小数边界交叉验证。 @param window 原始 WMS 窗口。
+    @param node 原始会话节点。 @param screen 独立原生屏幕矩形。
+    """
+    match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
+    local = list(map(number, match.groups()))
+    box, transform = window["bounding_box"], window["transform"]
+    if window.get("orientation", 0) != 0:
+        raise ValueError("unsupported_window_orientation")
+    if min(transform["scale_x"], transform["scale_y"]) <= 0:
+        raise ValueError("unsupported_window_scale")
+    for index, (axis, dimension) in enumerate((("x", "width"), ("y", "height"))):
+        if abs(local[index + 2] - box[dimension]) > 0.02:
+            raise ValueError("scene_window_size_mismatch")
+        # 原生 ToBounds 只打印两位小数；在其明确精度区间内核验整数外包，不能裸 ceil 六位缩放乘积。
+        origins = {math.floor(screen[axis] - 0.005), math.floor(screen[axis] + 0.005)}
+        if box[axis] not in origins:
+            raise ValueError("scene_wms_outer_origin_mismatch:" + axis)
+        edge = screen[axis] + screen[dimension]
+        sizes = {math.ceil(edge - 0.005) - box[axis], math.ceil(edge + 0.005) - box[axis]}
+        projected = box[dimension] * transform["scale_" + axis]
+        if not any(abs(projected - value) <= 0.11 for value in sizes):
+            raise ValueError("scene_wms_outer_scale_mismatch:" + axis)
+
+
+def scene_display(records: dict, ancestors: list, window: dict, canvas: dict) -> tuple[str, str]:
+    """@brief 用精确 DisplayNode 身份关联真实屏幕、显示器和画布。 @param records 场景索引。
+    @param ancestors 实际渲染祖先。 @param window 目标窗口。 @param canvas 画布。 @return 显示器及屏幕标识。
+    """
+    screens = [node for node in ancestors if node["kind"] == "SCREEN_NODE"]
+    displays = [node for node in ancestors if node["kind"] == "LOGICAL_DISPLAY_NODE"]
+    if len(screens) != 1 or len(displays) != 1:
+        raise ValueError("scene_display_identity_missing_or_ambiguous")
+    screen, display = screens[0], displays[0]
+    match = re.search(r"screenId\[(\d+)\]", screen["line"])
+    if match is None or int(match[1]) != window["display_id"] or display["parent"] != screen["id"]:
+        raise ValueError("scene_display_identity_mismatch")
+    record = records["nodes"].get(display["id"])
+    if record is None or record[0]["attributes"]["type"].split(",", 1)[0] != "Screen":
+        raise ValueError("scene_display_node_unmapped")
+    for node in (screen, display):
+        expected = [0, 0, canvas["width"], canvas["height"]]
+        if any(abs(a - b) > 0.11 for a, b in zip(render_bounds(node), expected, strict=True)):
+            raise ValueError("scene_display_canvas_mismatch")
+    values = verify_modifiers(screen)
+    if render_vector(values, "Scale", (1, 1)) != [1, 1] or render_vector(values, "Translate", (0, 0)) != [0, 0]:
+        raise ValueError("unsupported_scene_screen_transform")
+    return display["id"], screen["id"]
+
+
+def verify_omitted_scene_frame(record: tuple, render: dict, detached: dict) -> None:
+    """@brief 省略帧必须有明确未挂载或懒加载证据且局部变换为恒等。 @param record 场景帧。
+    @param render 已挂载索引。 @param detached 未挂载索引。
+    """
+    node, _projection = record
+    link = client_render(node)
+    code = "scene_render_frame_ancestor_missing:" + str(node["attributes"]["ID"])
+    if link["id"] in render or (link["id"] not in detached and not link["lazy"]):
+        raise ValueError(code)
+    local, _rect = local_projection(node, (0, 0, 1, 1, 0))
+    if local[:4] != (0, 0, 1, 1):
+        raise ValueError(code)
+    if link["id"] in detached:
+        # 未挂载节点没有当前生效的 Bounds，不参与投影；仍拒绝与恒等变换冲突的修饰器。
+        values = verify_modifiers(detached[link["id"]])
+        if render_vector(values, "Scale", (1, 1)) != [1, 1]:
+            raise ValueError(code)
+        if render_vector(values, "Translate", (0, 0)) != [0, 0]:
+            raise ValueError(code)
+
+
+def verify_scene_ancestors(records: dict, ancestors: list, render: dict, detached: dict) -> None:
+    """@brief 按实际 RS 顺序核验场景帧身份和原生父链，不只比较祖先集合。 @param records 场景索引。
+    @param ancestors 当前渲染链。 @param render 已挂载索引。 @param detached 未挂载索引。
+    """
+    matched = []
+    frames = {str(item[0]["attributes"]["ID"]): item for item in records["nodes"].values()}
+    for index, item in enumerate(ancestors):
+        if item["kind"] in ("RS_NODE", "SCREEN_NODE"):
+            continue
+        if index == 0 and item["id"] not in records["nodes"]:
+            continue
+        if item["id"] not in records["nodes"]:
+            raise ValueError("unmapped_scene_render_ancestor:" + item["id"])
+        record = records["nodes"][item["id"]]
+        verify_render_geometry(item, record[0])
+        matched.append(str(record[0]["attributes"]["ID"]))
+    for child, expected in zip(matched, matched[1:] + [None]):
+        parent = records["parents"][child]
+        while parent is not None and parent != expected:
+            if parent in frames:
+                verify_omitted_scene_frame(frames[parent], render, detached)
+            parent = records["parents"][parent]
+        if parent != expected:
+            raise ValueError("scene_render_parent_order_mismatch")
+
+
+def scene_window_identity(root: dict, window: dict, scene: dict) -> dict:
+    """@brief 交叉核验系统根、目标会话及显示器归属。 @param root 当前根。
+    @param window 原始窗口。 @param scene 完整场景证据。 @return 目标会话节点。
+    """
+    if not isinstance(scene, dict) or not scene.get("path"):
+        raise ValueError("missing_scene_coordinate_evidence")
+    if type(window.get("is_system")) is not bool:
+        raise ValueError("scene_window_identity_mismatch")
+    if scene["source"]["display_id"] != window["display_id"]:
+        raise ValueError("scene_display_identity_mismatch")
+    node = scene["path"][-1]
+    attrs = node["attributes"]
+    if (attrs["type"].split(",", 1)[0] != "WindowScene" or attrs.get("compid") != f"session{window['window_id']}"
+            or attrs.get("AccessibilityId") != str(window["ui_node_id"])):
+        raise ValueError("scene_session_identity_mismatch")
+    if window["is_system"] and (root["attributes"].get("ID") != attrs["ID"]
+                                or window["process_id"] != scene["source"]["process_id"]):
+        raise ValueError("scene_system_root_identity_mismatch")
+    return node
+
+
+def application_viewport(records: dict, ancestors: list, native_bounds: dict) -> tuple:
+    """@brief 取应用根的实际场景父坐标系，包含会话内子 Surface 的完整变换。 @param records 场景索引。
+    @param ancestors 实际 RS 祖先链。 @param native_bounds 应用原生视口。 @return 渲染标识、节点与完整变换。
+    """
+    for ancestor in ancestors[1:]:
+        record = records["nodes"].get(ancestor["id"])
+        if record is None:
+            continue
+        node, projection = record
+        match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
+        local = list(map(number, match.groups()))
+        if any(abs(local[index + 2] - native_bounds[key]) > 0.02
+               for index, key in enumerate(("width", "height"))):
+            raise ValueError("scene_application_viewport_size_mismatch")
+        return ancestor["id"], node, projection
+    raise ValueError("scene_application_viewport_missing")
+
+
+def scene_mapping(root: dict, window: dict, canvas: dict, evidence: dict) -> dict:
+    """@brief 只按完整 SCB 来源建立精确屏幕映射，不以 WMS 近似值代替。 @param root 当前组件根。
+    @param window 窗口身份。 @param canvas 画布。 @param evidence 原始几何及完整场景来源。 @return 映射及索引。
+    """
+    scene = evidence.get("scene")
+    node = scene_window_identity(root, window, scene)
+    attrs = node["attributes"]
+    records = scene_records(scene)
+    session_id = client_render(node)["id"]
+    render = render_index(evidence["render_tree"])
+    detached = detached_render_index(evidence["render_detached_tree"])
+    ancestors = render_ancestors(client_render(root)["id"], render)
+    if session_id not in {item["id"] for item in ancestors} or render[session_id]["kind"] != "SURFACE_NODE":
+        raise ValueError("scene_render_window_mismatch")
+    names = re.findall(r"nodeName: \[([^\]]*)\]", render[session_id]["line"])
+    if names != [f"session{window['window_id']}"]:
+        raise ValueError("scene_render_session_identity_mismatch")
+    display_id, screen_id = scene_display(records, ancestors, window, canvas)
+    verify_scene_ancestors(records, ancestors, render, detached)
+    observed = native_rect(records["native"][str(attrs["ID"])]["$rect"])
+    verify_window_envelope(window, node, observed)
+    native_root = select_native_root(root, evidence["arkui_geometry"])
+    native_bounds = native_rect(native_root["$rect"])
+    if not window["is_system"] and any(abs(native_bounds[key] - window["bounding_box"][key]) > 0.02
+                                       for key in ("width", "height")):
+        raise ValueError("native_root_window_size_mismatch")
+    projection = records["parent_projection"] if window["is_system"] else (0, 0, 1, 1, 0)
+    viewport_id, viewport_node, affine = ((session_id, node, records["nodes"][session_id][1])
+                                         if window["is_system"]
+                                         else application_viewport(records, ancestors, native_bounds))
+    direction = projection if window["is_system"] else affine
+    mapping = {"affine": affine, "projection": projection, "canvas": canvas,
+               "coordinate_space": "scene" if window["is_system"] else "window",
+               "axis_directions": tuple(math.copysign(1, value) for value in direction[2:4])}
+    source = {"method": "SceneBoard.ArkUI.PaintRectAncestorComposition", "source": scene["source"],
+              "session_node_id": str(attrs["ID"]), "session_render_node_id": session_id,
+              "viewport_node_id": str(viewport_node["attributes"]["ID"]), "viewport_render_node_id": viewport_id,
+              "display_render_node_id": display_id, "screen_render_node_id": screen_id,
+              "coordinate_space": mapping["coordinate_space"]}
+    return {**records, "mapping": mapping, "source": source, "render": render, "detached_render": detached}
+
+
 def verify_native_projection(node: dict, context: dict, parent: tuple) -> tuple:
     """@brief 用独立父链验证原生窗口矩形没有跨时刻漂移。 @param node 节点。 @param context 上下文。
     @param parent 父变换。 @return 当前变换。
@@ -245,7 +548,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
     @param mapping 屏幕映射。 @return 节点关联、原生窗口投影和渲染矩形。
     """
     links, rectangles, projections, directions, overlays = {}, {}, {}, {}, set()
-    pending = [(raw, (0, 0, 1, 1, 0), False, None)]
+    pending = [(raw, mapping["projection"], False, None)]
     while pending:
         node, projection, overlay, parent_id = pending.pop()
         attrs = node["attributes"]
@@ -273,7 +576,10 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
         if link["id"] in rectangles:
             raise ValueError("ambiguous_render_geometry_mapping")
         rectangles[link["id"]] = screen_rect(projections[node_id], mapping)
-        directions[link["id"]] = tuple(math.copysign(1, value) for value in projection[2:4])
+        directions[link["id"]] = tuple(math.copysign(1, value) * mapping["axis_directions"][index]
+                                      for index, value in enumerate(projection[2:4]))
+        if mapping["coordinate_space"] == "scene":
+            directions[link["id"]] = tuple(math.copysign(1, value) for value in projection[2:4])
     native_frames = {node_id for node_id, node in native.items() if "$rect" in node}
     raw_frames = set(links) - overlays
     if native_frames != raw_frames:
@@ -352,24 +658,6 @@ def content_clip(render: dict, values: dict, rectangles: dict, directions: dict)
             "mode": "content_and_children"}
 
 
-def bind_window_render_clip(render: dict, context: dict) -> dict:
-    """@brief 按窗口尺寸和原点校核外部 Surface 裁剪。 @param render 外部渲染祖先。
-    @param context 本批上下文。 @return 包含该节点的屏幕矩形索引。
-    """
-    if not any(key in render["line"] for key in ("ClipToBounds[True]", "ClipToFrame[True]", "CustomClipToFrame")):
-        return context["rectangles"]
-    match = re.search(r"Properties: Bounds\[([^\]]+)\]", render["line"])
-    values = list(map(number, match[1].split())) if match else []
-    box = context["mapping"]["box"]
-    if len(values) != 4 or any(abs(values[index + 2] - box[key]) > 0.11
-                               for index, key in enumerate(("width", "height"))):
-        raise ValueError("unmapped_outer_render_clip")
-    if not all(abs(values[index] - box[key]) <= 0.11 for index, key in enumerate(("x", "y"))):
-        if values[:2] != [0, 0]:
-            raise ValueError("outer_render_clip_origin_mismatch")
-    return {**context["rectangles"], render["id"]: context["window_clips"][1]["bounds"]}
-
-
 def frame_clips(link: dict, context: dict, inherited: list) -> list:
     """@brief 使用真实渲染祖先链验证裁剪。 @param link 组件关联。 @param context 本批上下文。
     @param inherited 非独立渲染节点的祖先裁剪。 @return 裁剪链。
@@ -379,7 +667,6 @@ def frame_clips(link: dict, context: dict, inherited: list) -> list:
             return inherited
         raise ValueError("active_render_node_missing:" + link["id"])
     clips = list(context["window_clips"])
-    inside_root = True
     ancestors = render_ancestors(link["id"], context["render"])
     if context["root_render_id"] not in {node["id"] for node in ancestors}:
         raise ValueError("render_node_window_mismatch")
@@ -388,18 +675,12 @@ def frame_clips(link: dict, context: dict, inherited: list) -> list:
         if render["kind"] == "RS_NODE":
             continue
         values = verify_modifiers(render)
-        rectangles = context["rectangles"] if inside_root else bind_window_render_clip(render, context)
-        # 窗口外祖先通过 WMS 正缩放及尺寸校核，窗口内方向来自完整 ArkUI 父链。
-        directions = (context["directions"] if inside_root
-                      else {**context["directions"], render["id"]: (1, 1)})
-        clip = render_clip(render, values, rectangles, directions)
+        clip = render_clip(render, values, context["rectangles"], context["directions"])
         if clip:
             clips.append(clip)
-        custom = content_clip(render, values, rectangles, directions)
+        custom = content_clip(render, values, context["rectangles"], context["directions"])
         if custom:
             clips.append(custom)
-        if render["id"] == context["root_render_id"]:
-            inside_root = False
     return clips
 
 
@@ -431,7 +712,7 @@ def verify_render_directions(ancestors: list, context: dict) -> None:
     """@brief 用实际渲染父链交叉验证反射方向，防止同包围框掩盖方向变化。
     @param ancestors 当前节点至根的渲染链。 @param context 原生坐标证据。
     """
-    direction, inside_root = [1, 1], False
+    direction, inside_root = list(context["mapping"]["axis_directions"]), False
     for render in reversed(ancestors):
         inside_root = inside_root or render["id"] == context["root_render_id"]
         if not inside_root or render["kind"] == "RS_NODE":
@@ -485,28 +766,33 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     """
     node_id = str(node["attributes"].get("ID"))
     native = context["native"].get(node_id, {})
-    bounds = context["rectangles"][context["links"][node_id]["id"]]
+    link = context["links"][node_id]
+    no_draw = False
+    bounds = context["rectangles"][link["id"]]
     if node_id in context["overlays"]:
         verify_overlay_render(node_id, context)
     hidden = native.get("visible") == "false" or native.get("active") == "false"
-    link = context["links"][node_id]
     detached = link["id"] in context["detached_render"]
     if detached:
         clips = []
     else:
         clips = inherited if hidden and link["id"] not in context["render"] else frame_clips(link, context, inherited)
+    if link["id"] in context["render"]:
+        no_draw = verify_render_geometry(context["render"][link["id"]], node)
     clipped = None if detached else bounds
     for clip in clips:
         clipped = intersection(clipped, clip["bounds"])
     return {"status": "verified", "screen_bounds": bounds, "rectangular_clip_bounds": clipped,
             "clip_chain": clips, "clipping_status": "not_applicable" if detached else "verified",
-            "rendered": not (hidden or detached), "native_window_rect": native.get("$rect"),
-            "render_state": "not_rendered" if hidden or detached else "rendered",
-            "render_state_source": "RenderService.allNodeNotOnTree" if detached else "ArkUI_and_RenderService",
+            "rendered": not (hidden or detached or no_draw), "native_window_rect": native.get("$rect"),
+            "render_state": "not_rendered" if hidden or detached or no_draw else "rendered",
+            "render_state_source": ("RenderService.allNodeNotOnTree" if detached else
+                                    "RenderService.no_draw_leaf" if no_draw else "ArkUI_and_RenderService"),
             "source": {"method": "ArkUI.PaintRectAncestorComposition",
                        "commands": ["WindowManagerService.-element", "WindowManagerService.-allInfo",
                                     "RenderService.RSTree", "RenderService.allNodeNotOnTree"], "node_id": node_id,
                        "native_rect_cross_checked": node_id not in context["overlays"],
+                       "window_mapping": context["window_mapping"],
                        "overlay_render_cross_checked": node_id in context["overlays"],
                        "native_traversal_omission": ("UINode.DumpSimplifyTree.excludes_OverlayNode"
                                                      if node_id in context["overlays"] else None),
@@ -529,23 +815,28 @@ def prepare_context(root: dict, window: dict, canvas: dict, evidence: dict) -> d
     """
     native_root = select_native_root(root, evidence["arkui_geometry"])
     native, parents = subtree_index(native_root)
-    mapping = transform_context(native_root, window, canvas)
+    scene = scene_mapping(root, window, canvas, evidence)
+    mapping = scene["mapping"]
     node_evidence = source_nodes(root, native, mapping)
     links = node_evidence["links"]
+    if not window["is_system"] and any(link["id"] in scene["nodes"] for link in links.values()):
+        raise ValueError("scene_application_render_identity_overlap")
     root_id = str(root["attributes"].get("ID"))
     if root_id not in links:
         raise ValueError("root_frame_geometry_missing")
-    render = render_index(evidence["render_tree"])
-    detached = detached_render_index(evidence["render_detached_tree"])
+    render, detached = scene["render"], scene["detached_render"]
     linked_ids = {link["id"] for link in links.values()}
     if linked_ids.intersection(render).intersection(detached):
         raise ValueError("render_attachment_state_changed")
-    window_bounds = screen_rect(mapping["root"], mapping)
+    window_bounds = scene["rectangles"][scene["source"]["session_render_node_id"]]
     return {"native": native, "parents": parents, "mapping": mapping,
             **node_evidence, "render": render, "detached_render": detached,
+            "rectangles": {**scene["rectangles"], **node_evidence["rectangles"]},
+            "directions": {**scene["directions"], **node_evidence["directions"]},
+            "window_mapping": scene["source"],
             "root_render_id": links[root_id]["id"], "window_clips": [
                 {"source": "canvas", "kind": "rectangle", "bounds": {"x": 0, "y": 0, **canvas}},
-                {"source": "WindowManagerService", "kind": "rectangle", "bounds": window_bounds}]}
+                {"source": "SceneBoard.WindowScene", "kind": "rectangle", "bounds": window_bounds}]}
 
 
 def normalize_nodes(root: dict, context: dict) -> tuple[list, dict]:
@@ -553,7 +844,7 @@ def normalize_nodes(root: dict, context: dict) -> tuple[list, dict]:
     @return 错误和计数。
     """
     issues, counts = [], {"frame_nodes": 0, "verified_frame_nodes": 0, "non_layout_nodes": 0}
-    pending = [(root, None, context["window_clips"], (0, 0, 1, 1, 0))]
+    pending = [(root, None, context["window_clips"], context["mapping"]["projection"])]
     while pending:
         node, parent_id, inherited, projection = pending.pop()
         attrs, clips = node["attributes"], inherited

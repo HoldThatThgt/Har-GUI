@@ -50,12 +50,13 @@ class ExportTests(unittest.TestCase):
         self.options = {"app": "示例", "page_id": "page", "scene": "文档页面", "state_id": "state",
                         "canvas": {"width": 8, "height": 6}}
 
-    def normalized(self, evidence, current, canvas):
+    def normalized(self, evidence, current, canvas, scenes):
         return {"window_id": current["window_id"], "bundle_name": current["bundle_name"],
                 "tree": {"attributes": {}, "children": [], "coordinate_validation": {"status": "verified"}}}
 
     def test_export_has_exactly_five_files_and_moves_the_only_image(self):
-        with patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}), \
+                patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
             result = write_delivery(self.directory, self.metadata, self.options)
         delivery = Path(result["path"])
         self.assertEqual(len(list(delivery.iterdir())), 5)
@@ -69,8 +70,10 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(result["checks"], dict.fromkeys(("coverage", "coordinates", "privacy", "consistency"), "pass"))
 
     def test_system_tree_is_in_screen_tree_and_subwindow_is_in_application_trees(self):
-        with patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}) as scene_loader, \
+                patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
             payload = delivery_payloads(self.directory, self.metadata, self.options)
+        scene_loader.assert_called_once_with(self.directory, self.windows)
         self.assertEqual([item["window_id"] for item in payload["tree"]["windows"]], [1, 2, 3])
         for key in ("windows_tree", "windows_akui"):
             self.assertEqual([item["window_id"] for item in payload[key]["windows"]], [1, 2])
@@ -96,8 +99,10 @@ class ExportTests(unittest.TestCase):
         self.metadata["coverage"]["covered_window_ids"] = [1, 3]
         self.metadata["coverage"]["excluded_windows"] = [{"window_id": 2,
                                                             "reason": "render_service_totally_occluded"}]
-        with patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}) as scene_loader, \
+                patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
             payload = delivery_payloads(self.directory, self.metadata, self.options)
+        scene_loader.assert_called_once_with(self.directory, [self.windows[0], self.windows[2]])
         self.assertEqual([window["window_id"] for window in payload["wms"]["app_windows"]], [1])
         self.assertEqual([window["window_id"] for window in payload["tree"]["windows"]], [1, 3])
         self.assertEqual([window["window_id"] for window in payload["windows_tree"]["windows"]], [1])
@@ -135,7 +140,8 @@ class ExportTests(unittest.TestCase):
                 sample_prefix({**self.options, "app": bad})
 
     def test_unavailable_arkui_coordinates_do_not_create_a_delivery(self):
-        with patch("har_capture.export.normalized_arkui", side_effect=CaptureError("Coordinates unverified")):
+        with patch("har_capture.export.load_scene_evidence", return_value={}), \
+                patch("har_capture.export.normalized_arkui", side_effect=CaptureError("Coordinates unverified")):
             with self.assertRaises(CaptureError):
                 write_delivery(self.directory, self.metadata, self.options)
         self.assertFalse((self.directory / "delivery").exists())

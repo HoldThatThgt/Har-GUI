@@ -67,7 +67,15 @@ def verify_tree_references(window: dict, indexed: dict) -> None:
         references = [tree["artifact"]] if kind == "accessibility" else [tree, tree["raw"], tree["response"]]
         if kind == "arkui":
             geometry_keys = ("arkui_geometry", "response", "render_tree", "render_detached_tree")
-            references.extend(tree["coordinate_evidence"][key] for key in geometry_keys)
+            geometry = tree["coordinate_evidence"]
+            references.extend(geometry[key] for key in geometry_keys)
+            sources = geometry.get("scene_sources")
+            if not isinstance(sources, list):
+                fail("Captured window is missing its explicit SceneBoard source list")
+            for source in sources:
+                if not isinstance(source, dict) or not all(key in source for key in ("raw", "arkui_geometry")):
+                    fail("Captured window has an invalid SceneBoard source reference")
+                references.extend(source[key] for key in ("raw", "arkui_geometry"))
         for record in references:
             expected = indexed.get(record["file"])
             if expected is None or any(record[key] != expected[key] for key in ("bytes", "sha256")):

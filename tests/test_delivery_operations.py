@@ -31,7 +31,8 @@ class DeliveryOperationTests(unittest.TestCase):
         self.metadata["capture_id"] = "frame-a"
         atomic_json(evidence / "metadata.json", self.metadata)
         self.prepare_request = {"directory": str(evidence), "privacy": self.policy, "options": self.options}
-        with patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}), \
+                patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
             prepared = operations.prepare_delivery(self.prepare_request)
         self.metadata, manifest = prepared["metadata"], prepared["manifest"]
         self.receipt = json.loads((evidence / "delivery-preparation.json").read_bytes())
@@ -42,7 +43,7 @@ class DeliveryOperationTests(unittest.TestCase):
                                 "directory": str(evidence / "delivery"), "evidence_directory": str(evidence),
                                 "acceptance": acceptance}
 
-    def normalized(self, evidence, window, canvas):
+    def normalized(self, evidence, window, canvas, scenes):
         return {"window_id": window["window_id"], "bundle_name": window["bundle_name"],
                 "tree": json.loads((evidence / window["trees"]["arkui"]["file"]).read_bytes())}
 
@@ -175,7 +176,8 @@ class DeliveryOperationTests(unittest.TestCase):
         atomic_json(self.evidence / "metadata.json", metadata)
         atomic_json(self.evidence / "delivery-preparation.json", {**self.receipt, "status": "started"})
         self.assertFalse((self.evidence / "screenshot.png").exists())
-        with patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}), \
+                patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
             prepared = operations.prepare_delivery(self.prepare_request)
         self.assertEqual(prepared["manifest"]["status"], "complete")
         self.assertEqual(len(list(self.evidence.rglob("*.png"))), 1)

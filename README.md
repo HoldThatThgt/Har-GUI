@@ -472,6 +472,10 @@ flowchart LR
 不改写 `FrameRect`；查看器在交付完成后使用该坐标数据，只嵌入结构属性。
 尚未挂载的节点明确保留 `rendered=false`，不会在截图中画出假的可见边框。
 
+窗口到屏幕的映射使用同批 SceneBoard 浮点父链，WMS 的整数外包与比例只用于交叉核验。
+来源、实际渲染祖先、应用 Surface 和无绘制节点的规则见[精确窗口映射](docs/exact-window-mapping.md)。
+新采集必须包含 `coordinate_evidence.scene_sources`；缺失时拒绝导出，需要重新采集。
+
 | 节点字段 | 含义 |
 | --- | --- |
 | `attributes` | 供查看和搜索的属性；`type` 为原始节点标签，其余字段保留原名称和字符串值 |

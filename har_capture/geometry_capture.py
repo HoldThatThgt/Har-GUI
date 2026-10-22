@@ -1,6 +1,7 @@
 """@brief 采集原生 ArkUI 已变换矩形和 RenderService 裁剪证据。"""
 
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -73,6 +74,44 @@ def collect_render_evidence(hdc: Hdc, stage: Path, remote: dict) -> dict:
     return results
 
 
+def scene_source(stage: Path, window: dict, windows: list[dict], geometry: dict) -> dict:
+    """@brief 关联已采系统完整原文的真实请求窗口与共享几何。 @param stage 目录。
+    @param window 提供原文的系统窗口。 @param windows 同批窗口。 @param geometry 同进程几何。 @return 来源。
+    """
+    raw = window["trees"]["arkui"]["response"]
+    try:
+        text = (stage / raw["file"]).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        fail("Cannot read the existing SceneBoard raw response")
+    ids = re.findall(r"(?m)^WinId:\s*(\d+)\s*$", text)
+    if len(ids) != 1:
+        fail("SceneBoard source requires exactly one response window identity")
+    matches = [item for item in windows if item["window_id"] == int(ids[0])]
+    if len(matches) != 1:
+        fail("SceneBoard source response window is missing or ambiguous")
+    origin = matches[0]
+    if (origin["trees"]["arkui"]["session"]["is_system"] is not True
+            or any(origin[key] != window[key] for key in ("process_id", "display_id"))):
+        fail("SceneBoard source response differs from its system process or display")
+    verify_window_response(text, origin)
+    return {"source_window_id": origin["window_id"], "process_id": origin["process_id"],
+            "display_id": origin["display_id"], "raw": raw, "arkui_geometry": geometry["arkui_geometry"]}
+
+
+def collected_scene_sources(stage: Path, windows: list[dict], geometry: dict) -> list[dict]:
+    """@brief 按系统进程和显示器复用同批既有来源，不增加设备命令。 @param stage 目录。
+    @param windows 本批窗口。 @param geometry 已采几何索引。 @return 去重的完整场景来源。
+    """
+    sources = {}
+    for window in windows:
+        if window["trees"]["arkui"]["session"]["is_system"] is not True:
+            continue
+        key = (window["process_id"], window["display_id"])
+        if key not in sources:
+            sources[key] = scene_source(stage, window, windows, geometry[window["window_id"]])
+    return list(sources.values())
+
+
 def collect_geometry_evidence(hdc: Hdc, stage: Path, remote: dict, windows: list[dict]) -> dict:
     """@brief 复用同一系统进程整树并采集整屏渲染树。 @param hdc 连接。 @param stage 目录。
     @param remote 临时文件登记。 @param windows 本批窗口。 @return 按窗口索引的文件摘要。
@@ -88,6 +127,9 @@ def collect_geometry_evidence(hdc: Hdc, stage: Path, remote: dict, windows: list
         if session.get("is_system"):
             system_processes[key] = results[window["window_id"]]
     render_files = collect_render_evidence(hdc, stage, remote)
-    for item in results.values():
+    sources = collected_scene_sources(stage, windows, results)
+    for window in windows:
+        item = results[window["window_id"]]
         item.update(render_files)
+        item["scene_sources"] = [source for source in sources if source["display_id"] == window["display_id"]]
     return results

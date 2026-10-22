@@ -39,11 +39,12 @@ metadata = json.loads((root / 'metadata.json').read_bytes())
 policy = {'enabled':False,'reason':'Synthetic fixture'}
 options = {'app':'editor','page_id':sys.argv[2] or metadata['capture_id'],'scene':'scene',
            'state_id':metadata['capture_id'],'canvas':{'width':3120,'height':2080},'stability_regions':[]}
-def normalized(directory,window,canvas):
+def normalized(directory,window,canvas,scenes):
     tree = json.loads((directory / window['trees']['arkui']['file']).read_bytes())
     tree['coordinate_validation'] = {'status':'verified'}
     return {'window_id':window['window_id'],'bundle_name':window['bundle_name'],'tree':tree}
-with patch('har_capture.export.normalized_arkui',side_effect=normalized):
+with patch('har_capture.export.load_scene_evidence',return_value={}), \\
+        patch('har_capture.export.normalized_arkui',side_effect=normalized):
     prepare_delivery({'directory':str(root),'privacy':policy,'options':options})
 `;
 

@@ -186,9 +186,10 @@ class StabilityCaptureTests(unittest.TestCase):
                    "privacy": {"enabled": False, "reason": "Synthetic test image"}}
         with self.assertRaisesRegex(CaptureError, "current project rules"):
             prepare_delivery({**request, "options": {**options, "stability_regions": []}})
-        def normalized(evidence, window, canvas):
+        def normalized(evidence, window, canvas, scenes):
             return {"window_id": window["window_id"], "bundle_name": window["bundle_name"], "tree": {}}
-        with patch("har_capture.export.normalized_arkui", side_effect=normalized):
+        with patch("har_capture.export.load_scene_evidence", return_value={}), \
+                patch("har_capture.export.normalized_arkui", side_effect=normalized):
             result = prepare_delivery(request)
         wms = json.loads((directory / "delivery" / result["manifest"]["files"]["wms"]["file"]).read_bytes())
         self.assertEqual(wms["stability"], metadata["stability"])

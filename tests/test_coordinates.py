@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from har_capture.coordinates import normalize_arkui, render_index
 from har_capture.geometry_capture import collect_geometry_evidence, parse_geometry_response
 from har_capture.hdc import CaptureError
+from har_capture.metadata import file_info
 
 
 def component(node_id, tag, local, children=None, properties=None):
@@ -17,6 +18,26 @@ def component(node_id, tag, local, children=None, properties=None):
     attrs.update(properties or {})
     return {"attributes": attrs, "source_attributes": dict(attrs), "children": children or [],
             "source_line": node_id + 1, "raw": f"CanvasNode[{node_id + 100}] child[] lazyLoad[0] nodeState[ACTIVE]"}
+
+
+def scene_fixture():
+    """@brief 构造由屏幕、系统会话原文及原生投影独立证明的窗口映射。"""
+    screen = component(900, "Screen", "RectT (0.00, 0.00) - [3120.00 x 2080.00]")
+    screen["raw"] = "DisplayNode[900] child[] lazyLoad[0] nodeState[ACTIVE]"
+    session = component(901, "WindowScene", "RectT (100.00, 50.00) - [200.00 x 150.00]",
+                        properties={"AccessibilityId": "90", "compid": "session9"})
+    session["raw"] = "SurfaceNode[901] child[] lazyLoad[0] nodeState[ACTIVE]"
+    native = {"$ID": 900, "$type": "Screen", "$rect": "[0.00,0.00],[3120.00,2080.00]", "$children": [
+        {"$ID": 901, "$type": "WindowScene", "compid": "session9", "$rect": "[100.00,50.00],[300.00,200.00]"}]}
+    render = (
+        "| SCREEN_NODE[899], Properties: Bounds[0 0 3120 2080] Frame[0 0 3120 2080], "
+        "screenId[0], OtherModifiers:[]\n"
+        "  | LOGICAL_DISPLAY_NODE[900], Properties: Bounds[0 0 3120 2080] Frame[0 0 3120 2080], "
+        "OtherModifiers:[]\n"
+        "    | SURFACE_NODE[901], Properties: Bounds[100 50 200 150] Frame[100 50 200 150], "
+        "nodeName: [session9], ClipToFrame[True], OtherModifiers:[ClipToFrame:[true]]\n")
+    return {"path": [screen, session], "native": native,
+            "source": {"process_id": 1000, "display_id": 0, "source_window_id": 5}}, render
 
 
 def fixture():
@@ -32,11 +53,15 @@ def fixture():
         "OtherModifiers:[ClipToBounds:[true]]\n"
         "    | CANVAS_NODE[102], Properties: Bounds[5 -10 20 30] Frame[5 -10 20 30], OtherModifiers:[]\n"
     )
-    window = {"window_id": 9, "bounding_box": {"x": 100, "y": 50, "width": 200, "height": 150},
+    scene, outer_render = scene_fixture()
+    render = outer_render + "".join("      " + line for line in render.splitlines(keepends=True))
+    window = {"window_id": 9, "process_id": 1001, "display_id": 0, "ui_node_id": 90, "is_system": False,
+              "bounding_box": {"x": 100, "y": 50, "width": 200, "height": 150},
               "transform": {"offset_x": 0, "offset_y": 0, "scale_x": 1, "scale_y": 1,
                             "pivot_x": 0.5, "pivot_y": 0.5}}
     return root, window, {"width": 3120, "height": 2080}, {
-        "arkui_geometry": native, "render_tree": render, "render_detached_tree": "-- Render Node Not On Tree\n"}
+        "arkui_geometry": native, "render_tree": render, "render_detached_tree": "-- Render Node Not On Tree\n",
+        "scene": scene}
 
 
 def overlay_syntax_fixture():
@@ -61,7 +86,8 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(text["geometry"]["rectangular_clip_bounds"],
                          {"x": 115, "y": 70, "width": 20, "height": 20})
         self.assertEqual(args[0], before)
-        self.assertEqual(text["attributes"]["FrameRect"], before["children"][0]["children"][0]["attributes"]["FrameRect"])
+        original_frame = before["children"][0]["children"][0]["attributes"]["FrameRect"]
+        self.assertEqual(text["attributes"]["FrameRect"], original_frame)
 
     def test_nested_scale_and_pivot_are_checked_against_native_values(self):
         args = fixture()
@@ -76,9 +102,16 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
                          {"x": 70, "y": 85, "width": 40, "height": 15})
 
-    def test_window_scale_translation_and_canvas_clip(self):
+    def test_scene_scale_translation_and_wms_outer_envelope_cross_check(self):
         args = fixture()
-        args[1]["transform"].update(scale_x=1.5, scale_y=0.5, offset_x=10, offset_y=-5)
+        session = args[3]["scene"]["path"][-1]
+        session["attributes"].update({"scale(x,y)": "1.5,0.5", "translate(x,y)": "10,-5"})
+        args[3]["scene"]["native"]["$children"][0]["$rect"] = "[60.00,82.50],[360.00,157.50]"
+        args[1]["bounding_box"].update(x=60, y=82)
+        args[1]["transform"].update(scale_x=1.5, scale_y=76 / 150)
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "OtherModifiers:[ClipToFrame:[true]]",
+            "OtherModifiers:[ClipToFrame:[true], Scale:[x:1.5 y:0.5], Translate:[x:10 y:-5]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["geometry"]["screen_bounds"],
@@ -159,12 +192,20 @@ class CoordinateTests(unittest.TestCase):
 
     def test_system_root_global_origin_is_not_added_twice(self):
         args = fixture()
-        args[0]["attributes"].update(type="WindowScene,0,1000", compid="session9")
-        args[0]["attributes"]["PaintRect without transform"] = "RectT (100.00, 50.00) - [200.00 x 150.00]"
+        args[1].update(is_system=True, process_id=1000)
+        args[0]["attributes"].update(type="WindowScene,0,90", compid="session9", AccessibilityId="90")
+        for key in ("FrameRect", "PaintRect without transform"):
+            args[0]["attributes"][key] = "RectT (100.00, 50.00) - [200.00 x 150.00]"
+        args[0]["raw"] = "SurfaceNode[901] child[] lazyLoad[0] nodeState[ACTIVE]"
         native = args[3]["arkui_geometry"]
         native.update({"$type": "WindowScene", "compid": "session9", "$rect": "[100.00, 50.00],[300.00,200.00]"})
         native["$children"][0]["$rect"] = "[110.00, 70.00],[210.00,150.00]"
         native["$children"][0]["$children"][0]["$rect"] = "[115.00, 60.00],[135.00,90.00]"
+        args[3]["scene"]["path"][-1] = args[0]
+        args[3]["scene"]["native"]["$children"] = [native]
+        args[3]["arkui_geometry"] = args[3]["scene"]["native"]
+        lines = args[3]["render_tree"].splitlines(keepends=True)
+        args[3]["render_tree"] = "".join(lines[:3]) + "".join(line[2:] for line in lines[4:])
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"]["y"], 60)
@@ -200,7 +241,7 @@ class CoordinateTests(unittest.TestCase):
         syntax["children"] = [component(4, "Button", "RectT (2.00, 3.00) - [8.00 x 9.00]",
                                           properties={"Description": "Children", "LastParentId": "3"})]
         args[3]["render_tree"] += (
-            "      | CANVAS_NODE[104], Properties: Bounds[2 3 8 9] Frame[2 3 8 9], OtherModifiers:[]\n")
+            "            | CANVAS_NODE[104], Properties: Bounds[2 3 8 9] Frame[2 3 8 9], OtherModifiers:[]\n")
         result = normalize_arkui(*args)
         leaf = result["children"][0]["children"][0]["children"][0]["children"][0]
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
@@ -248,17 +289,25 @@ class CoordinateTests(unittest.TestCase):
         leaf = args[0]["children"][0]["children"][0]
         leaf["attributes"]["PaintRect without transform"] = "RectT (5.00, -10.00) - [-1.00 x -1.00]"
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[14.00,9.00],[15.00,10.00]"
+        self.assert_failed(args, "invalid_render_bounds")
+        lines = args[3]["render_tree"].splitlines()
+        self.assertIn("CANVAS_NODE[102]", lines[-1])
+        args[3]["render_tree"] = "\n".join(lines[:-1])
+        args[3]["render_detached_tree"] += lines[-1].strip()
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
-        self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
-                         {"x": 114, "y": 59, "width": 1, "height": 1})
+        geometry = result["children"][0]["children"][0]["geometry"]
+        self.assertEqual(geometry["screen_bounds"], {"x": 114, "y": 59, "width": 1, "height": 1})
+        self.assertFalse(geometry["rendered"])
+        self.assertEqual(geometry["render_state"], "not_rendered")
 
     def test_rounded_clip_preserves_corner_geometry_without_claiming_pixel_visibility(self):
         args = fixture()
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "ClipToBounds:[true]", "ClipToBounds:[true], CornerRadius:[x:4.0 y:5.0 z:6.0 w:7.0]")
         result = normalize_arkui(*args)
-        clip = result["children"][0]["geometry"]["clip_chain"][-1]
+        clip = next(item for item in result["children"][0]["geometry"]["clip_chain"]
+                    if item["kind"] == "rounded_rectangle")
         self.assertEqual(clip["kind"], "rounded_rectangle")
         self.assertEqual(clip["corner_radius_local"], [4, 5, 6, 7])
         self.assertNotIn("visible_bounds", result["children"][0]["geometry"])
@@ -343,11 +392,16 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         leaf = result["children"][0]["children"][0]["geometry"]
         self.assertEqual(leaf["rectangular_clip_bounds"], {"x": 117, "y": 70, "width": 18, "height": 20})
-        self.assertEqual(leaf["clip_chain"][-1]["bounds"], {"x": 117, "y": 70, "width": 23, "height": 40})
+        content = next(item for item in leaf["clip_chain"] if "local_bounds_ltrb" in item)
+        self.assertEqual(content["bounds"], {"x": 117, "y": 70, "width": 23, "height": 40})
 
     def test_native_root_size_must_match_window(self):
         args = fixture()
         args[1]["bounding_box"]["width"] = 201
+        for key in ("FrameRect", "PaintRect without transform"):
+            args[3]["scene"]["path"][-1]["attributes"][key] = "RectT (100.00, 50.00) - [201.00 x 150.00]"
+        args[3]["scene"]["native"]["$children"][0]["$rect"] = "[100.00,50.00],[301.00,200.00]"
+        args[3]["render_tree"] = args[3]["render_tree"].replace("100 50 200 150", "100 50 201 150")
         self.assert_failed(args, "root_window_size_mismatch")
 
     def test_native_missing_and_duplicate_ids_are_rejected(self):
@@ -405,6 +459,11 @@ class CoordinateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory)
             (stage / "arkui").mkdir()
+            raw = stage / "arkui" / "system-response.txt"
+            raw.write_text("WinId: 5\nPid: 100\n|-> root childSize:0\n    ID: 0\n", encoding="utf-8")
+            response = {**file_info(raw), "file": str(raw.relative_to(stage))}
+            for window in windows:
+                window["trees"]["arkui"]["response"] = response
             result = collect_geometry_evidence(hdc, stage, {"layout": "/data/local/tmp/probe"}, windows)
             self.assertEqual(result[5]["source_window_id"], 5)
             self.assertEqual(result[7]["source_window_id"], 5)
@@ -412,6 +471,8 @@ class CoordinateTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in hdc.run.call_args_list],
                              ["geometry_5", "render_geometry", "render_detached_geometry"])
             self.assertEqual(result[5]["render_detached_tree"], result[7]["render_detached_tree"])
+            self.assertEqual(result[5]["scene_sources"], result[7]["scene_sources"])
+            self.assertEqual(result[5]["scene_sources"][0]["raw"], response)
 
 
 if __name__ == "__main__":

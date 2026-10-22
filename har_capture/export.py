@@ -9,6 +9,7 @@ from har_capture.metadata import file_info, image_info
 from har_capture.privacy import atomic_json, verify_privacy_receipt
 from har_capture.system_accessibility import read_window_accessibility
 from har_capture.stability import verify_project_rules
+from har_capture.scene_evidence import load_scene_evidence
 
 
 def write_json(path: Path, value: object) -> None:
@@ -81,9 +82,9 @@ def accessibility_windows(evidence: Path, metadata: dict) -> list[dict]:
             if window["window_id"] in visible]
 
 
-def normalized_arkui(evidence: Path, window: dict, canvas: dict) -> dict:
+def normalized_arkui(evidence: Path, window: dict, canvas: dict, scenes: dict) -> dict:
     """@brief 使用官方几何证据恢复 ArkUI 坐标，拒绝未证明的坐标。 @param evidence 证据目录。
-    @param window 窗口。 @param canvas 整屏画布。 @return 已验证的 ArkUI 树。
+    @param window 窗口。 @param canvas 整屏画布。 @param scenes 同批完整场景来源。 @return 已验证的 ArkUI 树。
     """
     from har_capture.coordinates import normalize_arkui
 
@@ -92,7 +93,8 @@ def normalized_arkui(evidence: Path, window: dict, canvas: dict) -> dict:
     geometry = record.get("coordinate_evidence")
     if not geometry:
         fail(f"Missing official ArkUI geometry evidence for window {window['window_id']}")
-    sources = {"arkui_geometry": json.loads((evidence / geometry["arkui_geometry"]["file"]).read_bytes())}
+    sources = {"arkui_geometry": json.loads((evidence / geometry["arkui_geometry"]["file"]).read_bytes()),
+               "scene": scenes[window["window_id"]]}
     for kind in ("render_tree", "render_detached_tree"):
         sources[kind] = (evidence / geometry[kind]["file"]).read_text(encoding="utf-8")
     tree = normalize_arkui(root, window, canvas, sources)
@@ -129,6 +131,7 @@ def delivery_payloads(evidence: Path, metadata: dict, options: dict) -> dict:
     if any(type(window.get("is_system")) is not bool for window in windows):
         fail("Every exported window requires an explicit system-session classification")
     applications = [window for window in windows if not window["is_system"]]
+    scenes = load_scene_evidence(evidence, windows)
     application_ids = {window["window_id"] for window in applications}
     all_accessibility = accessibility_windows(evidence, metadata)
     common = {"capture_id": metadata["capture_id"], "canvas": canvas, "coordinate_system": "screen"}
@@ -145,7 +148,7 @@ def delivery_payloads(evidence: Path, metadata: dict, options: dict) -> dict:
     return {"tree": {**common, "windows": all_accessibility},
             "windows_tree": {**common, "windows": [item for item in all_accessibility
                                                      if item["window_id"] in application_ids]},
-            "windows_akui": {**common, "windows": [normalized_arkui(evidence, window, canvas)
+            "windows_akui": {**common, "windows": [normalized_arkui(evidence, window, canvas, scenes)
                                                      for window in applications]}, "wms": wms}
 
 
