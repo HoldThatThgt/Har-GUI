@@ -33,6 +33,7 @@ flowchart LR
 ```powershell
 npm ci
 python -m pip install -r requirements.txt
+python -m hypium telemetry disable
 Copy-Item config.example.toml config.toml
 npm run agent -- tools
 npm run agent -- validate --project project.toml --config config.toml
@@ -169,7 +170,9 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 | --- | --- |
 | `ListApplications`、`ReadApplication`、`LaunchApplication` | 查询安装包及声明的界面入口；多入口时由 agent 明确选择 |
 | `ReadWindows` | 读取显示器零的 WMS 前台会话、真实包名、窗口边界、进程与层叠顺序 |
-| `Tap`、`DoubleClick`、`Input`、`Scroll`、`DragAndDrop`、`KeyboardPress` | 复用 Midscene 官方 Harmony 输入；项目选择启用 |
+| `Tap`、`DoubleClick`、`Scroll`、`DragAndDrop` | 复用 Midscene 官方 Harmony 输入；项目选择启用 |
+| `Input` | 定位同窗口内的原生输入控件，用官方 Hypium 粘贴或清空，并逐字读回验证 |
+| `KeyboardPress` | 用 Midscene Harmony 的受支持单键作用于当前焦点；不支持组合键 |
 | `ToggleWindowSize` | 按窗口无障碍树中唯一可操作的 `EnhanceMaximizeBtn` 切换最大化或还原，并核验实际 WMS 边界 |
 | `MoveWindow` | 按当前系统标题栏的无障碍身份定位拖动点，用官方 `uinput` 鼠标拖动到指定屏幕像素坐标 |
 | `ResizeWindow` | 拖动浮动窗口右下边框到指定宽高，保持左上角不变，并核验实际尺寸 |
@@ -179,6 +182,19 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任意 shell 与结束应用工具未公开。
 查询结果通过 SDK 的规划反馈进入下一轮。动作绑定实际规划截图，窗口身份或边界变化时中止；
 工具失败不会自动换工具、换模型或重复操作。
+
+`Input` 必须提供 `locate` 和字符串 `value`。`mode` 支持 `replace`（默认覆盖）、
+`append`（在字段末尾追加）和 `clear`（`value` 必须为空字符串）；覆盖和追加也允许显式空字符串。
+不接受旧 `typeOnly` 模式、`inputStrategy` 或 `keyboardTypeDelay`。
+实现使用固定版本的官方 Hypium 与 xdevice 依赖，见 `requirements.txt`；没有保留 CLI 输入分支。
+`verified=true` 只证明控件已提交文本与预期逐字一致，不证明输入法预编辑已清空或网页已提交。
+`Input` 不自动按 Enter；`autoDismissKeyboard` 默认关闭，显式开启时才在读回成功后调用 SDK 关闭键盘。
+观察到预编辑时，先按当前界面取消并重新观察；不能假定一次 Escape、清空或粘贴必定消除预编辑。
+完整输入与浏览器页面加载的证据边界见[浏览器导航与文本输入](docs/browser-navigation.md)。
+
+`KeyboardPress` 接受单个 ASCII 字母、数字或声明的键名，例如 `Enter`、`Escape`、`Backspace`、方向键。
+它不接受 `Control+A`、`Shift+Enter` 等组合，也不能通过连续发送修饰键和字母模拟组合。
+按键作用于当前焦点，需要切换目标时先定位点击；输入文字使用 `Input`。
 
 工具由 `agent/tools.ts` 注册，窗口几何操作位于 `agent/geometry.ts`；
 每个注册项包含标准动作定义、结果 Schema 和是否修改设备的声明。
@@ -197,8 +213,9 @@ Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任�
 Issue #8 的应用清单不进入核心；五文件命名中的应用与场景由项目提供。
 
 `bundle_names` 限制显式应用启动、窗口操作和原生输入的目标应用。坐标范围检查依据普通应用的
-WMS 矩形与层叠顺序，不将透明系统窗口的矩形当作像素遮挡证明。限定范围时 `Input`、`Scroll`
-必须提供定位目标；按键始终校验实际聚焦应用。运行失败会保存原因，不会绕开范围检查继续执行。
+WMS 矩形与层叠顺序，不将透明系统窗口的矩形当作像素遮挡证明。`Input` 始终必须提供定位目标；
+限定范围时 `Scroll` 也必须定位；按键始终校验实际聚焦应用。运行失败会保存原因，
+不会绕开范围检查继续执行。
 
 ### 当前五件套实机验证
 

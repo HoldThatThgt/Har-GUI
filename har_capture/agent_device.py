@@ -11,6 +11,7 @@ from har_capture.sessions import SESSION_BLOCK, parse_sessions, pipe_values
 from har_capture.window_control import window_size_control
 from har_capture.window_title_bar import window_title_bar
 from har_capture.delivery_operations import execute_local
+from har_capture.native_input import input_text
 
 OPERATIONS = {
     "read_windows": {"display_id"},
@@ -20,6 +21,7 @@ OPERATIONS = {
     "capture": {"output_dir", "display_id", "stability_regions"},
     "window_size_control": {"window_id"},
     "window_title_bar": {"window_id"},
+    "input_text": {"x", "y", "value", "mode", "window_id", "bundle_name", "display_id"},
     "dataset_status": {"root", "identity"},
     "prepare_delivery": {"directory", "options", "privacy"},
     "publish_sample": {"root", "identity", "directory", "evidence_directory", "acceptance"},
@@ -284,7 +286,8 @@ def execute_operation(hdc: Hdc | None, request: object) -> dict:
     handlers = {"read_windows": read_windows, "list_applications": list_applications,
                 "read_application": read_application,
                 "launch_application": launch_application, "capture": capture_frame,
-                "window_size_control": window_size_control, "window_title_bar": window_title_bar}
+                "window_size_control": window_size_control, "window_title_bar": window_title_bar,
+                "input_text": input_text}
     if operation != "capture":
         hdc.connect()
     return {"operation": operation, "result": handlers[operation](hdc, request)}

@@ -13,7 +13,8 @@ test('input feedback preserves coordinates without persisting input body', () =>
 test('input feedback omits locator prose while preserving the original execution parameters', () => {
   for (const prompt of ['BODY_SENTINEL', { prompt: 'BODY_SENTINEL', images: [{ url: 'BODY_SENTINEL' }] }]) {
     const input = { value: 'BODY_SENTINEL', mode: 'replace', locate: {
-      prompt, center: [100, 200], rect: { left: 90, top: 180, width: 20, height: 40 },
+      prompt, description: 'BODY_SENTINEL', center: [100, 200],
+      rect: { left: 90, top: 180, width: 20, height: 40 },
     } };
     const original = structuredClone(input);
     const safe = safeActionParameters('Input', input);
@@ -22,6 +23,7 @@ test('input feedback omits locator prose while preserving the original execution
     assert.deepEqual(safe.locate.rect, input.locate.rect);
     assert.equal(safe.mode, input.mode);
     assert.equal(safe.locate.prompt, '[redacted]');
+    assert.equal(safe.locate.description, '[redacted]');
     assert.deepEqual(input, original);
     assert.notEqual(safe.locate, input.locate);
   }

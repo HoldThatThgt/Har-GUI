@@ -4,7 +4,7 @@ export function safeActionParameters(name: string, parameters: any): any {
   if (!parameters || typeof parameters !== 'object') return parameters;
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(parameters)) {
-    result[key] = key === 'prompt' || (name === 'Input' && /value|text|content/i.test(key))
+    result[key] = key === 'prompt' || key === 'description' || (name === 'Input' && /value|text|content/i.test(key))
       ? '[redacted]' : safeActionParameters(name, value);
   }
   return result;

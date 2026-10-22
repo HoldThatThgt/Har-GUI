@@ -1,1 +1,5 @@
 Pillow==12.3.0
+hypium==6.1.0.210
+xdevice==6.0.7.210
+xdevice-ohos==6.1.0.210
+xdevice-devicetest==6.1.0.210

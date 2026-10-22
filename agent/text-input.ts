@@ -21,7 +21,8 @@ const resolvedSchema = z.object({ ...inputFields,
   locate: z.object({ center: z.tuple([z.number().finite(), z.number().finite()]) }).passthrough(),
 }).strict();
 const receiptSchema = z.object({
-  window_id: z.number().int(), mode: z.enum(['replace', 'append', 'clear']), verified: z.literal(true),
+  window_id: z.number().int(), mode: z.enum(['replace', 'append', 'clear']),
+  verified: z.literal(true).describe('Only component text is verified; not IME composition or page submission.'),
   character_count: z.number().int().nonnegative(), text_sha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
@@ -54,7 +55,8 @@ export function registerTextInput(registry: ToolRegistry, getDevice: () => Colle
       description: 'Enter text into a located editable field and verify its full content. '
         + 'Append always adds at the end. Input does not navigate or submit the page; '
         + 'field readback does not prove page submission. If IME preedit is visible, '
-        + 'cancel it with KeyboardPress Escape and observe again before Input.',
+        + 'cancel it with the visible IME control or KeyboardPress Escape when appropriate; '
+        + 'observe again before Input.',
       sample: { value: 'test@example.com', locate: { prompt: 'the email input field' } },
       call: (parameters) => inputText(parameters, getDevice),
     } });
