@@ -18,6 +18,7 @@ def window(window_id=1, bundle="app.test", x=0, width=4, window_type=1, system=F
     return {"window_id": window_id, "bundle_name": bundle, "is_system": system, "window_type": window_type,
             "window_mode": 102, "z_order": window_id, "display_id": 0,
             "bounding_box": {"x": x, "y": 0, "width": width, "height": 6},
+            "screen_bounds": {"x": x, "y": 0, "width": width, "height": 6},
             "transform": {"offset_x": 0, "offset_y": 0, "scale_x": 1, "scale_y": 1},
             "trees": {"accessibility": {"node_count": 1}, "arkui": {"node_count": 1}}}
 

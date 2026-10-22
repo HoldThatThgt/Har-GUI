@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,7 +35,7 @@ def bundle_fixture(bundle="com.example.notes"):
             "hapModuleInfos": [{"moduleName": "pc", "abilityInfos": [ability]}]}
 
 
-def session_fixture():
+def session_fixture(visibility=None):
     """构造与匿名窗口列表对应的系统及应用会话。"""
     header = ("---SessionDetailedInfo---\nSession:\n"
               "callingPid callingUid isSystem reuse lockedState time type isSystemCalling topmost\n"
@@ -48,10 +49,13 @@ def session_fixture():
                    f"Ability:\nunknown|{bundle}|pc|WorkspaceAbility|\n"
                    f"Life: 3|1|0|1|{window_id * 10}|0|1|1|1|0|\nDisplay: 0.5|2|0|-1|0|\n"
                    f"Focus: {int(window_id == 92)}|0|1|1|\n")
+        if visibility is not None and window_id in visibility:
+            rs_visible, state = visibility[window_id]
+            header += f"Visible: {int(rs_visible)}|{state}|\n"
     return header
 
 
-def device_fixture(session=None, system_data=None):
+def device_fixture(session=None, system_data=None, closing_session=None, closing_windows=None):
     """按操作名提供只读设备响应。"""
     hdc = Mock(spec=Hdc)
     data = system_data or bundle_fixture("com.example.sceneboard")
@@ -59,12 +63,21 @@ def device_fixture(session=None, system_data=None):
                "session_details": session or session_fixture(),
                "system_process_identity": "com.example.sceneboard\x00\n",
                "bundle_details": "com.example.sceneboard:\n" + json.dumps(data)}
+    outputs.update(closing_observed_windows=closing_windows or outputs["windows"],
+                   closing_observed_sessions=closing_session or outputs["session_details"])
     hdc.run.side_effect = lambda arguments, name: outputs[name]
     return hdc
 
 
 class AgentDeviceTests(unittest.TestCase):
     """覆盖需要真实证据支持的应用与窗口信息。"""
+
+    def setUp(self):
+        geometry = patch("har_capture.window_geometry.read_window_geometry",
+                         side_effect=lambda _hdc, windows: [{**window, "screen_bounds": dict(window["bounding_box"])}
+                                                           for window in windows])
+        geometry.start()
+        self.addCleanup(geometry.stop)
 
     def test_read_windows_joins_real_geometry_and_proven_system_bundle(self):
         hdc = device_fixture()
@@ -98,6 +111,52 @@ class AgentDeviceTests(unittest.TestCase):
         text = session_fixture().replace("callingBundleName bundleName", "bundleName callingBundleName", 1)
         with self.assertRaises(CaptureError):
             read_windows(device_fixture(session=text), {})
+
+    def test_read_windows_rejects_focus_transform_and_inventory_changes_during_geometry(self):
+        original = (FIXTURES / "windows.txt").read_text(encoding="utf-8")
+        focus = session_fixture().replace("Focus: 1|", "Focus: 0|")
+        scale = original.replace("[ 1       1       0.5     0.5     ]", "[ 0.7     1       0.5     0.5     ]", 1)
+        missing = "\n".join(line for line in original.splitlines() if not line.startswith("ExampleSettings"))
+        for hdc in (device_fixture(closing_session=focus), device_fixture(closing_windows=scale),
+                    device_fixture(closing_windows=missing)):
+            with self.subTest(hdc=hdc), self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                read_windows(hdc, {})
+
+    def test_read_windows_rejects_new_closing_inventory_window_without_session_identity_or_visibility(self):
+        original = (FIXTURES / "windows.txt").read_text(encoding="utf-8")
+        row = next(line for line in original.splitlines() if line.startswith("ExampleSettings"))
+        added, replacements = re.subn(r"\b202\s+92\b", "203 93", row, count=1)
+        self.assertEqual(replacements, 1)
+        added = added.replace("ExampleSettings", "ExampleNewWindow", 1)
+        closing = original.replace("Focus window: 92", added + "\nFocus window: 92")
+        hdc = device_fixture(closing_windows=closing)
+        with self.assertLogs(level="ERROR"), self.assertRaisesRegex(
+                CaptureError, "Closing window inventory has missing session or visibility evidence"):
+            read_windows(hdc, {})
+        self.assertIn("closing_observed_sessions", [call.args[1] for call in hdc.run.call_args_list])
+
+    def test_read_windows_excludes_explicit_rs_invisible_background_window(self):
+        result = read_windows(device_fixture(session=session_fixture({80: (False, 1)})), {})
+        self.assertEqual([window["window_id"] for window in result["windows"]], [9, 92])
+        self.assertEqual(len(result["excluded_windows"]), 1)
+        exclusion = result["excluded_windows"][0]
+        self.assertEqual(exclusion["window_id"], 80)
+        self.assertEqual(exclusion["reason"], "render_service_not_visible")
+        self.assertTrue(exclusion["session"]["is_visible"])
+        self.assertFalse(exclusion["session"]["rs_visible"])
+        self.assertEqual(exclusion["session"]["visibility_state"], 1)
+
+    def test_read_windows_keeps_partially_visible_unfocused_background_window(self):
+        result = read_windows(device_fixture(session=session_fixture({80: (True, 1)})), {})
+        self.assertEqual([window["window_id"] for window in result["windows"]], [9, 92, 80])
+        windows = {window["window_id"]: window for window in result["windows"]}
+        reader = windows[80]
+        self.assertFalse(reader["focused"])
+        self.assertLess(reader["z_order"], windows[92]["z_order"])
+        self.assertTrue(reader["session_visibility"]["is_visible"])
+        self.assertTrue(reader["session_visibility"]["rs_visible"])
+        self.assertEqual(reader["session_visibility"]["visibility_state"], 1)
+        self.assertEqual(result["excluded_windows"], [])
 
     def test_bundle_inventory_keeps_users_and_supports_query_pagination(self):
         hdc = Mock(spec=Hdc)

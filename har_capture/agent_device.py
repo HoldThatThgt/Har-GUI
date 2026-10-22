@@ -12,6 +12,7 @@ from har_capture.window_control import window_size_control
 from har_capture.window_title_bar import window_title_bar
 from har_capture.delivery_operations import execute_local
 from har_capture.native_input import input_text
+from har_capture.capture_checks import session_exclusion, session_visibility
 
 OPERATIONS = {
     "read_windows": {"display_id"},
@@ -157,7 +158,8 @@ def read_windows(hdc: Hdc, request: dict) -> dict:
     inventory = parse_windows(hdc.run(["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"], "windows"))
     text = hdc.run(["shell", "hidumper", "-s", "WindowManagerService", "-a", "-c"], "session_details")
     sessions, identities = parse_sessions(text), session_identities(text)
-    windows, system_bundles = [], {}
+    visibility = session_visibility(text)
+    windows, exclusions, system_bundles = [], [], {}
     for window in inventory.values():
         if window["display_id"] != display_id or window["z_order"] < 0:
             continue
@@ -167,6 +169,10 @@ def read_windows(hdc: Hdc, request: dict) -> dict:
         session, identity = sessions[window_id], identities[window_id]
         if any(window[key] != session[key] for key in ("process_id", "display_id")):
             fail(f"Window identity changed between queries: {window_id}")
+        reason = session_exclusion(visibility[window_id])
+        if reason:
+            exclusions.append({"window_id": window_id, "reason": reason, "session": visibility[window_id]})
+            continue
         if session["is_system"]:
             key = (session["process_id"], identity["calling_uid"])
             if key not in system_bundles:
@@ -175,9 +181,41 @@ def read_windows(hdc: Hdc, request: dict) -> dict:
         else:
             bundle = identifier(identity["session_bundle_name"], "session_bundle_name")
             source = "WindowManagerService.Session.Ability.bundleName"
-        windows.append({**window, **session, **identity, "bundle_name": bundle, "bundle_name_source": source})
+        windows.append({**window, **session, **identity, "bundle_name": bundle, "bundle_name_source": source,
+                        "session_visibility": visibility[window_id]})
+    from har_capture.window_geometry import read_window_geometry
+    windows = read_window_geometry(hdc, windows)
+    verify_window_observation(hdc, windows, display_id)
     return {"started_at": started, "finished_at": utc_now(), "display_id": display_id,
-            "windows": sorted(windows, key=lambda window: window["z_order"], reverse=True)}
+            "windows": sorted(windows, key=lambda window: window["z_order"], reverse=True),
+            "excluded_windows": exclusions}
+
+
+def verify_window_observation(hdc: Hdc, windows: list, display_id: int) -> None:
+    """@brief 精确几何采集后重新核验完整窗口清单、逻辑变换、身份及焦点。 @param hdc 连接。
+    @param windows 采集开始时的窗口事实。 @param display_id 当前显示器。
+    """
+    inventory = parse_windows(hdc.run(["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+                                      "closing_observed_windows"))
+    text = hdc.run(["shell", "hidumper", "-s", "WindowManagerService", "-a", "-c"], "closing_observed_sessions")
+    sessions, identities = parse_sessions(text), session_identities(text)
+    visibility = session_visibility(text)
+    candidates = {key: value for key, value in inventory.items()
+                  if value["display_id"] == display_id and value["z_order"] >= 0}
+    if any(key not in sessions or key not in identities or key not in visibility for key in candidates):
+        fail("Closing window inventory has missing session or visibility evidence")
+    current = {key: value for key, value in inventory.items()
+               if value["display_id"] == display_id and value["z_order"] >= 0
+               and key in visibility and session_exclusion(visibility[key]) is None}
+    if set(current) != {window["window_id"] for window in windows}:
+        fail("Window inventory changed during screen geometry observation")
+    for window in windows:
+        window_id = window["window_id"]
+        expected = {**current[window_id], **sessions.get(window_id, {}), **identities.get(window_id, {})}
+        if (window_id not in sessions or window_id not in identities
+                or window["session_visibility"] != visibility[window_id]
+                or any(window.get(key) != value for key, value in expected.items())):
+            fail("Window identity, focus, or transform changed during screen geometry observation")
 
 
 def list_applications(hdc: Hdc, request: dict) -> dict:

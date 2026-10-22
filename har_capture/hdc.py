@@ -26,6 +26,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def cleanup_remote(hdc: "Hdc", remote: dict) -> dict:
+    """@brief 清理本次生成的设备临时文件。 @param hdc 连接。 @param remote 精确路径。 @return 清理结果。"""
+    try:
+        output = hdc.run(["shell", "rm", "-f", *remote.values(), "&&", "echo", "HAR_CAPTURE_CLEANUP_OK"], "cleanup")
+        if "HAR_CAPTURE_CLEANUP_OK" not in output.splitlines():
+            fail("Device did not confirm temporary file cleanup")
+    except (CaptureError, KeyboardInterrupt) as error:
+        LOGGER.error("Device cleanup failed: %s", error)
+        return {"success": False, "error": str(error), "remote_files": remote}
+    return {"success": True}
+
+
 class Hdc:
     """@brief 管理单个设备连接及本次调用的命令记录。"""
 

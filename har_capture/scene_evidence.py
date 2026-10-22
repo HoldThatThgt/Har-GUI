@@ -163,6 +163,23 @@ def source_path(forest: dict, index: int) -> list[dict]:
     return path
 
 
+def select_window_scene(forests: list[dict], window: dict) -> dict:
+    """@brief 从已核验的同显示器森林唯一选取窗口完整父链。 @param forests 候选来源。
+    @param window 目标窗口。 @return 完整父链、原生几何和真实来源。
+    """
+    matches = []
+    for forest in forests:
+        if forest["source"]["display_id"] != window["display_id"]:
+            fail("SceneBoard window source belongs to another display")
+        index = target_index(forest, window)
+        if index is not None:
+            matches.append((forest, index))
+    if len(matches) != 1:
+        fail(f"Expected one SceneBoard source for window {window['window_id']}; found {len(matches)}")
+    forest, index = matches[0]
+    return {"path": source_path(forest, index), "native": forest["native"], "source": forest["source"]}
+
+
 def load_scene_evidence(directory: Path, windows: list[dict]) -> dict[int, dict]:
     """@brief 每批核验共享来源并为每个窗口选择唯一完整父链。 @param directory 证据目录。
     @param windows 同批窗口。 @return 按窗口索引的路径、完整原生几何与明确来源。
@@ -171,15 +188,7 @@ def load_scene_evidence(directory: Path, windows: list[dict]) -> dict[int, dict]
     cache, sources, result = {}, source_records(windows), {}
     forests = {key: load_source(directory, source, cache) for key, source in sources.items()}
     for window in windows:
-        matches = []
-        for source in window["trees"]["arkui"]["coordinate_evidence"]["scene_sources"]:
-            forest = forests[(source["process_id"], source["display_id"])]
-            index = target_index(forest, window)
-            if index is not None:
-                matches.append((forest, index))
-        if len(matches) != 1:
-            fail(f"Expected one SceneBoard source for window {window['window_id']}; found {len(matches)}")
-        forest, index = matches[0]
-        result[window["window_id"]] = {"path": source_path(forest, index), "native": forest["native"],
-                                         "source": forest["source"]}
+        candidates = [forests[(source["process_id"], source["display_id"])]
+                      for source in window["trees"]["arkui"]["coordinate_evidence"]["scene_sources"]]
+        result[window["window_id"]] = select_window_scene(candidates, window)
     return result

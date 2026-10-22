@@ -19,6 +19,7 @@ from har_capture.hdc import CaptureError
 from har_capture.native_input import (
     NativeInputError, apply_input, candidate_summary, focused_component, input_text, new_diagnostics, run_native_driver,
     target_window, validate_input,
+    verify_component_window,
 )
 
 
@@ -28,7 +29,8 @@ class NativeInputTests(unittest.TestCase):
                         "bundle_name": "app.browser", "mode": "replace", "value": "https://example.test/full"}
         self.window = {"window_id": 100, "display_id": 0, "bundle_name": "app.browser", "is_system": False,
                        "z_order": 100, "process_id": 42, "ui_node_id": 88, "transform": {},
-                       "bounding_box": {"x": 0, "y": 0, "width": 200, "height": 100}}
+                       "bounding_box": {"x": 0, "y": 0, "width": 200, "height": 100},
+                       "screen_bounds": {"x": 0, "y": 0, "width": 200, "height": 100}}
         self.properties = {"hostWindowId": "100", "displayId": "0", "focused": "true", "text": "old",
                            "hierarchy": "ROOT100,0,0",
                            "bounds": {"left": 20, "top": 30, "right": 100, "bottom": 50}}
@@ -47,6 +49,26 @@ class NativeInputTests(unittest.TestCase):
         with self.assertRaises(CaptureError):
             target_window([self.window, other], self.request, (50, 40))
         self.assertEqual(target_window([self.window], self.request, (50, 40)), self.window)
+
+    def test_scaled_logical_window_cannot_claim_a_background_application_point(self):
+        uc = {**self.window, "window_id": 106, "bundle_name": "com.uc.mobile", "z_order": 200,
+              "bounding_box": {"x": 203, "y": 203, "width": 2048, "height": 2230},
+              "screen_bounds": {"x": 203.3, "y": 203.3, "width": 1470.885888, "height": 1601.59938}}
+        other = {**self.window, "window_id": 123, "bundle_name": "other.app", "z_order": 199,
+                 "screen_bounds": {"x": 1800, "y": 1800, "width": 500, "height": 200}}
+        request = {**self.request, "window_id": 106, "bundle_name": "com.uc.mobile"}
+        for windows in ([uc], [uc, other], [other, uc]):
+            with self.subTest(windows=windows), self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                target_window(windows, request, (2184, 1872))
+        self.assertEqual(target_window([uc, other], request, (400, 400))["window_id"], 106)
+
+    def test_component_center_revalidation_uses_native_integer_click_point(self):
+        window = {**self.window, "screen_bounds": {"x": 203.3, "y": 0, "width": 500, "height": 500}}
+        properties = {"bounds": {"left": 203, "right": 204, "top": 20, "bottom": 40}}
+        with patch("har_capture.agent_device.read_windows", return_value={"windows": [window]}):
+            with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                verify_component_window(properties, self.request, {**self.context, "window": window})
+        self.driver.input_text.assert_not_called()
 
     def test_focused_native_component_requires_window_display_bounds_and_unique_match(self):
         for key, value in (("hostWindowId", "101"), ("displayId", "1"), ("focused", "false"),
@@ -217,6 +239,7 @@ class NativeInputLifecycleTests(unittest.TestCase):
                         "bundle_name": "app.browser", "mode": "replace", "value": "private-input-text"}
         self.window = {"window_id": 100, "bundle_name": "app.browser", "is_system": False,
                        "z_order": 100, "bounding_box": {"x": 0, "y": 0, "width": 200, "height": 100},
+                       "screen_bounds": {"x": 0, "y": 0, "width": 200, "height": 100},
                        "display_id": 0, "process_id": 42, "ui_node_id": 88, "transform": {}}
         self.hdc = SimpleNamespace(executable=Path("fixture-tools") / "hdc.exe", device="fixture-device")
         self.driver = Mock()

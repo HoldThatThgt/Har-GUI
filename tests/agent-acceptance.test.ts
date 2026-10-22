@@ -57,6 +57,7 @@ function fixture(t: TestContext) {
       window_id: 92, process_id: 202, display_id: 0, ui_node_id: 920,
       bundle_name: 'org.example.calendar', z_order: 17,
       bounding_box: { x: 0, y: 0, width: 4, height: 3 },
+      screen_bounds: { x: 0, y: 0, width: 4, height: 3 },
       trees: {
         accessibility: { file: 'accessibility.json', json_pointer: '/0', node_count: 1 },
         arkui: { ...fileInfo('arkui/window-92.json', contents['arkui/window-92.json']),
@@ -175,9 +176,10 @@ test('rejects incomplete candidates and candidates with no exposed windows', asy
 
 /** 创建仅用于窗口几何验收的完整事实。 */
 function geometry(overrides: Partial<WindowInfo> = {}): WindowInfo {
+  const box = overrides.bounding_box ?? { x: 0, y: 0, width: 100, height: 100 };
   return { window_id: 92, process_id: 202, ui_node_id: 920, display_id: 0,
     bundle_name: 'org.example.calendar', z_order: 17, window_mode: 1, is_system: false, focused: true,
-    bounding_box: { x: 0, y: 0, width: 100, height: 100 }, ...overrides };
+    bounding_box: box, screen_bounds: box, ...overrides };
 }
 
 /** 构造工具实际返回的变更记录，保留前后窗口事实。 */
@@ -216,7 +218,8 @@ test('validates the latest change independently for every window', (t) => {
   const first = geometry();
   const second = geometry({ window_id: 93, process_id: 203, ui_node_id: 930 });
   const firstFinal = geometry({ bounding_box: { x: 10, y: 0, width: 100, height: 100 } });
-  const secondFinal = { ...second, bounding_box: { x: 200, y: 20, width: 150, height: 90 } };
+  const secondFinal = { ...second, bounding_box: { x: 200, y: 20, width: 150, height: 90 },
+    screen_bounds: { x: 200, y: 20, width: 150, height: 90 } };
   const changes = [changed(first, firstFinal), changed(second, secondFinal)];
   assert.deepEqual(verifyWindowChanges({ windows: [firstFinal, secondFinal] }, changes), []);
   assert.throws(() => verifyWindowChanges({ windows: [firstFinal, second] }, changes), /bounds do not match/);
@@ -238,15 +241,15 @@ test('rejects a missing final window and each strict identity mismatch', (t) => 
   assert.throws(() => verifyWindowChanges({ windows: [missingIdentity] }, changes), /identity does not match/);
 });
 
-test('rejects a final bounding box mismatch but does not depend on object field order', (t) => {
+test('rejects a final exact screen box mismatch but does not depend on object field order', (t) => {
   t.mock.method(console, 'error', () => {});
   const initial = geometry();
   const after = geometry({ bounding_box: { x: 20, y: 30, width: 160, height: 140 } });
   const changes = [changed(initial, after)];
   assert.deepEqual(verifyWindowChanges({ windows: [{ ...after,
-    bounding_box: { height: 140, width: 160, y: 30, x: 20 } }] }, changes), []);
+    screen_bounds: { height: 140, width: 160, y: 30, x: 20 } }] }, changes), []);
   for (const field of ['x', 'y', 'width', 'height'] as const) {
-    const wrong = { ...after, bounding_box: { ...after.bounding_box, [field]: after.bounding_box[field] + 1 } };
+    const wrong = { ...after, screen_bounds: { ...after.screen_bounds, [field]: after.screen_bounds[field] + 1 } };
     assert.throws(() => verifyWindowChanges({ windows: [wrong] }, changes), /bounds do not match/);
   }
 });
@@ -256,7 +259,8 @@ function overlapping() {
   const target = geometry();
   const before = geometry({ window_id: 93, process_id: 203, ui_node_id: 930, z_order: 20,
     bundle_name: 'org.example.notes', bounding_box: { x: 150, y: 0, width: 100, height: 100 } });
-  const after = { ...before, bounding_box: { x: 50, y: 0, width: 100, height: 100 } };
+  const after = { ...before, bounding_box: { x: 50, y: 0, width: 100, height: 100 },
+    screen_bounds: { x: 50, y: 0, width: 100, height: 100 } };
   const change = { ...changed(before, after), occlusion: {
     target_window_id: target.window_id, occluder_window_id: after.window_id, bounding_box_overlap_fraction: 0.5,
   } };
@@ -265,7 +269,8 @@ function overlapping() {
 
 test('recomputes final rectangle overlap fractions without overwriting historical measurements', () => {
   const f = overlapping();
-  const resized = { ...f.after, bounding_box: { x: 75, y: 0, width: 100, height: 100 } };
+  const resized = { ...f.after, bounding_box: { x: 75, y: 0, width: 100, height: 100 },
+    screen_bounds: { x: 75, y: 0, width: 100, height: 100 } };
   const changes = [f.change, changed(f.after, resized)];
   const verified = verifyWindowChanges({ windows: [f.target, resized] }, changes);
   assert.deepEqual(verified, [{ target_window_id: 92, occluder_window_id: 93,
@@ -275,7 +280,8 @@ test('recomputes final rectangle overlap fractions without overwriting historica
 
 test('repeated changes to the same occlusion pair yield one final measured relation', () => {
   const f = overlapping();
-  const last = { ...f.after, bounding_box: { x: 75, y: 50, width: 100, height: 100 } };
+  const last = { ...f.after, bounding_box: { x: 75, y: 50, width: 100, height: 100 },
+    screen_bounds: { x: 75, y: 50, width: 100, height: 100 } };
   const changes = [f.change, { ...changed(f.after, last), occlusion: {
     ...f.change.occlusion, bounding_box_overlap_fraction: 0.125,
   } }];
@@ -303,7 +309,7 @@ test('rejects touching, separated and fully covering rectangles as partial occlu
   for (const box of [{ x: 100, y: 0, width: 100, height: 100 },
     { x: 120, y: 0, width: 100, height: 100 }, { x: 0, y: 0, width: 100, height: 100 },
     { x: -10, y: -10, width: 120, height: 120 }]) {
-    const after = { ...f.after, bounding_box: box };
+    const after = { ...f.after, bounding_box: box, screen_bounds: box };
     const change = { ...f.change, after };
     assert.throws(() => verifyWindowChanges({ windows: [f.target, after] }, [change]), /partial overlap/);
   }

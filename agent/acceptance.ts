@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CollectionAgent, CollectionDevice } from './device.js';
-import type { RunState, WindowInfo } from './state.js';
+import { sameScreenBounds, type RunState, type WindowInfo } from './state.js';
 import { bridge } from './bridge.js';
 
 /** @brief 窗口变更验收需要的身份、屏幕矩形和层级事实。 */
 type WindowGeometry = Pick<WindowInfo, 'window_id' | 'process_id' | 'bundle_name' | 'ui_node_id'
-  | 'display_id' | 'bounding_box' | 'z_order'>;
+  | 'display_id' | 'bounding_box' | 'screen_bounds' | 'z_order'>;
 
 /** @brief 两个窗口的矩形重叠事实，不表示像素级可见性或遮挡比例。 */
 export interface WindowOcclusion {
@@ -46,8 +46,8 @@ function verifyChangedWindow(captured: WindowGeometry | undefined, change: Windo
     || captured[field] !== change.after[field])) {
     rejectWindowChange(`Captured window identity does not match the verified window change: ${change.window_id}`);
   }
-  const fields = ['x', 'y', 'width', 'height'] as const;
-  if (fields.some((field) => captured.bounding_box[field] !== change.after.bounding_box[field])) {
+  if (!captured.screen_bounds || !change.after.screen_bounds
+    || !sameScreenBounds(captured.screen_bounds, change.after.screen_bounds)) {
     rejectWindowChange(`Captured window bounds do not match the verified window change: ${change.window_id}`);
   }
 }
@@ -56,11 +56,12 @@ function verifyChangedWindow(captured: WindowGeometry | undefined, change: Windo
 function verifyOcclusion(windows: readonly WindowGeometry[], occlusion: WindowOcclusion): WindowOcclusion {
   const target = windows.find((window) => window.window_id === occlusion.target_window_id);
   const occluder = windows.find((window) => window.window_id === occlusion.occluder_window_id);
-  if (!target || !occluder || target.display_id !== occluder.display_id || !(occluder.z_order > target.z_order)) {
+  if (!target?.screen_bounds || !occluder?.screen_bounds || target.display_id !== occluder.display_id
+    || !(occluder.z_order > target.z_order)) {
     rejectWindowChange('Captured occlusion windows are missing, on different displays, or in the wrong z_order');
   }
-  const first = target.bounding_box;
-  const second = occluder.bounding_box;
+  const first = target.screen_bounds;
+  const second = occluder.screen_bounds;
   const width = Math.max(0, Math.min(first.x + first.width, second.x + second.width) - Math.max(first.x, second.x));
   const height = Math.max(0,
     Math.min(first.y + first.height, second.y + second.height) - Math.max(first.y, second.y));
@@ -130,6 +131,8 @@ export async function verifyCapture(directory: string): Promise<any> {
   verifyCoverage(metadata);
   for (const window of metadata.windows) {
     if (!window.bundle_name || !Number.isFinite(window.z_order) || !window.bounding_box
+      || !window.screen_bounds || !['x', 'y', 'width', 'height']
+        .every((field) => Number.isFinite(window.screen_bounds[field]))
       || !(window.trees?.arkui?.node_count > 0) || !(window.trees?.accessibility?.node_count > 0)) {
       throw new Error(`Incomplete window evidence: ${window.window_id}`);
     }

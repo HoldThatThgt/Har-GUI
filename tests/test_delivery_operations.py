@@ -14,11 +14,15 @@ from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
 from har_capture.privacy import atomic_json
 from tests import test_dataset
-from tests.support import fake_hdc
+from tests.support import fake_hdc, synthetic_screen_geometry
 
 
 class DeliveryOperationTests(unittest.TestCase):
     def setUp(self):
+        geometry = patch("har_capture.window_geometry.attach_captured_screen_geometry",
+                         side_effect=synthetic_screen_geometry)
+        geometry.start()
+        self.addCleanup(geometry.stop)
         self.helper = test_dataset.DatasetTests()
         self.helper.setUp()
         evidence = self.helper.directory / "evidence"

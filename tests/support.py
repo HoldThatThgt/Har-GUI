@@ -14,6 +14,13 @@ from har_capture.hdc import CaptureError, Hdc
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def synthetic_screen_geometry(_directory, metadata):
+    """为隔离几何采集的匿名单元替身提供明确的一比一屏幕框。"""
+    for window in metadata["windows"]:
+        window["screen_bounds"] = dict(window["bounding_box"])
+        window["screen_bounds_source"] = {"method": "SyntheticUnitFixture"}
+
+
 def window_node(window_id="92", bundle="com.example.settings", z_index="9999"):
     """返回保留窗口归属字段的最小控件树。"""
     return {

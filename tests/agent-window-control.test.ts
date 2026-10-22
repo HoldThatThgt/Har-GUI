@@ -10,8 +10,9 @@ import { createRegistry } from '../agent/tools.js';
 
 /** @brief 创建使用当前窗口字段的匿名化浮动窗口。 */
 function windowInfo(changes: Partial<WindowInfo> = {}): WindowInfo {
+  const box = changes.bounding_box ?? { x: 100, y: 100, width: 800, height: 600 };
   return { window_id: 92, bundle_name: 'app.allowed', process_id: 202, display_id: 0,
-    z_order: 10, window_mode: 102, bounding_box: { x: 100, y: 100, width: 800, height: 600 },
+    z_order: 10, window_mode: 102, bounding_box: box, screen_bounds: box,
     ui_node_id: 920, is_system: false, focused: true, ...changes };
 }
 
@@ -159,6 +160,54 @@ test('window toggle rejects a resolved button outside the target window includin
       assertNoClick(f);
     });
   }
+});
+
+test('window toggle rejects controls inside logical UC bounds but outside its exact screen rectangle', async (t) => {
+  const before = windowInfo({ bounding_box: { x: 203, y: 203, width: 2048, height: 2230 },
+    screen_bounds: { x: 203.3, y: 203.3, width: 1470.885888, height: 1601.59938 } });
+  const control = windowControl({ center: { x: 2184, y: 1872 },
+    bounds: { x: 2180, y: 1868, width: 8, height: 8 } });
+  const f = fixture(t, [before], control);
+  await assert.rejects(f.action.call({ window_id: 92 }), /outside.*target window|target.*window/i);
+  assert.equal(f.requests.length, 1);
+  assertNoClick(f);
+});
+
+test('window toggle rejects exact screen movement after resolving the system button', async (t) => {
+  const before = windowInfo();
+  const f = fixture(t, [before]);
+  f.hooks.received = () => f.setWindows([{ ...before, screen_bounds: { ...before.screen_bounds, x: 100.1 } }]);
+  await assert.rejects(f.action.call({ window_id: 92 }), /changed since planning/);
+  assert.equal(f.requests.length, 1);
+  assertNoClick(f);
+});
+
+test('window toggle rejects actual screen occlusion even within the allowed bundle', async (t) => {
+  for (const bundle of ['app.other', 'app.allowed']) {
+    await t.test(bundle, async (child) => {
+      const before = windowInfo({ bounding_box: { x: 203, y: 203, width: 2048, height: 2230 },
+        screen_bounds: { x: 203.3, y: 203.3, width: 1470.885888, height: 1601.59938 } });
+      const overlay = windowInfo({ window_id: 80, bundle_name: bundle, z_order: 20,
+        bounding_box: { x: 2500, y: 100, width: 100, height: 100 },
+        screen_bounds: { x: 1400.3, y: 220.3, width: 100.4, height: 80.4 } });
+      const f = fixture(child, [before, overlay], windowControl({ center: { x: 1439, y: 241 },
+        bounds: { x: 1410, y: 212, width: 58, height: 58 } }));
+      await assert.rejects(f.action.call({ window_id: 92 }), /covered by another application/);
+      assertNoClick(f);
+    });
+  }
+});
+
+test('window toggle accepts a verified physical size change while WMS logical bounds remain unchanged', async (t) => {
+  const before = windowInfo({ bounding_box: { x: 203, y: 203, width: 2048, height: 2230 },
+    screen_bounds: { x: 203.3, y: 203.3, width: 1470.885888, height: 1601.59938 } });
+  const after = { ...before, screen_bounds: { x: 203.3, y: 0, width: 1795.444736, height: 1955.00086 } };
+  const f = fixture(t, [before], windowControl({ center: { x: 1439, y: 241 } }));
+  f.hooks.clicked = () => f.setWindows([after]);
+  const result = await f.action.call({ window_id: 92 });
+  assert.deepEqual(f.clicks, [[1439, 241]]);
+  assert.deepEqual(result, { window_id: 92, before, after, bounds_changed: true });
+  assert.deepEqual(result.before.bounding_box, result.after.bounding_box);
 });
 
 test('window toggle cannot accept a replaced target after its single native click', async (t) => {

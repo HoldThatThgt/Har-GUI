@@ -11,6 +11,7 @@ from har_capture.collector import capture
 from har_capture.hdc import CaptureError
 from tests.support import (FIXTURES, fake_hdc, png_bytes, raw_accessibility, raw_arkui, raw_layout,
                            raw_system_arkui, system_session_details)
+from tests.support import synthetic_screen_geometry
 from tests.test_system_accessibility import application_inspector
 
 
@@ -18,6 +19,10 @@ class CollectorTests(unittest.TestCase):
     """通过设备替身运行完整采集流程。"""
 
     def setUp(self):
+        geometry = patch("har_capture.window_geometry.attach_captured_screen_geometry",
+                         side_effect=synthetic_screen_geometry)
+        geometry.start()
+        self.addCleanup(geometry.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.output = Path(self.temporary.name) / "captures"
@@ -131,7 +136,7 @@ class CollectorTests(unittest.TestCase):
                     return reply if name == "cleanup" else result
 
                 hdc.run.side_effect = run
-                with self.assertLogs("har_capture.collector", level="ERROR"):
+                with self.assertLogs("har_capture.hdc", level="ERROR"):
                     directory = capture(hdc, self.output)
                 metadata = self.read_metadata(directory)
                 self.assertEqual(metadata["status"], "complete")

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from har_capture.hdc import CaptureError, Hdc, fail, utc_now
+from har_capture.hdc import CaptureError, Hdc, cleanup_remote, fail, utc_now
 from har_capture.capture_checks import (compare_capture_states, compare_screen_pixels, coverage_report,
                                         session_visibility)
 from har_capture.metadata import associate_windows, file_info, image_info, load_layout, parse_windows
@@ -124,18 +124,6 @@ def group_applications(windows: list[dict]) -> list[dict]:
     return [{"bundle_name": bundle, "window_ids": ids} for bundle, ids in sorted(applications.items())]
 
 
-def cleanup_remote(hdc: Hdc, remote: dict) -> dict:
-    """@brief 清理本次生成的设备临时文件。 @param hdc 连接。 @param remote 精确路径。 @return 清理结果。"""
-    try:
-        output = hdc.run(["shell", "rm", "-f", *remote.values(), "&&", "echo", "HAR_CAPTURE_CLEANUP_OK"], "cleanup")
-        if "HAR_CAPTURE_CLEANUP_OK" not in output.splitlines():
-            fail("Device did not confirm temporary file cleanup")
-    except (CaptureError, KeyboardInterrupt) as error:
-        LOGGER.error("Artifacts are valid, but device cleanup failed: %s", error)
-        return {"success": False, "error": str(error), "remote_files": remote}
-    return {"success": True}
-
-
 def attach_uitest_trees(metadata: dict, trees: dict) -> None:
     """@brief 附加 UITest 已返回的窗口双树，其余窗口保持待原生通道补齐。 @param metadata 本次元数据。
     @param trees UITest 已确认归属的双树。
@@ -149,6 +137,17 @@ def attach_uitest_trees(metadata: dict, trees: dict) -> None:
         metadata["files"][f"arkui_raw_{window['window_id']}"] = arkui["raw"]
         metadata["files"][f"arkui_response_{window['window_id']}"] = arkui["response"]
         window["is_system"] = arkui["session"]["is_system"]
+
+
+def attach_coordinate_evidence(metadata: dict, geometry: dict) -> None:
+    """@brief 把每窗原生几何与共享场景来源加入同批证据索引。 @param metadata 采集信息。
+    @param geometry 已采的几何来源。
+    """
+    for window in metadata["windows"]:
+        item = geometry[window["window_id"]]
+        window["trees"]["arkui"]["coordinate_evidence"] = item
+        for kind in ("arkui_geometry", "response", "render_tree", "render_detached_tree"):
+            metadata["files"][f"geometry_{window['window_id']}_{kind}"] = item[kind]
 
 
 def complete_capture(hdc: Hdc, stage: Path, remote: dict, display_id: int, stability_regions: list) -> dict:
@@ -176,10 +175,9 @@ def complete_capture(hdc: Hdc, stage: Path, remote: dict, display_id: int, stabi
     write_json(stage / "coverage.json", metadata["coverage"])
     write_json(stage / "capture-evidence.json", metadata)
     geometry = collect_geometry_evidence(hdc, stage, remote, metadata["windows"])
-    for window in metadata["windows"]:
-        window["trees"]["arkui"]["coordinate_evidence"] = geometry[window["window_id"]]
-        for kind in ("arkui_geometry", "response", "render_tree", "render_detached_tree"):
-            metadata["files"][f"geometry_{window['window_id']}_{kind}"] = geometry[window["window_id"]][kind]
+    attach_coordinate_evidence(metadata, geometry)
+    from har_capture.window_geometry import attach_captured_screen_geometry
+    attach_captured_screen_geometry(stage, metadata)
     metadata["consistency"] = closing_observation(hdc, stage, remote, {
         "display": metadata["display"], "stability_regions": stability_regions})
     metadata["stability"] = json.loads((stage / "stability.json").read_bytes())

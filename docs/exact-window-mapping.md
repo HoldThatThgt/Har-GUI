@@ -48,8 +48,25 @@ flowchart LR
 外层裁剪按实际 RS 节点身份使用同一精确矩形，保留圆角和内容裁剪的来源。
 
 普通已挂载 Frame 也交叉核验局部矩形、Scale、Translate 以及影响几何的 Pivot。
-打印数值以各自明确的小数精度区间交叉核验；原生投影与 WMS 外包的既有误差阈值未扩大。
+打印数值以各自明确的小数精度区间交叉核验；原生投影和裁剪的既有误差阈值未扩大。
 Skew、Persp、未知裁剪和活动动画继续拒收。
+
+## WMS 比例的发布语义
+
+WMS 比例还可能保留旧值，不能要求每次移动后都精确等于当前整数外包宽除以逻辑宽。
+官方 [UpdateScaleInner](https://github.com/openharmony/window_window_manager/blob/8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/window_scene/session/host/src/scene_session.cpp#L9559-L9566)
+在无需更新变换时保留存量比例；
+[IsTransformNeedUpdate](https://github.com/openharmony/window_window_manager/blob/8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/window_scene/session/host/src/layout_controller.cpp#L253-L259)
+使用 [float NearEqual 的 `<=0.001f` 门槛](https://github.com/openharmony/window_window_manager/blob/8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/window_scene/interfaces/include/ws_common.h#L780-L783)。
+
+本次 UC 从 `(203.3,203.3)` 移到 `(300,300)`，SceneBoard 精确尺寸保持
+`1470.885888×1601.59938`，当前整数外包宽从 `1472` 变为 `1471`。
+WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的差为 `0.00048828125`，
+符合官方保留规则，冻结开始与结束的 WMS 也一致。
+
+核验现在在归一化比例空间执行官方 float32 门槛，并计入实际 WMS 输出精度。
+屏幕几何仍完全来自同批 SceneBoard、原生几何与真实渲染父链，
+不拿 WMS 比例重建坐标；逻辑尺寸、整数原点、原生投影、裁剪与身份校验保持原要求。
 
 ## 非渲染节点
 

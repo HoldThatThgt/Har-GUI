@@ -43,7 +43,7 @@ def classify_window_mode(windows: list[dict]) -> str:
     if len(main) == 1:
         return "单窗口全屏" if main[0]["window_mode"] == 1 else "单窗口缩放"
     application_count = len({window["bundle_name"] for window in main})
-    crossed = any(rectangles_intersect(first["bounding_box"], second["bounding_box"])
+    crossed = any(rectangles_intersect(first["screen_bounds"], second["screen_bounds"])
                   for index, first in enumerate(main) for second in main[index + 1:])
     return ("单应用多窗口" if application_count == 1 else "多应用多窗口") + ("交叉" if crossed else "并列")
 

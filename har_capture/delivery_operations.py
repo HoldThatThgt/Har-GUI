@@ -123,6 +123,7 @@ def verify_capture_evidence(directory: Path, metadata: dict, skip_screenshot: bo
     verify_raw_files(directory, metadata, skip_screenshot)
     inventory = parse_windows((directory / "windows.txt").read_text(encoding="utf-8"))
     verify_capture_windows(directory, metadata, inventory)
+    verify_screen_geometry(directory, metadata)
     before = {"windows": inventory, "layout": load_layout(directory / "layout.json")}
     after = {"windows": parse_windows((directory / "closing-windows.txt").read_text(encoding="utf-8")),
              "layout": load_layout(directory / "closing-layout.json")}
@@ -137,6 +138,18 @@ def verify_capture_evidence(directory: Path, metadata: dict, skip_screenshot: bo
     state["pixels"] = pixels
     if state != metadata["consistency"] or state != json.loads((directory / "consistency.json").read_bytes()):
         fail("Capture consistency receipt differs from its original evidence")
+
+
+def verify_screen_geometry(directory: Path, metadata: dict) -> None:
+    """@brief 离线重算同批精确屏幕边界，拒绝缺失或被改写的动作验收事实。 @param directory 证据目录。
+    @param metadata 已保存的采集信息。
+    """
+    from har_capture.window_geometry import attach_captured_screen_geometry
+    observed = {**metadata, "windows": [dict(window) for window in metadata["windows"]]}
+    attach_captured_screen_geometry(directory, observed)
+    for expected, actual in zip(metadata["windows"], observed["windows"], strict=True):
+        if any(expected.get(key) != actual[key] for key in ("screen_bounds", "screen_bounds_source")):
+            fail("Captured screen geometry differs from its original SceneBoard and RenderService evidence")
 
 
 def manifest_digest(manifest: dict) -> str:

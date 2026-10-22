@@ -78,7 +78,7 @@ def target_window(windows: list, request: dict, point: tuple) -> dict:
     """
     matches = []
     for window in windows:
-        box = window["bounding_box"]
+        box = window["screen_bounds"]
         bounds = {"left": box["x"], "top": box["y"],
                   "right": box["x"] + box["width"], "bottom": box["y"] + box["height"]}
         if not window["is_system"] and contains(bounds, point):
@@ -181,10 +181,11 @@ def verify_component_window(properties: dict, request: dict, context: dict) -> N
     """
     from har_capture.agent_device import read_windows
     bounds = properties["bounds"]
-    center = ((bounds["left"] + bounds["right"]) / 2, (bounds["top"] + bounds["bottom"]) / 2)
+    center = (int((bounds["left"] + bounds["right"]) / 2), int((bounds["top"] + bounds["bottom"]) / 2))
     current = read_windows(context["hdc"], {"display_id": request["display_id"]})["windows"]
     latest = target_window(current, request, center)
-    fields = ("window_id", "process_id", "ui_node_id", "display_id", "bundle_name", "bounding_box", "transform")
+    fields = ("window_id", "process_id", "ui_node_id", "display_id", "bundle_name", "bounding_box", "transform",
+              "screen_bounds")
     if any(latest[field] != context["window"][field] for field in fields):
         fail("Application window changed before native text input")
 

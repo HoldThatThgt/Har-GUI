@@ -339,7 +339,7 @@ python visualize.py captures\YOUR_CAPTURE_DIRECTORY
 ArkUI 组件树直接读取本次保存的 JSON，并核对对应原文；节点位置显示 JSON Pointer，
 悬停可查看原文文件与行号。
 
-- 截图按采集坐标标注每个窗口的 `bounding_box`、`bundle_name` 和 `z_order`。
+- 截图按精确屏幕坐标标注每个窗口的 `screen_bounds`、`bundle_name` 和 `z_order`。
 - 点击截图中的窗口，查看对应控件树；重叠区域按实际 `z_order` 选择最前方窗口。
 - 窗口列表可以选择被覆盖的窗口；展开控件树、搜索控件、点击节点可查看原始属性。
 - 在“无障碍控件树”和“ArkUI 组件树”之间切换，查看各自节点数、来源和结构属性。
@@ -412,7 +412,9 @@ flowchart LR
 | --- | --- |
 | `window_id` | 窗口管理器的 `WinId`，对应控件树的 `hostWindowId` |
 | `bundle_name` | UITest 窗口根的 `bundleName` 或对应窗口原生 Inspector 响应中的包名 |
-| `bounding_box` | 窗口管理器的窗口矩形，格式为 `{x, y, width, height}` |
+| `bounding_box` | WMS 原始逻辑窗口矩形，不能直接用于屏幕点击或截图标注 |
+| `screen_bounds` | 经同批 SceneBoard、原生几何和实际渲染父链核验的浮点屏幕外框 |
+| `screen_bounds_source` | 精确外框的会话、渲染节点身份及原始文件 SHA-256 |
 | `layout_bounding_box` | 原始控件树窗口根节点的 `bounds`，转换为同样的矩形格式 |
 | `z_order` | 窗口管理器的 `ZOrd`；同一显示器上数值越大越靠前 |
 | `layout` | 原始文件名及 JSON Pointer，例如 `{"file":"layout.json","json_pointer":"/children/0"}` |
@@ -428,9 +430,10 @@ flowchart LR
 `windows` 按 `z_order` 从前到后排列；`layout.json` 保留原始顺序，`json_pointer` 始终指向原始节点。
 控件节点的 `zIndex` 表示组件内部的层级，不能作为跨应用的窗口层叠顺序。
 
-`bounding_box` 来自 `GetSessionRect`，使用显示器坐标；控件树的边界可能受屏幕裁剪影响。
-窗口处于缩放或移动动画时，两者也可能不同，因此同时保存原始矩形、控件树矩形和 `transform`，
-不把窗口管理器矩形误当成已经应用全部变换后的可见像素区域。
+`bounding_box` 来自 `GetSessionRect`，其逻辑尺寸可能尚未应用缩放；`transform` 也不是精确绘制变换。
+屏幕输入、窗口移动、尺寸调整、遮挡计算和截图标注统一使用 `screen_bounds`，缺少精确来源时拒绝操作。
+窗口工具的整数目标按每个字段 `Math.round` 后验收；输入命中保留浮点边界并使用左闭右开区间。
+原始 WMS 字段与控件树矩形照常保存，详见[屏幕坐标与输入范围](docs/screen-coordinate-scope.md)。
 
 ## 无障碍与 ArkUI 的区别
 

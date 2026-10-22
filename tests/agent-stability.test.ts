@@ -48,6 +48,7 @@ function fixture(t: TestContext) {
   }));
   const window = { window_id: 1, process_id: 2, ui_node_id: 3, display_id: 0, z_order: 4,
     is_system: false, bundle_name: 'app.fixture', bounding_box: { x: 0, y: 0, width: 100, height: 100 },
+    screen_bounds: { x: 0, y: 0, width: 100, height: 100 },
     trees: { arkui: { file: 'tree.json', node_count: 1 }, accessibility: { file: 'tree.json', node_count: 1 } } };
   const metadata = { capture_id: 'frame', status: 'complete', files, windows: [window], window_inventory: [window],
     coverage: { status: 'verified', covered_window_ids: [1], excluded_windows: [], unresolved_windows: [] },

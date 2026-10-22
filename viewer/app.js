@@ -106,7 +106,7 @@ function renderOverlays() {
     const overlay = create("div", "window-overlay");
     overlay.dataset.windowId = String(window.window_id);
     overlay.style.setProperty("--window-color", window.color);
-    positionBox(overlay, window.bounding_box);
+    positionBox(overlay, window.screen_bounds);
     const tag = create("div", "window-tag");
     tag.append(create("span", "tag-bundle", window.bundle_name));
     tag.append(create("span", "tag-z", `z_order ${window.z_order}`));
@@ -129,7 +129,7 @@ function renderWindowList() {
     const heading = create("div", "card-heading");
     heading.append(create("span", "color-dot"), create("strong", "", window.window_name));
     heading.append(create("span", "z-badge", `z_order ${window.z_order}`));
-    const box = window.bounding_box;
+    const box = window.screen_bounds;
     const detail = create("div", "card-detail");
     detail.append(create("span", "", `窗口 ${window.window_id}`));
     detail.append(create("span", "", `${box.width} × ${box.height}`));
@@ -145,13 +145,14 @@ function renderWindowList() {
 /** @brief 展示窗口标识和原始矩形坐标。 */
 function renderWindowFacts() {
   const window = state.selected;
-  const box = window.bounding_box;
+  const box = window.screen_bounds;
   element("selected-name").textContent = window.window_name;
   element("selected-bundle").textContent = window.bundle_name;
   element("selected-z").textContent = `z_order ${window.z_order}`;
   element("selected-dot").style.setProperty("--window-color", window.color);
   const facts = [["窗口 / 显示器", `${window.window_id} / ${window.display_id}`],
-    ["bounding_box", `(${box.x}, ${box.y}) · ${box.width} × ${box.height}`]];
+    ["screen_bounds", `(${box.x}, ${box.y}) · ${box.width} × ${box.height}`],
+    ["WMS bounding_box", JSON.stringify(window.bounding_box)]];
   const container = element("window-facts");
   container.replaceChildren();
   facts.forEach(([label, value]) => {
@@ -185,7 +186,7 @@ function selectWindow(window) {
   renderWindowFacts();
   const outline = element("selection-outline");
   outline.style.setProperty("--window-color", window.color);
-  positionBox(outline, window.bounding_box);
+  positionBox(outline, window.screen_bounds);
   loadSelectedTree();
 }
 
@@ -330,7 +331,7 @@ function selectAtPoint(event) {
   const x = (event.clientX - rect.left) / rect.width * display.width;
   const y = (event.clientY - rect.top) / rect.height * display.height;
   const target = state.windows.filter((window) => !window.is_system).find((window) => {
-    const box = window.bounding_box;
+    const box = window.screen_bounds;
     return x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height;
   });
   if (target) selectWindow(target);

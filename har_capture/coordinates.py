@@ -4,6 +4,7 @@ import copy
 import logging
 import math
 import re
+import struct
 
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 RECT = re.compile(rf"^\[({NUMBER}),\s*({NUMBER})\],\[({NUMBER}),\s*({NUMBER})\]$")
@@ -34,6 +35,15 @@ SOURCES = {
     "render_envelope": "https://github.com/openharmony/graphic_graphic_2d/blob/"
                        "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
                        "rosen/modules/render_service_base/src/common/rs_obj_abs_geometry.cpp",
+    "window_scale_retention": "https://github.com/openharmony/window_window_manager/blob/"
+                              "8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/"
+                              "window_scene/session/host/src/layout_controller.cpp#L253-L259",
+    "window_float_comparison": "https://github.com/openharmony/window_window_manager/blob/"
+                               "8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/"
+                               "window_scene/interfaces/include/ws_common.h#L780-L783",
+    "window_scale_printing": "https://github.com/openharmony/window_window_manager/blob/"
+                             "8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/"
+                             "window_scene/session_manager/src/scene_session_manager.cpp#L8588-L8594",
 }
 
 
@@ -345,6 +355,44 @@ def verify_render_geometry(render: dict, node: dict) -> bool:
     return no_draw
 
 
+def float32(value: float) -> float:
+    """@brief 按官方 float 参数与减法的 IEEE 754 精度取值。 @param value 数值。 @return 单精度数值。"""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def wms_scale_interval(value: float) -> tuple[float, float]:
+    """@brief 恢复官方六位有效数字、八字符输出在解析为数值后的打印区间。 @param value 已解析正比例。
+    @return 可能原生 float 值的闭区间，不作为屏幕几何误差。
+    """
+    exponent = math.floor(math.log10(value))
+    unit = 10 ** (exponent - 5)
+    lower_unit = unit / 10 if value == 10 ** exponent else unit
+    lower, upper = value - lower_unit / 2, value + unit / 2
+    # 小于 0.1 的定点输出可能被截为六位小数；解析后尾部零消失，必须保留该有向截断区间。
+    if -4 <= exponent < -1 and float(format(value, ".6f")) == value:
+        upper = value + 0.000001 - unit / 2
+    return lower, upper
+
+
+def float32_interval_near_equal(interval: tuple[float, float], expected: float) -> bool:
+    """@brief 在已知打印区间内执行官方 float NearEqual 的闭区间判断。 @param interval 原存储值范围。
+    @param expected 当前归一化比例。 @return 是否存在满足官方保留规则的可表示 float。
+    """
+    lower, upper = interval
+    low_bits = struct.unpack("<I", struct.pack("<f", lower))[0]
+    high_bits = struct.unpack("<I", struct.pack("<f", upper))[0]
+    low_bits += int(float32(lower) < lower)
+    high_bits -= int(float32(upper) > upper)
+    if low_bits > high_bits:
+        return False
+    expected = float32(expected)
+    expected_bits = struct.unpack("<I", struct.pack("<f", expected))[0]
+    nearest_bits = min(max(expected_bits, low_bits), high_bits)
+    nearest = struct.unpack("<f", struct.pack("<I", nearest_bits))[0]
+    # ws_common.h 的 float 重载使用 <= 0.001f；不能替换为 MathHelper 中不同的严格比较。
+    return abs(float32(nearest - expected)) <= float32(0.001)
+
+
 def verify_window_envelope(window: dict, node: dict, screen: dict) -> None:
     """@brief 将 WMS 整数外包口径与原生两位小数边界交叉验证。 @param window 原始 WMS 窗口。
     @param node 原始会话节点。 @param screen 独立原生屏幕矩形。
@@ -365,8 +413,8 @@ def verify_window_envelope(window: dict, node: dict, screen: dict) -> None:
             raise ValueError("scene_wms_outer_origin_mismatch:" + axis)
         edge = screen[axis] + screen[dimension]
         sizes = {math.ceil(edge - 0.005) - box[axis], math.ceil(edge + 0.005) - box[axis]}
-        projected = box[dimension] * transform["scale_" + axis]
-        if not any(abs(projected - value) <= 0.11 for value in sizes):
+        interval = wms_scale_interval(transform["scale_" + axis])
+        if not any(float32_interval_near_equal(interval, value / box[dimension]) for value in sizes):
             raise ValueError("scene_wms_outer_scale_mismatch:" + axis)
 
 

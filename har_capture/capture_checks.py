@@ -177,6 +177,19 @@ def session_visibility(text: str) -> dict[int, dict]:
     return result
 
 
+def session_exclusion(session: dict) -> str | None:
+    """@brief 仅按明确会话及渲染可见性排除不在屏幕上的窗口。 @param session 原始会话事实。
+    @return 排除原因或空值，部分可见窗口保留。
+    """
+    if session.get("is_visible") is False:
+        return "session_not_visible"
+    if session.get("rs_visible") is False:
+        return "render_service_not_visible"
+    if session.get("visibility_state") == 2:
+        return "render_service_totally_occluded"
+    return None
+
+
 def window_exclusion(window: dict, session: dict, display: dict) -> str | None:
     """@brief 仅按明确证据排除不出现在画布上的窗口。 @param window 窗口。
     @param session 会话。 @param display 画布。 @return 排除原因或空值。
@@ -190,13 +203,7 @@ def window_exclusion(window: dict, session: dict, display: dict) -> str | None:
             or box["y"] >= display["height"] or box["x"] + box["width"] <= 0
             or box["y"] + box["height"] <= 0):
         return "outside_canvas"
-    if session.get("is_visible") is False:
-        return "session_not_visible"
-    if session.get("rs_visible") is False:
-        return "render_service_not_visible"
-    if session.get("visibility_state") == 2:
-        return "render_service_totally_occluded"
-    return None
+    return session_exclusion(session)
 
 
 def coverage_report(metadata: dict, inventory: dict, session_text: str) -> dict:

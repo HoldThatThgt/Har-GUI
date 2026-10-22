@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test, type TestContext } from 'node:test';
@@ -28,10 +29,12 @@ const PREPARED_FIXTURE = `
 import json, sys
 from pathlib import Path
 from unittest.mock import patch
-from tests.support import fake_hdc
+from tests.support import fake_hdc, synthetic_screen_geometry
 from har_capture.collector import capture
 from har_capture.delivery_operations import prepare_delivery
 root = Path(sys.argv[1])
+geometry = patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry)
+geometry.start()
 source = capture(fake_hdc(),root.parent / 'collected')
 root.rmdir()
 source.rename(root)
@@ -48,8 +51,28 @@ with patch('har_capture.export.load_scene_evidence',return_value={}), \\
     prepare_delivery({'directory':str(root),'privacy':policy,'options':options})
 `;
 
+/** @brief 在每个真实离线 Python 进程内明确替换匿名测试几何证明，不改生产验证流程。 */
+function mockSyntheticGeometry(t: TestContext): void {
+  const original = childProcess.spawn;
+  const script = `import sys
+from unittest.mock import patch
+from tests.support import synthetic_screen_geometry
+import agent_device
+with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry):
+    sys.exit(agent_device.main())`;
+  const spawn = t.mock.method(childProcess, 'spawn', (executable: any, args: any, options: any) => {
+    if (Array.isArray(args) && basename(String(args[0])) === 'agent_device.py') {
+      return original(executable, ['-B', '-c', script, ...args.slice(1)], options);
+    }
+    return original(executable, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+}
+
 /** 在测试临时目录建立真实五件套及可重新核验的准备凭证。 */
 function fixture(t: TestContext, candidate = true) {
+  mockSyntheticGeometry(t);
   const directory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-test-'));
   const capture = join(directory, 'capture');
   mkdirSync(capture);

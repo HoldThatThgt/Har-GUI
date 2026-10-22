@@ -8,7 +8,7 @@ import type { DeviceAction, ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { ToolRegistry, type RegisteredTool } from '../agent/registry.js';
-import { RunState, sameWindow, type WindowInfo } from '../agent/state.js';
+import { RunState, sameWindow, windowSchema, type WindowInfo } from '../agent/state.js';
 
 /** 构造不需要凭据、模型或设备的实际运行状态。 */
 function fixture(t: TestContext, enabled = ['Inspect'], maxActions = 5, duration = 60) {
@@ -213,12 +213,37 @@ test('run summary persists accepted evidence and current action count', (t) => {
 test('window identity comparison rejects replaced windows and changed routing geometry', () => {
   const initial: WindowInfo = { window_id: 92, bundle_name: 'com.example.notes', process_id: 202,
     display_id: 0, z_order: 112, window_mode: 102, bounding_box: { x: 10, y: 20, width: 800, height: 600 },
+    screen_bounds: { x: 10.3, y: 20.3, width: 800.4, height: 600.4 },
+    transform: { offset_x: 0, offset_y: 0, scale_x: 1, scale_y: 1, pivot_x: 0, pivot_y: 0 },
+    session_visibility: { is_visible: true, rs_visible: true, visibility_state: 0 },
     ui_node_id: 920, is_system: false, focused: true };
   assert.equal(sameWindow(initial, structuredClone(initial)), true);
   const changes: Partial<WindowInfo>[] = [{ window_id: 93 }, { bundle_name: 'com.example.other' },
     { process_id: 203 }, { display_id: 1 }, { ui_node_id: 921 }, { window_mode: 1 }, { z_order: 113 }, { focused: false },
-    { bounding_box: { ...initial.bounding_box, width: 1000 } }];
+    { bounding_box: { ...initial.bounding_box, width: 1000 } }, { is_system: true },
+    { screen_bounds: { ...initial.screen_bounds, x: 10.4 } },
+    { screen_bounds: { ...initial.screen_bounds, y: 20.4 } },
+    { screen_bounds: { ...initial.screen_bounds, width: 800.5 } },
+    { screen_bounds: { ...initial.screen_bounds, height: 600.5 } },
+    { session_visibility: { is_visible: true, rs_visible: true, visibility_state: 1 } },
+    { transform: { offset_x: 0, offset_y: 0, scale_x: 0.9, scale_y: 1, pivot_x: 0, pivot_y: 0 } }];
   for (const change of changes) assert.equal(sameWindow(initial, { ...initial, ...change }), false);
+  assert.equal(sameWindow(initial, { ...initial, observed_at: 'a later read',
+    screen_bounds_source: { raw_sha256: 'a new clock value changes this source digest' } }), true);
+});
+
+test('window facts require finite exact screen bounds instead of substituting WMS logical bounds', () => {
+  const base = { window_id: 106, bundle_name: 'app.allowed', process_id: 100, display_id: 0,
+    ui_node_id: 7818, is_system: false, focused: true, z_order: 1, window_mode: 102,
+    bounding_box: { x: 203, y: 203, width: 2048, height: 2230 } };
+  const screen = { x: 203.3, y: 203.3, width: 1470.885888, height: 1601.59938 };
+  assert.equal(windowSchema.safeParse(base).success, false);
+  assert.deepEqual(windowSchema.parse({ ...base, screen_bounds: screen }).screen_bounds, screen);
+  for (const field of ['x', 'y', 'width', 'height'] as const) {
+    for (const value of [NaN, Infinity, -Infinity]) {
+      assert.equal(windowSchema.safeParse({ ...base, screen_bounds: { ...screen, [field]: value } }).success, false);
+    }
+  }
 });
 
 test('failed actions retain their own resolved parameters and native phases without input or locator prose', async (t) => {

@@ -21,7 +21,7 @@ function taskPrompt(state: RunState, remaining: number): string {
     + 'Find the page yourself from screenshots and query tools. Do not assume navigation coordinates.\n'
     + 'Inspect the effect after each action. If a tap has no effect, change the location description or strategy; '
     + 'do not repeatedly tap the same ineffective point. Tool feedback includes the actual resolved coordinates.\n'
-    + 'Use registered window tools for requested geometry changes; their results verify actual WMS bounds.\n'
+    + 'Use registered window tools for requested geometry changes; their results verify exact physical screen bounds.\n'
     + 'When the requested page and variation are ready, call Capture exactly once. '
     + 'Do not mark the workflow finished until Capture has returned pending_acceptance=true. '
     + 'A ready screen alone does not complete collection.\n'

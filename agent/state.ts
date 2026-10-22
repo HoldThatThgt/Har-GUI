@@ -7,6 +7,8 @@ export const windowSchema = z.object({
   window_id: z.number().int(), bundle_name: z.string(), process_id: z.number().int(),
   display_id: z.number().int(), z_order: z.number(), window_mode: z.number(),
   bounding_box: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }),
+  screen_bounds: z.object({ x: z.number().finite(), y: z.number().finite(),
+    width: z.number().finite(), height: z.number().finite() }),
   ui_node_id: z.number().int(), is_system: z.boolean(), focused: z.boolean(),
 }).passthrough();
 /** @brief 已经结构校验的窗口管理服务记录。 */
@@ -87,7 +89,16 @@ export class RunState {
 
 /** @brief 比较用于动作路由的窗口身份与状态，避免旧观察误操作。 */
 export function sameWindow(left: WindowInfo, right: WindowInfo): boolean {
-  return ['window_id', 'bundle_name', 'process_id', 'display_id', 'ui_node_id', 'window_mode', 'z_order', 'focused']
+  return ['window_id', 'bundle_name', 'process_id', 'display_id', 'ui_node_id', 'window_mode',
+    'z_order', 'focused', 'is_system']
     .every((key) => left[key] === right[key])
-    && JSON.stringify(left.bounding_box) === JSON.stringify(right.bounding_box);
+    && JSON.stringify(left.bounding_box) === JSON.stringify(right.bounding_box)
+    && JSON.stringify(left.transform) === JSON.stringify(right.transform)
+    && JSON.stringify(left.session_visibility) === JSON.stringify(right.session_visibility)
+    && sameScreenBounds(left.screen_bounds, right.screen_bounds);
+}
+
+/** @brief 按字段比较精确屏幕矩形，不把来源时间和摘要变化当作窗口变化。 */
+export function sameScreenBounds(left: WindowInfo['screen_bounds'], right: WindowInfo['screen_bounds']): boolean {
+  return (['x', 'y', 'width', 'height'] as const).every((key) => left[key] === right[key]);
 }

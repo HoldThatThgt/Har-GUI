@@ -2,13 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { HarmonyDevice } from '@midscene/harmony';
-import type { ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
 import { bridge } from './bridge.js';
 import type { CollectionDevice } from './device.js';
 import { ToolRegistry } from './registry.js';
 import { assertInputScope, windowAt } from './scope.js';
-import { windowSchema } from './state.js';
+import { sameScreenBounds, windowSchema, type WindowInfo } from './state.js';
 import { checkWindows } from './observation.js';
 import { registerGeometry } from './geometry.js';
 import { safeActionParameters } from './privacy.js';
@@ -78,7 +77,8 @@ function registerApplications(registry: ToolRegistry, getDevice: () => Collectio
 function registerWindows(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
   registry.register({ mutates: false,
     resultSchema: z.object({ observation_id: z.string(), windows: windowSchema.array() }), action: {
-      name: 'ReadWindows', description: 'Read current app windows: IDs, bundle names, bounding boxes and z order.',
+      name: 'ReadWindows', description: 'Read current app windows: IDs, bundles, exact physical screen_bounds '
+        + 'and z order. bounding_box contains the original WMS logical geometry; use screen_bounds for screen points.',
       paramSchema: z.object({}), planningFeedbackMaxLength: 20000,
       call: async (_parameters, context) => {
         const device = getDevice();
@@ -90,15 +90,35 @@ function registerWindows(registry: ToolRegistry, getDevice: () => CollectionDevi
     window_id: z.number(), before: windowSchema, after: windowSchema, bounds_changed: z.literal(true),
   }), action: {
     name: 'ToggleWindowSize', planningFeedbackMaxLength: 4000,
-    description: 'Toggle maximize/restore using the actual system accessibility button, then verify WMS bounds. '
+    description: 'Toggle maximize/restore using the actual system accessibility button, '
+      + 'then verify that exact physical screen bounds change and stabilize. '
       + 'ReadWindows in the previous planning round to obtain window_id. No guessed coordinates are needed.',
     paramSchema: z.object({ window_id: z.number().int() }),
-    call: (parameters, context) => toggleWindow(getDevice(), parameters, context),
+    call: (parameters) => toggleWindow(getDevice(), parameters),
   } });
 }
 
-/** @brief 定位标题栏按钮执行窗口大小切换，并读回实际边界；不模拟任意尺寸 API。 */
-async function toggleWindow(device: CollectionDevice, parameters: any, context?: ExecutorContext) {
+/** @brief 最多读回三次，要求连续两次得到相同且已变化的精确屏幕矩形。 */
+async function verifyWindowToggle(device: CollectionDevice, before: WindowInfo): Promise<WindowInfo> {
+  let previous: WindowInfo | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    device.state.signal.throwIfAborted();
+    const after = (await device.windows()).find((window) => window.window_id === before.window_id);
+    if (!after || ['process_id', 'bundle_name', 'ui_node_id', 'display_id', 'is_system']
+      .some((key) => after[key] !== before[key])) {
+      throw new Error('Target window disappeared or changed identity');
+    }
+    if (!sameScreenBounds(after.screen_bounds, before.screen_bounds)) {
+      if (previous && sameScreenBounds(after.screen_bounds, previous.screen_bounds)) return after;
+      previous = after;
+    } else previous = undefined;
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('Window screen bounds did not change and stabilize after activating the requested control');
+}
+
+/** @brief 定位标题栏按钮执行窗口大小切换，并读回实际屏幕边界。 */
+async function toggleWindow(device: CollectionDevice, parameters: any) {
   const observation = await checkWindows(device);
   const before = observation.windows.find((window) => window.window_id === parameters.window_id);
   if (!before || before.is_system) throw new Error('Target must be a visible application window');
@@ -108,7 +128,7 @@ async function toggleWindow(device: CollectionDevice, parameters: any, context?:
     window_id: before.window_id }, device.state.signal);
   const current = await checkWindows(device);
   const { x, y } = control.center;
-  const box = before.bounding_box;
+  const box = before.screen_bounds;
   if (x < box.x || x >= box.x + box.width || y < box.y || y >= box.y + box.height) {
     throw new Error('Window control is outside the target window');
   }
@@ -118,21 +138,10 @@ async function toggleWindow(device: CollectionDevice, parameters: any, context?:
   const hdc = await device.getHdc();
   device.state.event('window_control', { window_id: before.window_id, control });
   await hdc.click(x, y);
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    device.state.signal.throwIfAborted();
-    const after = (await device.windows()).find((window) => window.window_id === before.window_id);
-    if (!after || ['process_id', 'bundle_name', 'ui_node_id', 'display_id'].some((key) => after[key] !== before[key])) {
-      throw new Error('Target window disappeared or changed identity');
-    }
-    if (JSON.stringify(after.bounding_box) !== JSON.stringify(before.bounding_box)) {
-      const result = { window_id: before.window_id, before, after, bounds_changed: true as const };
-      device.state.changes.push(result);
-      return result;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error('Window bounds did not change after activating the requested control');
+  const after = await verifyWindowToggle(device, before);
+  const result = { window_id: before.window_id, before, after, bounds_changed: true as const };
+  device.state.changes.push(result);
+  return result;
 }
 
 /** @brief 调用原有采集器保存单张截图和双树，计数由后续验收决定。 */

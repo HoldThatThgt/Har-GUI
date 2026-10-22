@@ -24,11 +24,11 @@ function rejectScope(message: string, window?: WindowInfo): never {
       display_id: window.display_id, z_order: window.z_order } : undefined } });
 }
 
-/** @brief 按 SDK 实际取整坐标查找矩形内最高 z_order 的普通应用；不推断系统窗口透明像素。 */
+/** @brief 按 SDK 实际取整点与精确屏幕矩形查找最高 z_order 应用；不推断系统窗口透明像素。 */
 export function windowAt(location: ResolvedLocation, windows: readonly WindowInfo[]): WindowInfo | undefined {
   const [x, y] = location.center.map(Math.round);
   return windows.filter((window) => {
-    const box = window.bounding_box;
+    const box = window.screen_bounds;
     return !window.is_system && x >= box.x && x < box.x + box.width
       && y >= box.y && y < box.y + box.height;
   }).sort((left, right) => right.z_order - left.z_order)[0];

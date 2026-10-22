@@ -50,6 +50,11 @@ class VisualizationTests(unittest.TestCase):
     """使用真实采集格式和小型 PNG 验证页面生成流程。"""
 
     def setUp(self):
+        from tests.support import synthetic_screen_geometry
+        geometry = patch("har_capture.window_geometry.attach_captured_screen_geometry",
+                         side_effect=synthetic_screen_geometry)
+        geometry.start()
+        self.addCleanup(geometry.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -362,6 +367,21 @@ class VisualizationTests(unittest.TestCase):
         with self.assertRaises(CaptureError):
             build_viewer(directory)
         self.assertFalse((directory / "viewer.html").exists())
+
+    def test_missing_or_modified_exact_screen_bounds_are_rejected_before_building_html(self):
+        for mutation in ("missing", "changed"):
+            with self.subTest(mutation=mutation):
+                directory = self.new_capture()
+                metadata = json.loads((directory / "metadata.json").read_bytes())
+                window = metadata["windows"][0]
+                if mutation == "missing":
+                    del window["screen_bounds"]
+                else:
+                    window["screen_bounds"]["width"] += 1
+                self.write_metadata(directory, metadata)
+                with self.assertLogs(level="ERROR"), self.assertRaisesRegex(CaptureError, "screen geometry differs"):
+                    build_viewer(directory)
+                self.assertFalse((directory / "viewer.html").exists())
 
     def test_incomplete_status_and_directory_suffix_are_rejected(self):
         for status, suffix in (("failed", ""), ("complete", ".partial"), ("complete", ".failed")):

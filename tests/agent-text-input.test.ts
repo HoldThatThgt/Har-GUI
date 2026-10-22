@@ -55,6 +55,7 @@ function fixture(t: TestContext, changes: object = {}, failure?: object) {
     python: 'unused-python' }, state);
   const window: WindowInfo = { window_id: 1, bundle_name: 'app.allowed', process_id: 100, display_id: 0,
     z_order: 1, window_mode: 1, bounding_box: { x: 0, y: 0, width: 100, height: 100 },
+    screen_bounds: { x: 0, y: 0, width: 100, height: 100 },
     ui_node_id: 10, is_system: false, focused: true };
   const current = [window];
   const windows = t.mock.method(device, 'windows', async () => current);
@@ -117,7 +118,7 @@ test('invalid runtime parameters fail before device access and are audited', asy
 test('resolved Input routes the full text to the highest app window and returns redacted evidence', async (t) => {
   const f = fixture(t);
   const top = { ...f.window, window_id: 8, bundle_name: 'app.editor', display_id: 2, z_order: 10,
-    bounding_box: { x: 10, y: 20, width: 50, height: 50 } };
+    bounding_box: { x: 10, y: 20, width: 50, height: 50 }, screen_bounds: { x: 10, y: 20, width: 50, height: 50 } };
   f.state.task.bundle_names!.push('app.editor');
   f.current.push(top, { ...top, window_id: 9, is_system: true, z_order: 100 });
   f.device.planningObservation!.windows = [...f.current];
@@ -192,6 +193,36 @@ test('Input rejects stale observations and out-of-scope targets before the text 
       assert.equal(f.hide.mock.callCount(), 0);
     });
   }
+});
+
+test('Input rejects the UC logical-only region before the text bridge without changing allowed bundles', async (t) => {
+  const f = fixture(t);
+  const window = { ...f.window, window_id: 106, window_mode: 102,
+    bounding_box: { x: 203, y: 203, width: 2048, height: 2230 },
+    screen_bounds: { x: 203.3, y: 203.3, width: 1470.885888, height: 1601.59938 } };
+  f.current.splice(0, f.current.length, window);
+  f.device.planningObservation!.windows = [structuredClone(window)];
+  const allowed = structuredClone(f.state.task.bundle_names);
+  await assert.rejects(f.action.call({ value: 'fixture text', locate: { center: [2184, 1872] } }),
+    /outside known application window rectangles/);
+  assert.equal(f.spawn.mock.callCount(), 0);
+  assert.equal(f.native.mock.callCount(), 0);
+  assert.equal(f.hide.mock.callCount(), 0);
+  assert.equal(f.state.revision, 0);
+  assert.deepEqual(f.state.task.bundle_names, allowed);
+});
+
+test('Input rejects stale exact screen bounds before the text bridge', async (t) => {
+  const f = fixture(t);
+  const window = { ...f.window, screen_bounds: { x: 0.3, y: 0.3, width: 99.4, height: 99.4 } };
+  f.device.planningObservation!.windows = [structuredClone(window)];
+  f.current[0] = { ...window, screen_bounds: { ...window.screen_bounds, width: 99.3 } };
+  await assert.rejects(f.action.call({ value: 'fixture text', locate: { center: [20, 20] } }),
+    /changed since planning/);
+  assert.equal(f.spawn.mock.callCount(), 0);
+  assert.equal(f.native.mock.callCount(), 0);
+  assert.equal(f.hide.mock.callCount(), 0);
+  assert.equal(f.state.revision, 0);
 });
 
 test('failed native Input records exact request scope and safe phases through the nonzero bridge response', async (t) => {

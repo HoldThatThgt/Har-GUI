@@ -166,6 +166,11 @@ class StabilityTests(unittest.TestCase):
 
 class StabilityCaptureTests(unittest.TestCase):
     def setUp(self):
+        from tests.support import synthetic_screen_geometry
+        geometry = patch("har_capture.window_geometry.attach_captured_screen_geometry",
+                         side_effect=synthetic_screen_geometry)
+        geometry.start()
+        self.addCleanup(geometry.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.output = Path(self.temporary.name)

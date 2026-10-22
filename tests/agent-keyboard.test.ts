@@ -18,6 +18,7 @@ function fixture(t: TestContext) {
     python: 'unused-python' }, state);
   const window: WindowInfo = { window_id: 1, bundle_name: 'app.allowed', process_id: 100, display_id: 0,
     z_order: 1, window_mode: 1, bounding_box: { x: 0, y: 0, width: 100, height: 100 },
+    screen_bounds: { x: 0, y: 0, width: 100, height: 100 },
     ui_node_id: 10, is_system: false, focused: true };
   const windows = t.mock.method(device, 'windows', async () => [window]);
   const keyEvents: string[][] = [];

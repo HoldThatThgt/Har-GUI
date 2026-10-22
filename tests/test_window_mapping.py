@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from har_capture.coordinates import normalize_arkui
+from har_capture.coordinates import float32, float32_interval_near_equal, normalize_arkui, wms_scale_interval
 
 
 def component(node_id, tag, local, properties=None):
@@ -63,6 +63,22 @@ def application_fixture():
     native = {"$ID": 1, "$type": "root", "$rect": "[0.00,0.00],[2048.00,2230.00]",
               "$children": [native_modal]}
     return root, native
+
+
+def moved_window_fixture():
+    """@brief 构造冻结 UC 仅移动原点而 WMS 按官方门槛保留旧比例的场景。"""
+    args = mapping_fixture()
+    args[1]["bounding_box"].update(x=300, y=300)
+    args[1]["transform"].update(scale_x=0.71875, scale_y=0.718386)
+    scene = args[3]["scene"]
+    node = scene["path"][-1]
+    node["attributes"].update({"FrameRect": "RectT (0.00, 0.00) - [2048.00 x 2230.00]",
+                                "PaintRect without transform": "RectT (300.00, 300.00) - [2048.00 x 2230.00]",
+                                "scale(x,y)": "0.718206,0.718206"})
+    scene["native"]["$children"][0]["$rect"] = "[300.00,300.00],[1770.89,1901.60]"
+    args[3]["render_tree"] = args[3]["render_tree"].replace("203.3 0 2048 2230", "300 300 2048 2230")
+    args[3]["render_tree"] = args[3]["render_tree"].replace("0.876682", "0.718206")
+    return args
 
 
 def system_fixture(scene, full_native):
@@ -397,6 +413,46 @@ class WindowMappingTests(unittest.TestCase):
                 else:
                     args[1]["transform"]["scale_x"] = 0.88
                 self.assert_failed(args, code)
+
+    def test_moved_window_uses_exact_scene_bounds_when_wms_retains_the_previous_envelope_scale(self):
+        args = moved_window_fixture()
+        before = copy.deepcopy(args)
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                         result["coordinate_validation"]["issues"])
+        bounds = result["geometry"]["screen_bounds"]
+        for key, expected in {"x": 300, "y": 300, "width": 1470.885888, "height": 1601.59938}.items():
+            self.assertAlmostEqual(bounds[key], expected, places=5)
+        self.assertEqual(args[1]["bounding_box"]["width"] * args[1]["transform"]["scale_x"], 1472)
+        self.assertEqual(args, before)
+
+    def test_wms_retention_comparison_uses_the_printed_interval_and_rejects_outside_the_official_threshold(self):
+        args = moved_window_fixture()
+        args[1]["transform"]["scale_x"] = 0.719262
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                         result["coordinate_validation"]["issues"])
+        args[1]["transform"]["scale_x"] = 0.719263
+        self.assert_failed(args, "scene_wms_outer_scale_mismatch:x")
+
+    def test_official_float_near_equal_is_inclusive_and_rejects_the_next_float(self):
+        threshold = float32(0.001)
+        self.assertTrue(float32_interval_near_equal((threshold, threshold), 0.0))
+        beyond = float32(0.0010000002)
+        self.assertGreater(beyond, threshold)
+        self.assertFalse(float32_interval_near_equal((beyond, beyond), 0.0))
+
+    def test_wms_scale_printing_uses_six_significant_digits_and_eight_character_prefix(self):
+        lower, upper = wms_scale_interval(0.71875)
+        self.assertAlmostEqual(lower, 0.7187495, places=10)
+        self.assertAlmostEqual(upper, 0.7187505, places=10)
+        for original in (0.7187503, 0.01234569, 0.00010042, 1.000004):
+            with self.subTest(original=original):
+                stored = float32(original)
+                printed = float(format(stored, ".6g")[:8])
+                lower, upper = wms_scale_interval(printed)
+                self.assertLessEqual(lower, stored)
+                self.assertLessEqual(stored, upper)
 
     def test_display_identity_and_canvas_are_independently_verified(self):
         for scope in ("source", "screen", "canvas"):
