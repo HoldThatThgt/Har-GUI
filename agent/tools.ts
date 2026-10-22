@@ -12,6 +12,7 @@ import { windowSchema } from './state.js';
 import { checkWindows } from './observation.js';
 import { registerGeometry } from './geometry.js';
 import { safeActionParameters } from './privacy.js';
+import { harmonyKeyboardContract } from './keyboard.js';
 
 /** @brief 只注册当前已验证的 SDK 输入动作，保持名称与 Midscene 一致。 */
 function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
@@ -20,10 +21,12 @@ function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice
   for (const name of names) {
     const definition = definitions.find((action) => action.name === name);
     if (!definition) throw new Error(`Required SDK action is missing: ${name}`);
+    const action = name === 'KeyboardPress' ? { ...definition, ...harmonyKeyboardContract } : definition;
     registry.register({ mutates: true, resultSchema: z.object({ completed: z.literal(true),
       resolved_parameters: z.unknown() }), action: {
-      ...definition,
+      ...action,
       call: async (parameters, context) => {
+        if (name === 'KeyboardPress') parameters = harmonyKeyboardContract.paramSchema.parse(parameters);
         const device = getDevice();
         const observation = await checkWindows(device);
         assertInputScope(name, parameters, observation.windows, device.state.task.bundle_names);
