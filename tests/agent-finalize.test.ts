@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test, type TestContext } from 'node:test';
 import sharp from 'sharp';
+import { localBridge } from '../agent/bridge.js';
 import type { LoadedConfiguration } from '../agent/config.js';
 
 const sdkDirectory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-sdk-'));
@@ -76,6 +79,40 @@ function fixture(t: TestContext, candidate = true) {
   return { directory, capture, config, request: { directory: capture, taskName: 'editor' },
     runs: () => readdirSync(config.outputPath).map((name) => JSON.parse(
       readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
+}
+
+/** 记录全部原始证据、发布收据及正式五件套的字节摘要和精确修改时间。 */
+function savedFiles(roots: Record<string, string>) {
+  const result: Record<string, { sha256: string; modified: string }> = {};
+  for (const [label, root] of Object.entries(roots)) {
+    const pending = [root];
+    while (pending.length) {
+      const directory = pending.pop()!;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const file = join(directory, entry.name);
+        if (entry.isDirectory()) pending.push(file);
+        else result[`${label}:${file.slice(root.length)}`] = {
+          sha256: createHash('sha256').update(readFileSync(file)).digest('hex'),
+          modified: statSync(file, { bigint: true }).mtimeNs.toString(),
+        };
+      }
+    }
+  }
+  return result;
+}
+
+/** 将已发布收据改为等价的不同键序、缩进、转义和换行，验证恢复不会重新序列化。 */
+function varyReceipts(capture: string): void {
+  for (const name of ['metadata.json', 'delivery-manifest.json', 'delivery-preparation.json', 'publication.json']) {
+    const file = join(capture, name);
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    const ordered = Object.fromEntries(Object.entries(value).reverse());
+    const content = JSON.stringify(ordered, null, 1).replace(/Synthetic fixture/g, '\\u0053ynthetic fixture')
+      .replace(/\n/g, '\r\n') + '\r\n';
+    writeFileSync(file, content);
+    const modified = new Date('2020-01-01T00:00:00Z');
+    utimesSync(file, modified, modified);
+  }
 }
 
 /** 使用真正 HTTP 和 OpenAI SDK 流程返回可控视觉验收响应，不连接外部服务。 */
@@ -152,12 +189,25 @@ test('offline finalization uses the saved final PNG, accounts real model usage, 
   assert.equal(result.sample.files.screenshot.sha256, expectedHash);
   assert.equal(existsSync(join(f.capture, 'delivery')), false);
   assert.doesNotMatch(readFileSync(join(run, 'model-usage.jsonl'), 'utf8'), /private-model|data:image|local-fixture-key/);
-  const resumed = await finalize(f.config, { python: 'python' }, f.request);
-  const receipt = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
-  assert.equal(receipt.sample.sample_id, result.sample.sample_id);
-  assert.equal(receipt.model_usage.calls, 0);
+  varyReceipts(f.capture);
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath };
+  const preserved = savedFiles(roots);
+  for (const repeat of ['published', 'repeated']) {
+    const resumed = await finalize(f.config, { python: 'python' }, f.request);
+    const receipt = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
+    assert.equal(receipt.sample.sample_id, result.sample.sample_id, repeat);
+    assert.equal(receipt.model_usage.calls, 0);
+    assert.equal(receipt.accepted.length, 1);
+    assert.deepEqual(savedFiles(roots), preserved);
+  }
+  const status = await localBridge('python', { operation: 'dataset_status', root: f.config.datasetPath,
+    identity: { project_sha256: f.config.digests.project, config_sha256: f.config.digests.config,
+      tasks: f.config.project.tasks.map(({ name, target_count }) => ({ name, target_count })) } });
+  assert.deepEqual(status.counts, { editor: 1 });
+  assert.deepEqual(status.remaining, { editor: 0 });
+  assert.deepEqual(status.failures, []);
+  assert.deepEqual(savedFiles(roots), preserved);
   assert.equal(requests.length, 1);
-  assert.equal(receipt.accepted.length, 1);
 });
 
 test('rejected saved-image assertion keeps usage and leaves the dataset uncounted', async (t) => {

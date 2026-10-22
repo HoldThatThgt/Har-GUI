@@ -3,6 +3,7 @@
 import json
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from PIL import Image
 
 from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
-from har_capture.privacy import node_inventory, redact_capture, viewer_tree
+from har_capture.privacy import atomic_json, node_inventory, redact_capture, viewer_tree
 import redact as cli
 
 
@@ -33,6 +34,53 @@ class PrivacyTests(unittest.TestCase):
         (self.directory / "metadata.json").write_text(json.dumps(self.metadata), encoding="utf-8")
         self.policy = {"enabled": True, "reason": "Mask the body", "regions": [
             {"bundle_name": "test.mail", "resource_id": "body"}]}
+
+    def test_atomic_json_preserves_equivalent_original_bytes_and_modification_time(self):
+        path = self.directory / "receipt.json"
+        original = b'{\r\n "text": "\\u4f60\\u597d", "nested": {"enabled": false, "count": 1}\r\n}\r\n'
+        path.write_bytes(original)
+        os.utime(path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+        modified = path.stat().st_mtime_ns
+        atomic_json(path, {"nested": {"count": 1, "enabled": False}, "text": "你好"})
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+        self.assertFalse(path.with_suffix(".json.pending").exists())
+
+    def test_atomic_json_replaces_changed_values_including_boolean_numeric_difference(self):
+        path = self.directory / "receipt.json"
+        path.write_bytes(b'{"enabled": false}\r\n')
+        os.utime(path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+        modified = path.stat().st_mtime_ns
+        atomic_json(path, {"enabled": 0})
+        self.assertIs(type(json.loads(path.read_bytes())["enabled"]), int)
+        self.assertNotEqual(path.stat().st_mtime_ns, modified)
+        self.assertFalse(path.with_suffix(".json.pending").exists())
+
+    def test_atomic_json_rejects_corrupt_existing_json_without_replacing_evidence(self):
+        path = self.directory / "receipt.json"
+        original = b'{"corrupt":'
+        path.write_bytes(original)
+        modified = path.stat().st_mtime_ns
+        with self.assertLogs(level="ERROR"), self.assertRaisesRegex(CaptureError, "Cannot read existing JSON"):
+            atomic_json(path, {"corrupt": "new"})
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+        self.assertFalse(path.with_suffix(".json.pending").exists())
+
+    def test_repeated_redaction_preserves_all_evidence_bytes_and_modification_times(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                directory = self.directory / str(enabled)
+                directory.mkdir()
+                for name in ("screenshot.png", "accessibility.json", "metadata.json"):
+                    (directory / name).write_bytes((self.directory / name).read_bytes())
+                policy = {**self.policy, "enabled": enabled}
+                redact_capture(directory, policy)
+                snapshot = {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                            for path in directory.iterdir()}
+                redact_capture(directory, policy)
+                self.assertEqual(snapshot, {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                                            for path in directory.iterdir()})
 
     def test_masks_exact_pixels_keeps_one_image_and_preserves_tree_bytes(self):
         tree_bytes = (self.directory / "accessibility.json").read_bytes()

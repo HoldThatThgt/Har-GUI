@@ -13,7 +13,16 @@ from har_capture.metadata import file_info, layout_bounding_box
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    """@brief 原子替换本地 JSON。 @param path 目标文件。 @param value 数据。"""
+    """@brief 仅在 JSON 内容变化时原子替换文件，保留无变化文件的原始字节与时间。 @param path 目标文件。
+    @param value 数据。
+    """
+    if path.exists():
+        try:
+            existing = json.loads(path.read_bytes())
+        except (OSError, ValueError) as error:
+            fail(f"Cannot read existing JSON before atomic update: {path.name} ({type(error).__name__})")
+        if json.dumps(existing, sort_keys=True) == json.dumps(value, sort_keys=True):
+            return
     temporary = path.with_suffix(path.suffix + ".pending")
     with temporary.open("wb") as stream:
         stream.write((json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))

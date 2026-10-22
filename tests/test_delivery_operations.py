@@ -1,7 +1,9 @@
 """后处理重试与正式登记后的证据指针恢复测试。"""
 
 import copy
+import hashlib
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +49,43 @@ class DeliveryOperationTests(unittest.TestCase):
     def tearDown(self):
         self.helper.tearDown()
 
+    def snapshot_files(self):
+        return {str(path.relative_to(self.helper.directory)):
+                (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+                for path in self.helper.directory.rglob("*") if path.is_file()}
+
+    def preserve_alternate_json(self, names):
+        for name in names:
+            path = self.evidence / name
+            value = json.loads(path.read_bytes())
+            original = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=1).replace("\n", "\r\n")
+            path.write_bytes((original + "\r\n").encode("utf-8"))
+            os.utime(path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+    def test_completed_preparation_preserves_original_json_bytes_and_all_file_modification_times(self):
+        self.preserve_alternate_json(("metadata.json", "delivery-preparation.json", "delivery-manifest.json"))
+        before = self.snapshot_files()
+        first = operations.prepare_delivery(self.prepare_request)
+        self.assertEqual(first, operations.prepare_delivery(self.prepare_request))
+        self.assertEqual(before, self.snapshot_files())
+
+    def test_published_resume_prepare_and_republication_preserve_all_bytes_times_and_quotas(self):
+        published = operations.publish_delivery(self.publish_request)
+        self.preserve_alternate_json(("metadata.json", "delivery-preparation.json", "delivery-manifest.json",
+                                      "publication.json"))
+        before = self.snapshot_files()
+        for _ in range(2):
+            status = operations.resume_dataset(self.publish_request)
+            prepared = operations.prepare_delivery(self.prepare_request)
+            self.assertEqual(operations.publish_delivery(self.publish_request), published)
+            self.assertEqual(status["counts"], {"editor": 1, "other": 0})
+            self.assertEqual(status["remaining"], {"editor": 2, "other": 2})
+            self.assertEqual(status["failures"], [])
+            self.assertEqual(prepared["manifest"]["files"], published["files"])
+        self.assertEqual(before, self.snapshot_files())
+        self.assertEqual(len(list(Path(published["path"]).iterdir())), 5)
+        self.assertEqual(self.helper.rows(), [("frame-a", "committed", None)])
+
     def test_prepared_retry_is_idempotent_and_validates_all_files(self):
         first = operations.prepare_delivery(self.prepare_request)
         self.assertEqual(first, operations.prepare_delivery(self.prepare_request))
@@ -56,11 +95,13 @@ class DeliveryOperationTests(unittest.TestCase):
             operations.prepare_delivery(self.prepare_request)
 
     def test_prepared_retry_rejects_changed_rules(self):
+        before = self.snapshot_files()
         for field in ("options", "privacy"):
             request = copy.deepcopy(self.prepare_request)
             request[field]["reason" if field == "privacy" else "scene"] = "changed"
             with self.assertRaisesRegex(CaptureError, "rules or capture identity"):
                 operations.prepare_delivery(request)
+        self.assertEqual(before, self.snapshot_files())
 
     def test_prepare_rejects_legacy_privacy_policy_instead_of_reinterpreting_it(self):
         request = {**self.prepare_request, "privacy": {"mode": "none", "reason": "Synthetic fixture"}}
