@@ -165,11 +165,16 @@ def select_occurrence(key: str, native: dict, parents: dict, occurrences: dict) 
     return matches[0]
 
 
-def verify_cached_parent(key: str, selected: dict, native: dict, parents: dict) -> None:
-    """@brief 核验分离缓存根在两份原文中的同一所有者。 @param key 节点键。 @param selected 已选原文。
+def verify_selected_parent(key: str, selected: dict, native: dict, parents: dict) -> None:
+    """@brief 核验未分配标识帧及分离缓存根在双树中的完整父身份。 @param key 节点键。 @param selected 已选原文。
     @param native 原生索引。 @param parents 原生父索引。
     """
     record, parent = selected[key], parents[key]
+    attrs = record["node"]["attributes"]
+    if attrs["ID"] == "-1" and native[key]["$type"] == "Image":
+        owner = selected[parent]["node"]["attributes"]
+        if attrs.get("Parent") != owner["type"] or attrs.get("LastParentId") != owner["ID"]:
+            fail(f"ArkUI undefined Image {key} has conflicting raw/native ownership")
     if record["parent"] == parent:
         return
     attrs, owner = record["node"]["attributes"], selected[parent]["node"]["attributes"]
@@ -261,7 +266,7 @@ def select_native_tree(roots: list[dict], native_root: dict) -> dict:
     selected = {key: select_occurrence(key, native, parents, occurrences) for key in native}
     output, child_keys = {}, {}
     for key, record in selected.items():
-        verify_cached_parent(key, selected, native, parents)
+        verify_selected_parent(key, selected, native, parents)
         for alias in occurrences[key]:
             if alias is not record:
                 verify_broken_reference(key, record, alias)

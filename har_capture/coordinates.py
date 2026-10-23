@@ -87,12 +87,27 @@ def native_rect(value: str) -> dict:
 
 
 def node_key(node_id: str, tag: str, parent_id: str | None) -> str:
-    """@brief 为官方默认负标识回收容器建立父域身份。 @param node_id 原生标识。
+    """@brief 为官方未分配标识的回收容器及动画图片建立父域身份。 @param node_id 原生标识。
     @param tag 原生类型。 @param parent_id 父身份。 @return 唯一关联键。
     """
-    if node_id == "-1" and tag == "__Recycle__":
-        return str(parent_id) + "/__Recycle__"
+    if node_id == "-1" and tag in {"__Recycle__", "Image"}:
+        return str(parent_id) + "/" + tag
     return node_id
+
+
+def frame_key(node: dict) -> str:
+    """@brief 帧的未分配标识必须有明确父标识，之后还需与真实双树父链交叉核验。
+    @param node 原始布局帧。 @return 原生关联键，原始 ID 不变。
+    """
+    attrs = node["attributes"]
+    node_id, tag = str(attrs["ID"]), attrs["type"].split(",", 1)[0].strip()
+    parent = attrs.get("LastParentId")
+    if node_id == "-1" and tag == "Image" and (not isinstance(parent, str) or not re.fullmatch(r"\d+", parent)):
+        raise ValueError("undefined_image_parent_identity_missing")
+    if node_id == "-1" and tag == "Image" and not re.fullmatch(
+            r"ImageAnimator," + re.escape(parent) + r",-?\d+", attrs.get("Parent", "")):
+        raise ValueError("undefined_image_parent_identity_mismatch")
+    return node_key(node_id, tag, parent)
 
 
 def subtree_index(root: dict) -> tuple[dict, dict]:
@@ -101,6 +116,9 @@ def subtree_index(root: dict) -> tuple[dict, dict]:
     pending = [(root, None)]
     while pending:
         node, parent_id = pending.pop()
+        if (str(node["$ID"]) == "-1" and node["$type"] == "Image"
+                and (parent_id not in nodes or nodes[parent_id]["$type"] != "ImageAnimator")):
+            raise ValueError("undefined_image_parent_type_mismatch")
         node_id = node_key(str(node["$ID"]), node["$type"], parent_id)
         if node_id in nodes:
             raise ValueError("duplicate_native_geometry_id")
@@ -446,6 +464,8 @@ def scene_projection(node: dict, native: tuple, parent: tuple) -> tuple:
         return node_id, projection, None
     if "$rect" not in actual:
         raise ValueError("scene_native_frame_missing:" + node_id)
+    if frame_key(node) != node_id:
+        raise ValueError("scene_native_identity_or_parent_mismatch:" + node_id)
     projection, rect = local_projection(node, projection)
     observed = native_rect(actual["$rect"])
     if any(abs(observed[key] - rect[key]) > projection[1] + 0.011 for key in rect):
@@ -759,7 +779,7 @@ def zero_alpha_ancestor(node: dict, context: dict) -> dict | None:
     """@brief 沿真实原生和 RS 父链查证透明祖先，拒绝共享转场、动画及身份绕行。
     @param node 当前原始组件。 @param context 完整同批来源。 @return 已证明祖先或空。
     """
-    node_id = str(node["attributes"]["ID"])
+    node_id = frame_key(node)
     if node_id in context["overlays"]:
         return None
     traversed = []
@@ -943,7 +963,7 @@ def verify_scene_ancestors(records: dict, ancestors: list, render: dict, detache
     @param ancestors 当前渲染链。 @param render 已挂载索引。 @param detached 未挂载索引。
     """
     matched = []
-    frames = {str(item[0]["attributes"]["ID"]): item for item in records["nodes"].values()}
+    frames = {frame_key(item[0]): item for item in records["nodes"].values()}
     for index, item in enumerate(ancestors):
         if item["kind"] in ("RS_NODE", "SCREEN_NODE"):
             continue
@@ -953,7 +973,7 @@ def verify_scene_ancestors(records: dict, ancestors: list, render: dict, detache
             raise ValueError("unmapped_scene_render_ancestor:" + item["id"])
         record = records["nodes"][item["id"]]
         verify_render_geometry(item, record[0], False)
-        matched.append(str(record[0]["attributes"]["ID"]))
+        matched.append(frame_key(record[0]))
     for child, expected in zip(matched, matched[1:] + [None]):
         parent = records["parents"][child]
         while parent is not None and parent != expected:
@@ -1043,7 +1063,7 @@ def verify_native_projection(node: dict, context: dict, parent: tuple) -> tuple:
     @param parent 父变换。 @return 当前变换。
     """
     transform, expected = local_projection(node, parent)
-    native = context["native"][str(node["attributes"].get("ID"))]
+    native = context["native"][frame_key(node)]
     actual = native_rect(native["$rect"])
     if any(abs(actual[key] - expected[key]) > transform[1] + 0.011 for key in actual):
         raise ValueError("native_geometry_local_projection_mismatch")
@@ -1063,11 +1083,11 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
     @param mapping 屏幕映射。 @return 节点关联、原生窗口投影和渲染矩形。
     """
     links, rectangles, projections, matrices, overlays, frames = {}, {}, {}, {}, set(), {}
-    pending = [(raw, mapping["projection"], False, None)]
+    pending = [(raw, mapping["projection"], False, None, None)]
     while pending:
-        node, projection, overlay, parent_id = pending.pop()
+        node, projection, overlay, parent_key, parent_id = pending.pop()
         attrs = node["attributes"]
-        node_id = str(attrs.get("ID"))
+        node_id = node_key(str(attrs.get("ID")), attrs["type"].split(",", 1)[0].strip(), parent_key)
         overlay = overlay or attrs.get("Description") == "OverlayNode"
         if overlay and "FrameRect" in attrs and attrs.get("LastParentId") != parent_id:
             raise ValueError("overlay_parent_evidence_mismatch:" + node_id)
@@ -1077,6 +1097,9 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
                 raise ValueError("overlay_non_layout_parent_unverified:" + node_id)
             overlays.add(node_id)
         if "FrameRect" in attrs:
+            if (frame_key(node) != node_id or node_id in frames
+                    or (node_id != attrs["ID"] and native.get(parent_key, {}).get("$type") != "ImageAnimator")):
+                raise ValueError("raw_frame_identity_or_parent_mismatch:" + node_id)
             frames[node_id] = node
             projection, rect = local_projection(node, projection)
             if node_id not in native or "$rect" not in native[node_id]:
@@ -1084,7 +1107,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
                     raise ValueError("native_geometry_frame_missing:" + node_id)
                 overlays.add(node_id)
             projections[node_id] = rect
-        pending.extend((child, projection, overlay, node_id) for child in node["children"])
+        pending.extend((child, projection, overlay, node_id, attrs["ID"]) for child in node["children"])
         if "FrameRect" not in attrs:
             continue
         link = client_render(node)
@@ -1285,7 +1308,7 @@ def verify_render_transform_chain(ancestors: list, context: dict) -> None:
         if node is None:
             raise ValueError("unmapped_render_transform:" + render["id"])
         if (render["id"] != context["root_render_id"]
-                and str(node["attributes"]["ID"]) not in context["overlays"]):
+                and frame_key(node) not in context["overlays"]):
             verify_component_render_parent(node, render, context)
         verify_render_vectors(render, node)
         logical = render["id"] in context["unapplied_render_ids"] or render["id"] in context["zero_clip_proofs"]
@@ -1362,7 +1385,7 @@ def empty_subtree_frames(root: dict, context: dict) -> dict:
         pending.extend(node["children"])
         if "FrameRect" not in attrs:
             continue
-        node_id = str(attrs["ID"])
+        node_id = frame_key(node)
         render_id = context["links"][node_id]["id"]
         native = context["native"].get(node_id)
         if (native is None or node_id in context["overlays"]
@@ -1406,7 +1429,7 @@ def verify_component_render_parent(node: dict, render: dict, context: dict) -> N
     """@brief 穿过非布局节点及已证明省略的恒等帧，核对实际 RS 父节点。 @param node 原始帧。
     @param render 已挂载帧。 @param context 原生父链和唯一渲染关联。
     """
-    parent = context["parents"][str(node["attributes"]["ID"])]
+    parent = context["parents"][frame_key(node)]
     while parent is not None:
         expected = context["links"].get(parent)
         if expected is not None:
@@ -1533,7 +1556,7 @@ def verify_detached_empty_parent(node: dict, render: dict, context: dict) -> Non
     """
     if render["parent"] is None:
         return
-    parent = context["parents"][str(node["attributes"]["ID"])]
+    parent = context["parents"][frame_key(node)]
     while parent is not None:
         expected = context["links"].get(parent)
         if expected is not None:
@@ -1551,7 +1574,7 @@ def empty_render_subtree(node: dict, context: dict) -> tuple:
     """@brief 仅对完整原始、原生和实际 RS 空子树生成无绘制证明，失败仍绑定当前组件。 @param node 当前帧。
     @param context 本批来源。 @return 挂载、未挂载及未物化标识。
     """
-    root_id = context["links"][str(node["attributes"]["ID"])]["id"]
+    root_id = context["links"][frame_key(node)]["id"]
     render = context["render"].get(root_id)
     match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
     local = list(map(number, match.groups())) if match else []
@@ -1587,7 +1610,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     """@brief 生成来自原生几何的已验证框。 @param node 原始节点。 @param context 上下文。
     @param inherited 祖先裁剪。 @return 带证据的几何。
     """
-    node_id = str(node["attributes"].get("ID"))
+    node_id = frame_key(node)
     native = context["native"].get(node_id, {})
     link = context["links"][node_id]
     no_draw, no_draw_nodes, no_draw_detached, no_draw_unmaterialized = False, [], [], []
@@ -1635,13 +1658,15 @@ def geometry_source(node_id: str, context: dict, state: dict, no_draw: tuple) ->
     """
     link = context["links"][node_id]
     overlay = node_id in context["overlays"]
+    original_id = str(context["raw_frames"][node_id]["attributes"]["ID"])
     return {**({"zero_alpha_ancestor": state["transparent"],
                 "render_geometry_state": state["pending_state"] or "applied"} if state["transparent"] else {}),
             **({"zero_area_clip_client": context["client_zero_clip_sources"][link["id"]]}
                if link["id"] in context["client_zero_clip_sources"] else {}),
             "method": "ArkUI.PaintRectAncestorComposition",
             "commands": ["WindowManagerService.-default.-all", "WindowManagerService.-allInfoWithParamConfig",
-                         "RenderService.RSTree", "RenderService.allNodeNotOnTree"], "node_id": node_id,
+                         "RenderService.RSTree", "RenderService.allNodeNotOnTree"], "node_id": original_id,
+            **({"node_key": node_id} if node_id != original_id else {}),
             "native_rect_cross_checked": not overlay, "window_mapping": context["window_mapping"],
             "overlay_render_cross_checked": overlay,
             "native_traversal_omission": ("UINode.DumpSimplifyTreeWithParamConfig.excludes_OverlayNode"
