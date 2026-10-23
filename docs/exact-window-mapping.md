@@ -117,6 +117,35 @@ WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的�
 原始和原生零尺寸 Frame，父关系一致，均有完整无绘制标记，并通过局部变换与裁剪检查。
 有结构子节点不等于存在绘制内容；正面积、后代绘制、身份冲突、缺少证明或未知变换裁剪仍拒收。
 
+原始组件父子关系不等于实际渲染挂载关系。已观察到的原始及原生零尺寸 Frame 必须完整划分为
+挂载子树和有明确 `allNodeNotOnTree` 来源的未挂载森林，两组不重叠，合集覆盖全部已观察 Frame。
+挂载组必须与实际 RS 子树完全一致；未挂载组逐项核验身份、原生投影、实际父关系、完整后代、
+双零绘制标记和局部变换裁剪。未挂载森林根保留独立根边界，非根仍须匹配原生帧父链。
+完整子树证明中的当前 Bounds/Frame 必须同时为全 `-inf`，或均为与原始绘制框一致的有限零尺寸框；
+混合无穷与有限框、正面积或原点冲突都不能作为空帧证明。
+未知、缺失、额外节点或挂载状态冲突均拒收，不能用隐藏或懒加载标记替代未挂载来源。
+
+```mermaid
+flowchart LR
+    Observed[全部已观察的原始及原生零尺寸 Frame] --> Mounted[挂载组与实际 RS 子树完全一致]
+    Observed --> Detached[未挂载组逐项核验独立森林证据]
+    Mounted --> Coverage[两组不重叠且完整覆盖]
+    Detached --> Coverage
+    Coverage --> Proof[分别保存挂载与未挂载证明]
+```
+
+`geometry.source.no_draw_render_node_ids` 只记录经核验的挂载节点，
+`geometry.source.no_draw_detached_render_node_ids` 单独记录该证明中明确未挂载的节点。
+节点自身的挂载状态和原始树结构照常保留，不把未挂载后代伪装成挂载子树成员。
+
+官方 [DumpTree](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/base/ui_node.cpp#L1419-L1447)
+先输出自身及声明的子节点数量，在隐藏且非全部节点模式下停止展开；
+[DumpSimplifyTree](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/base/ui_node.cpp#L1778-L1793)
+也在隐藏节点处停止遍历。因此声明数量可以大于实际输出的子节点数量。
+[FrameProxy 输出](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/base/frame_node.cpp#L595-L620)
+记录逻辑子节点和缓存索引；它不能补造未输出的原始或原生节点。
+`declared_child_count`、`FrameProxy` 和原文全部保留，不据此声称逻辑后代不存在。
+
 官方 [RS 树输出](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L1288-L1296)
 分别记录自身绘制内容、后代绘制内容和准备跳过状态。
 [绘制内容计算](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/feature/dynamic_layer_skip/rs_dynamic_layer_skip_controller.cpp#L87-L155)
@@ -139,6 +168,21 @@ WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的�
 关闭时保留原图，开启时按声明区域处理；原始双树保留，开关不改变坐标和全窗覆盖门槛。
 
 ## 当前离线验证
+
+2026-10-23 使用冻结浏览器窗口的完整 ArkUI 树及同批坐标来源，在独立副本上调用生产
+`normalized_arkui` 导出接口成功：原始 1341 个节点全部保留，636/636 个 Frame 验证通过，
+705 个非布局节点原样保留，没有剩余坐标问题。此前已通过的 635 个 Frame 核心几何保持不变。
+
+`Row 438` 的实际挂载子树只含自身，`Column 439` 明确位于未挂载树。两者的原生零尺寸位置
+`(1631,201)` 均映射为屏幕 `(3095,447,0,0)`，分别保存挂载与未挂载来源并标记不绘制。
+`Column 439` 仍声明一个逻辑子节点，保留 `FrameProxy` 中的 `440`，已观察子节点数组仍为空，
+没有伪造未输出的节点。全部 Frame 与独立原生矩形经实际父变换后的逐字段最大差为 `0.0`。
+
+13 份原文件及附带索引的字节、摘要和修改时间保持不变。本轮没有连接设备、重新采集或调用模型。
+提供的输入是坐标分析子集，完整窗口的 ArkUI JSON 已实际导出；未补造缺失截图或无障碍树，
+未生成正式五件套、发布样本或改变配额。原始失败记录保持原样。
+
+## 既有离线验证
 
 2026-10-23 使用冻结今日头条窗口的完整 ArkUI 树及同批坐标来源，在独立副本上调用生产
 `normalized_arkui` 导出接口成功：原始 133 个节点全部保留，90/90 个 Frame 验证通过，

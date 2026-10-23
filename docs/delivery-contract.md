@@ -171,5 +171,9 @@ flowchart LR
 零尺寸容器的无穷大 RS 矩形在完整无绘制子树证据通过后，可以保留其原生零尺寸边界并标记不绘制；
 不删除容器或子节点，不把无穷大值用作屏幕坐标，也不单凭跳过准备状态认定无绘制。
 无绘制节点使用 `render_state_source=RenderService.no_draw_content`，
-`geometry.source.no_draw_render_node_ids` 保留经核验的实际渲染节点标识。
+`geometry.source.no_draw_render_node_ids` 只保留证明中的挂载节点标识，
+`geometry.source.no_draw_detached_render_node_ids` 单独保存有明确未挂载来源的证明节点。
+两组必须不重叠并完整覆盖已观察的原始及原生零尺寸 Frame，不能把未挂载后代计入挂载子树。
+隐藏节点可能声明逻辑后代而不展开；保留 `declared_child_count` 和 `FrameProxy`，不补造未输出节点，
+详见[非渲染节点](exact-window-mapping.md#非渲染节点)。
 系统窗口保留独立原生双树；当前正式应用 ArkUI 的坐标校验不等于系统树全部节点均已转换坐标。

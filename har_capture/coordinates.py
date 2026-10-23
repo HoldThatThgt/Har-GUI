@@ -852,8 +852,8 @@ def verify_overlay_render(node_id: str, context: dict) -> None:
 
 
 def empty_subtree_frames(root: dict, context: dict) -> dict:
-    """@brief 为待验证空子树唯一关联原始及原生零尺寸帧，保留非布局包装节点。 @param root 当前组件。
-    @param context 本批来源。 @return 按真实渲染标识索引的原始帧。
+    """@brief 唯一关联已观察到的原始及原生零尺寸帧，不推断隐藏节点的逻辑子节点。 @param root 当前组件。
+    @param context 本批来源。 @return 按真实渲染标识索引的已观察帧。
     """
     frames, pending = {}, [root]
     while pending:
@@ -920,11 +920,31 @@ def verify_empty_render_parent(node: dict, render: dict, context: dict) -> None:
     raise ValueError("empty_render_subtree_parent_mismatch:" + render["id"])
 
 
+def verify_empty_render_bounds(render: dict, node: dict) -> None:
+    """@brief 空帧只接受一致的未生效双框或有限零尺寸双框，不忽略独立 Frame 冲突。 @param render 渲染帧。
+    @param node 已核验原始零尺寸帧。
+    """
+    match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
+    if match is None:
+        raise ValueError("render_modifier_evidence_missing")
+    if all(value.split() == ["-inf"] * 4 for value in match.groups()):
+        return
+    local = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
+    expected = list(map(number, local.groups()))
+    for value in match.groups():
+        bounds = list(map(number, value.split()))
+        if len(bounds) != 4 or bounds[2:] != [0, 0]:
+            raise ValueError("empty_render_subtree_nonzero_render_geometry:" + render["id"])
+        if any(abs(first - second) > 0.11 for first, second in zip(bounds, expected, strict=True)):
+            raise ValueError("empty_render_subtree_frame_mismatch:" + render["id"])
+
+
 def verify_empty_render_modifiers(render: dict, node: dict) -> None:
     """@brief 验证空帧的完整局部变换并拒绝生效或未知裁剪，不读取无穷框作为几何。 @param render 渲染帧。
     @param node 原始帧。
     """
     verify_render_geometry(render, node, True)
+    verify_empty_render_bounds(render, node)
     values = verify_modifiers(render)
     flags = re.findall(r"ClipTo(?:Bounds|Frame)\[([^\]]+)\]", render["line"])
     if any(value.lower() != "false" for value in flags):
@@ -935,36 +955,82 @@ def verify_empty_render_modifiers(render: dict, node: dict) -> None:
             raise ValueError("unsupported_empty_render_clip:" + render["id"])
 
 
-def empty_render_subtree(node: dict, context: dict) -> list[str]:
+def detached_empty_frames(frames: dict, actual: list, context: dict) -> dict:
+    """@brief 将已观察帧严格划分为实际挂载子树和有独立来源的未挂载森林。 @param frames 已观察帧。
+    @param actual 实际挂载子树。 @param context 本批来源。 @return 独立未挂载记录。
+    """
+    mounted = {item["id"] for item in actual}
+    if not mounted.issubset(frames):
+        raise ValueError("empty_render_subtree_membership_mismatch:" + actual[0]["id"])
+    detached_ids = set(frames) - mounted
+    detached = {}
+    for render_id in sorted(detached_ids):
+        if render_id in context["render"] or render_id not in context["detached_render"]:
+            raise ValueError("empty_render_subtree_attachment_unverified:" + render_id)
+        record = context["detached_render"][render_id]
+        if record["parent"] is not None and record["parent"] not in detached_ids:
+            raise ValueError("empty_render_subtree_detached_parent_mismatch:" + render_id)
+        subtree = actual_render_subtree(render_id, context["detached_render"])
+        if any(item["id"] not in detached_ids for item in subtree):
+            raise ValueError("empty_render_subtree_membership_mismatch:" + render_id)
+        detached[render_id] = record
+    return detached
+
+
+def verify_detached_empty_parent(node: dict, render: dict, context: dict) -> None:
+    """@brief 保留未挂载森林根边界，非根记录仍核对原生帧父链。 @param node 原始帧。
+    @param render 明确未挂载帧。 @param context 原生父链及挂载来源。
+    """
+    if render["parent"] is None:
+        return
+    parent = context["parents"][str(node["attributes"]["ID"])]
+    while parent is not None:
+        expected = context["links"].get(parent)
+        if expected is not None:
+            if expected["id"] in context["render"] or expected["id"] in context["detached_render"]:
+                if render["parent"] != expected["id"]:
+                    raise ValueError("empty_render_subtree_detached_parent_mismatch:" + render["id"])
+                return
+            record = (context["raw_frames"][parent], None)
+            verify_omitted_scene_frame(record, context["render"], context["detached_render"])
+        parent = context["parents"][parent]
+    raise ValueError("empty_render_subtree_detached_parent_mismatch:" + render["id"])
+
+
+def empty_render_subtree(node: dict, context: dict) -> tuple[list[str], list[str]]:
     """@brief 仅对完整原始、原生和实际 RS 空子树生成无绘制证明，失败仍绑定当前组件。 @param node 当前帧。
-    @param context 本批来源。 @return 经逐节点验证的渲染标识，非候选返回空集合。
+    @param context 本批来源。 @return 分别核验的挂载与未挂载标识，非候选均为空集合。
     """
     root_id = context["links"][str(node["attributes"]["ID"])]["id"]
     render = context["render"].get(root_id)
     match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
     local = list(map(number, match.groups())) if match else []
     if (render is None or len(local) != 4 or local[2:] != [0, 0] or not render_has_no_draw_content(render)):
-        return []
+        return [], []
     bounds = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
     if bounds is None or any(value.split() != ["-inf"] * 4 for value in bounds.groups()):
-        return []
+        return [], []
     pending, frame_child = list(node["children"]), False
     while pending and not frame_child:
         child = pending.pop()
         frame_child = "FrameRect" in child["attributes"]
         pending.extend(child["children"])
     if render["children_count"] == 0 and not frame_child:
-        return []
+        return [], []
     frames = empty_subtree_frames(node, context)
     actual = actual_render_subtree(root_id, context["render"])
-    if set(frames) != {item["id"] for item in actual}:
-        raise ValueError("empty_render_subtree_membership_mismatch:" + root_id)
+    detached = detached_empty_frames(frames, actual, context)
     for item in actual:
         if not render_has_no_draw_content(item):
             raise ValueError("empty_render_subtree_draw_content_unverified:" + item["id"])
         verify_empty_render_parent(frames[item["id"]], item, context)
         verify_empty_render_modifiers(item, frames[item["id"]])
-    return [item["id"] for item in actual]
+    for item in detached.values():
+        if not render_has_no_draw_content(item):
+            raise ValueError("empty_render_subtree_draw_content_unverified:" + item["id"])
+        verify_detached_empty_parent(frames[item["id"]], item, context)
+        verify_empty_render_modifiers(item, frames[item["id"]])
+    return [item["id"] for item in actual], list(detached)
 
 
 def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
@@ -974,7 +1040,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     node_id = str(node["attributes"].get("ID"))
     native = context["native"].get(node_id, {})
     link = context["links"][node_id]
-    no_draw, no_draw_nodes = False, []
+    no_draw, no_draw_nodes, no_draw_detached = False, [], []
     bounds = context["rectangles"][link["id"]]
     if node_id in context["overlays"]:
         verify_overlay_render(node_id, context)
@@ -985,7 +1051,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     else:
         clips = inherited if hidden and link["id"] not in context["render"] else frame_clips(link, context, inherited)
     if link["id"] in context["render"]:
-        no_draw_nodes = empty_render_subtree(node, context)
+        no_draw_nodes, no_draw_detached = empty_render_subtree(node, context)
         no_draw = verify_render_geometry(context["render"][link["id"]], node, bool(no_draw_nodes))
     clipped = None if detached else bounds
     for clip in clips:
@@ -1006,6 +1072,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
                                                      if node_id in context["overlays"] else None),
                        "render_node_id": link["id"],
                        "no_draw_render_node_ids": no_draw_nodes or ([link["id"]] if no_draw else []),
+                       "no_draw_detached_render_node_ids": no_draw_detached,
                        "render_node_materialized": link["id"] in context["render"] or detached,
                        "render_node_on_screen_tree": link["id"] in context["render"]}}
 

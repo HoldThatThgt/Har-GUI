@@ -513,6 +513,8 @@ ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘�
 来源、实际渲染祖先、应用 Surface 和无绘制节点的规则见[精确窗口映射](docs/exact-window-mapping.md)。
 父级 Surface 和应用根的尺寸分别核验；应用根保留裁剪前边界，实际 RS 裁剪单独保存在
 `clip_chain` 与 `rectangular_clip_bounds`，尺寸不同不会触发跨节点的相等要求。
+零尺寸无绘制容器分别核验挂载子树与明确未挂载的后代，两组须完整覆盖已观察节点。
+隐藏节点的声明子节点数量和 `FrameProxy` 原样保留，不据此补造未输出的节点。
 新采集必须包含 `coordinate_evidence.scene_sources`；缺失时拒绝导出，需要重新采集。
 
 | 节点字段 | 含义 |
