@@ -9,8 +9,17 @@ import { type LoadedConfiguration, resolveModelConfig } from './config.js';
 import { bridge, type DeviceOptions } from './bridge.js';
 import { CollectionAgent, CollectionDevice } from './device.js';
 import { RunState } from './state.js';
+import { saveRunConfiguration } from './provenance.js';
 import { createRegistry } from './tools.js';
 import { UsageRecorder, estimateUsageCost, type UsageRates } from './usage.js';
+
+/** @brief 仅约束本轮新增发布数量，不改变项目累计配额。 */
+export interface RunOptions {
+  /** 本轮最多新增的不同正式样本数量；省略时不限制。 */
+  maxNewSamples?: number;
+  /** 调用者明确指定的历史原始项目文件或目录。 */
+  projectSources?: string[];
+}
 
 /** @brief 根据项目意图生成规划要求，应用导航路径完全交给模型。 */
 function taskPrompt(state: RunState, remaining: number): string {
@@ -49,9 +58,11 @@ function createAgent(device: CollectionDevice, state: RunState, usage: UsageReco
 /** @brief 逐个完成项目任务；采集通过完整性与视觉验收后才计数。 */
 async function collectTasks(
   state: RunState, device: CollectionDevice, agent: CollectionAgent, usage: UsageRecorder,
-): Promise<void> {
+  limitReached: () => boolean,
+): Promise<'quota_complete' | 'run_sample_limit'> {
   for (state.taskIndex = 0; state.taskIndex < state.config.project.tasks.length; state.taskIndex += 1) {
     while (state.acceptedCount(state.task.name) < state.task.target_count) {
+      if (limitReached()) return 'run_sample_limit';
       state.candidate = undefined;
       state.changes = [];
       state.observations.clear();
@@ -61,6 +72,7 @@ async function collectTasks(
         state.task.target_count - state.acceptedCount(state.task.name));
     }
   }
+  return 'quota_complete';
 }
 
 /** @brief 按真实请求切片汇总用量，未配置价格时明确不提供费用估算。 */
@@ -137,41 +149,67 @@ async function restoreDataset(state: RunState, connection: DeviceOptions): Promi
   state.event('dataset_resumed', { counts: status.counts, remaining: status.remaining, failures: status.failures });
 }
 
+/** @brief 只统计恢复记录之外已经成功发布的不同样本身份。 */
+function newSampleCount(state: RunState, restored: ReadonlySet<string>): number {
+  const samples = state.accepted as { sample_id: string }[];
+  return new Set(samples.map((sample) => sample.sample_id).filter((id) => !restored.has(id))).size;
+}
+
+/** @brief 需要新增样本时才连接设备并创建模型；达到本轮上限按正常完成处理。 */
+async function collectRemaining(
+  state: RunState, connection: DeviceOptions, usage: UsageRecorder, limitReached: () => boolean,
+): Promise<'quota_complete' | 'run_sample_limit'> {
+  if (state.config.project.tasks.every((task) => state.acceptedCount(task.name) >= task.target_count)) {
+    return 'quota_complete';
+  }
+  if (limitReached()) return 'run_sample_limit';
+  const device = new CollectionDevice(connection, state);
+  device.actions = createRegistry(() => device).actions(state);
+  await device.connect();
+  const agent = createAgent(device, state, usage);
+  try { return await collectTasks(state, device, agent, usage, limitReached); }
+  finally { await agent.destroy(); }
+}
+
 /** @brief 使用设备锁执行一次完整运行，并始终写明成功或失败。 */
-export async function run(config: LoadedConfiguration, connection: DeviceOptions): Promise<string> {
+export async function run(
+  config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions = {},
+): Promise<string> {
+  const { maxNewSamples } = options;
   const directory = path.join(config.outputPath, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID());
   await mkdir(directory, { recursive: true });
-  const state = new RunState(config, directory);
+  const state = new RunState(config, directory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const lockPath = path.join(path.dirname(connection.hdc), `har-gui-${connection.serial}.lock`);
   let lock: Awaited<ReturnType<typeof acquireDeviceLock>> | undefined;
-  let agent: CollectionAgent | undefined;
+  const restored = new Set<string>();
+  const progress = () => ({ max_new_samples: maxNewSamples ?? null,
+    new_samples: newSampleCount(state, restored) });
   const interrupt = () => state.controller.abort(new Error('Run interrupted'));
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {
+    if (maxNewSamples !== undefined && (!Number.isSafeInteger(maxNewSamples) || maxNewSamples < 0)) {
+      throw new Error('maxNewSamples must be a non-negative safe integer');
+    }
     lock = await acquireDeviceLock(lockPath, directory);
-    await writeFile(path.join(directory, 'configuration.json'), JSON.stringify(config, null, 2) + '\n');
+    await saveRunConfiguration(config, directory);
     await restoreDataset(state, connection);
-    state.save('running', { device: connection.serial });
-    const device = new CollectionDevice(connection, state);
-    device.actions = createRegistry(() => device).actions(state);
-    await device.connect();
-    agent = createAgent(device, state, usage);
-    await collectTasks(state, device, agent, usage);
-    state.save('complete', { device: connection.serial, model_usage: usageSnapshot(usage, config.profile.pricing) });
+    for (const sample of state.accepted as { sample_id: string }[]) restored.add(sample.sample_id);
+    state.save('running', { device: connection.serial, ...progress() });
+    const stopReason = await collectRemaining(state, connection, usage,
+      () => maxNewSamples !== undefined && newSampleCount(state, restored) >= maxNewSamples);
+    state.save('complete', { device: connection.serial, ...progress(), stop_reason: stopReason,
+      model_usage: usageSnapshot(usage, config.profile.pricing) });
     return directory;
   } catch (error) {
     console.error('Collection run failed:', String(error));
-    state.save('failed', { error: String(error), candidate: state.candidate,
+    state.save('failed', { error: String(error), candidate: state.candidate, ...progress(),
       model_usage: usageSnapshot(usage, config.profile.pricing) });
     throw error;
   } finally {
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
-    try { await agent?.destroy(); }
-    finally {
-      if (lock) { await lock.close(); await unlink(lockPath); }
-    }
+    if (lock) { await lock.close(); await unlink(lockPath); }
   }
 }

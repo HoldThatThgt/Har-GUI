@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import childProcess, { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
@@ -12,6 +12,7 @@ import { after, test, type TestContext } from 'node:test';
 import sharp from 'sharp';
 import { localBridge } from '../agent/bridge.js';
 import type { LoadedConfiguration } from '../agent/config.js';
+import { writeFixtureConfiguration } from './agent-configuration.js';
 
 const sdkDirectory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-sdk-'));
 process.env.MIDSCENE_RUN_DIR = sdkDirectory;
@@ -35,9 +36,12 @@ from har_capture.delivery_operations import prepare_delivery
 root = Path(sys.argv[1])
 geometry = patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry)
 geometry.start()
-source = capture(fake_hdc(),root.parent / 'collected')
-root.rmdir()
-source.rename(root)
+if len(sys.argv) > 3 and sys.argv[3] == 'agent_run':
+    root = capture(fake_hdc(),root)
+else:
+    source = capture(fake_hdc(),root.parent / 'collected')
+    root.rmdir()
+    source.rename(root)
 metadata = json.loads((root / 'metadata.json').read_bytes())
 policy = {'enabled':False,'reason':'Synthetic fixture'}
 options = {'app':'editor','page_id':sys.argv[2] or metadata['capture_id'],'scene':'scene',
@@ -71,11 +75,11 @@ with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_ef
 }
 
 /** 在测试临时目录建立真实五件套及可重新核验的准备凭证。 */
-function fixture(t: TestContext, candidate = true) {
+function fixture(t: TestContext, candidate = true, captureInRun = false) {
   mockSyntheticGeometry(t);
   const directory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-test-'));
-  const capture = join(directory, 'capture');
-  mkdirSync(capture);
+  let capture = captureInRun ? join(directory, 'runs', 'run-A', 'captures') : join(directory, 'capture');
+  mkdirSync(capture, { recursive: true });
   t.after(() => {
     assert.equal(dirname(directory), resolve(tmpdir()));
     assert.ok(basename(directory).startsWith('har-gui-finalize-test-'));
@@ -83,16 +87,17 @@ function fixture(t: TestContext, candidate = true) {
   });
   t.mock.method(console, 'error', () => {});
   t.mock.method(console, 'warn', () => {});
-  execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : ''], {
+  execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : '', captureInRun ? 'agent_run' : ''], {
     windowsHide: true, env: { ...process.env, PYTHONUTF8: '1' },
   });
+  if (captureInRun) capture = join(capture, readdirSync(capture)[0]);
   const metadata = JSON.parse(readFileSync(join(capture, 'metadata.json'), 'utf8'));
   if (candidate) writeFileSync(join(capture, 'candidate.json'), JSON.stringify({ capture_id: metadata.capture_id,
     path: capture, task_name: 'editor', target_bundle_name: 'com.example.settings',
     page_name: 'page', window_changes: [] }));
   const config: LoadedConfiguration = { projectPath: join(directory, 'project.toml'),
     configPath: join(directory, 'config.toml'), outputPath: join(directory, 'runs'),
-    datasetPath: join(directory, 'dataset'), digests: { project: 'a'.repeat(64), config: 'b'.repeat(64) },
+    datasetPath: join(directory, 'dataset'), digests: { project: '', config: '' },
     profile: { provider: 'openai_compatible', base_url: 'http://127.0.0.1:1/v1', model: 'fixture-vision',
       model_family: 'deepseek', api_key_env: 'HAR_GUI_FINALIZE_TEST_KEY', supports_vision: true },
     project: { schema_version: 1, run: { name: 'fixture', output: 'runs', max_actions: 1, max_duration_seconds: 60 },
@@ -100,6 +105,7 @@ function fixture(t: TestContext, candidate = true) {
       tools: { enabled: ['Capture'] }, tasks: [{ name: 'editor', app: 'editor', scene: 'scene', target_count: 1,
         privacy: { enabled: false, reason: 'Synthetic fixture' }, bundle_names: ['com.example.settings'],
         instruction: 'Inspect the saved fixture', acceptance: 'The saved screenshot is white' }] } };
+  writeFixtureConfiguration(config);
   return { directory, capture, config, request: { directory: capture, taskName: 'editor' },
     runs: () => readdirSync(config.outputPath).map((name) => JSON.parse(
       readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
@@ -157,6 +163,7 @@ async function model(t: TestContext, config: LoadedConfiguration, mode: 'pass' |
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   config.profile.base_url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  writeFixtureConfiguration(config);
   t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
   return requests;
 }
@@ -178,6 +185,8 @@ test('static screenshot device exposes fixed canvas and no action or connection 
 test('offline finalization uses the saved final PNG, accounts real model usage, and publishes once', async (t) => {
   const f = fixture(t);
   const requests = await model(t, f.config, 'pass');
+  const originalProjectDigest = f.config.digests.project;
+  const modelDigest = f.config.digests.config;
   const metadata = JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8'));
   const expectedHash = metadata.delivery.files.screenshot.sha256;
   const savedInputs: string[] = [];
@@ -214,24 +223,149 @@ test('offline finalization uses the saved final PNG, accounts real model usage, 
   assert.equal(existsSync(join(f.capture, 'delivery')), false);
   assert.doesNotMatch(readFileSync(join(run, 'model-usage.jsonl'), 'utf8'), /private-model|data:image|local-fixture-key/);
   varyReceipts(f.capture);
-  const roots = { evidence: f.capture, dataset: f.config.datasetPath };
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: run };
   const preserved = savedFiles(roots);
+  f.config.project.tasks[0].instruction = 'Find further distinct pages for the expanded project';
+  f.config.project.tasks[0].acceptance = 'The requested expanded-project page is visible';
+  f.config.project.tasks[0].privacy.reason = 'Current project privacy documentation was clarified';
+  f.config.project.tasks[0].target_count = 200;
+  f.config.project.run.max_actions = 20;
+  f.config.project.run.max_duration_seconds = 120;
+  writeFixtureConfiguration(f.config);
+  assert.notEqual(f.config.digests.project, originalProjectDigest);
+  assert.equal(f.config.digests.config, modelDigest);
   for (const repeat of ['published', 'repeated']) {
     const resumed = await finalize(f.config, { python: 'python' }, f.request);
     const receipt = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
     assert.equal(receipt.sample.sample_id, result.sample.sample_id, repeat);
     assert.equal(receipt.model_usage.calls, 0);
     assert.equal(receipt.accepted.length, 1);
+    assert.deepEqual(JSON.parse(readFileSync(join(resumed, 'configuration.json'), 'utf8')), f.config);
     assert.deepEqual(savedFiles(roots), preserved);
   }
+  const originalConfiguration = JSON.parse(readFileSync(join(run, 'configuration.json'), 'utf8'));
+  assert.equal(originalConfiguration.digests.project, originalProjectDigest);
+  assert.equal(originalConfiguration.project.tasks[0].target_count, 1);
+  assert.equal(createHash('sha256').update(readFileSync(join(run, 'project.toml'))).digest('hex'), originalProjectDigest);
   const status = await localBridge('python', { operation: 'dataset_status', root: f.config.datasetPath,
     identity: { project_sha256: f.config.digests.project, config_sha256: f.config.digests.config,
-      tasks: f.config.project.tasks.map(({ name, target_count }) => ({ name, target_count })) } });
+      tasks: f.config.project.tasks.map(({ name, target_count }) => ({ name, target_count })),
+      configuration: f.config, project_sources: [] } });
   assert.deepEqual(status.counts, { editor: 1 });
-  assert.deepEqual(status.remaining, { editor: 0 });
+  assert.deepEqual(status.remaining, { editor: 199 });
   assert.deepEqual(status.failures, []);
   assert.deepEqual(savedFiles(roots), preserved);
   assert.equal(requests.length, 1);
+});
+
+test('unpublished capture keeps its old run origin while a new project run finalizes and publishes it', async (t) => {
+  const f = fixture(t, true, true);
+  const requests = await model(t, f.config, 'pass');
+  const sourceRun = join(f.config.outputPath, 'run-A');
+  const sourceConfiguration = join(sourceRun, 'configuration.json');
+  writeFileSync(sourceConfiguration, JSON.stringify(f.config, null, 2) + '\n');
+  writeFileSync(join(sourceRun, 'project.toml'), readFileSync(f.config.projectPath));
+  const originalProjectDigest = f.config.digests.project;
+  const modelDigest = f.config.digests.config;
+  const oldConfiguration = readFileSync(sourceConfiguration);
+  const oldCandidate = readFileSync(join(f.capture, 'candidate.json'));
+  const oldWindows = readFileSync(join(f.capture, 'windows.txt'));
+  assert.equal(dirname(f.capture), join(sourceRun, 'captures'));
+  const captureId = JSON.parse(oldCandidate.toString()).capture_id;
+  assert.equal(basename(f.capture), captureId);
+  f.config.project.tasks[0].target_count = 200;
+  f.config.project.tasks[0].instruction = 'Continue finding distinct states for the expanded project';
+  f.config.project.tasks[0].acceptance = 'The requested project page is visible';
+  f.config.project.run.max_actions = 20;
+  f.config.project.run.max_duration_seconds = 120;
+  writeFixtureConfiguration(f.config);
+  assert.equal(f.config.project.tasks[0].privacy.reason, 'Synthetic fixture');
+  assert.notEqual(f.config.digests.project, originalProjectDigest);
+  assert.equal(f.config.digests.config, modelDigest);
+  const finalized = await finalize(f.config, { python: 'python' }, f.request);
+  const result = JSON.parse(readFileSync(join(finalized, 'run.json'), 'utf8'));
+  const expectedIdentity = createHash('sha256').update(JSON.stringify({ config_sha256: modelDigest,
+    project_sha256: f.config.digests.project, tasks: [{ name: 'editor', target_count: 200 }] })).digest('hex');
+  assert.equal(result.status, 'complete');
+  assert.equal(result.sample.identity_sha256, expectedIdentity);
+  assert.equal(result.sample.sample_id, captureId);
+  assert.equal(result.sample.evidence_directory, f.capture);
+  assert.equal(result.accepted.length, 1);
+  assert.equal(readdirSync(join(f.config.datasetPath, 'samples')).length, 1);
+  assert.equal(requests.length, 1);
+  const sample = JSON.parse(readFileSync(join(f.capture, 'sample.json'), 'utf8'));
+  assert.equal(sample.finalization_directory, finalized);
+  assert.equal(sample.path, f.capture);
+  assert.deepEqual(readFileSync(sourceConfiguration), oldConfiguration);
+  assert.equal(createHash('sha256').update(readFileSync(join(sourceRun, 'project.toml'))).digest('hex'),
+    originalProjectDigest);
+  assert.deepEqual(readFileSync(join(f.capture, 'candidate.json')), oldCandidate);
+  assert.deepEqual(readFileSync(join(f.capture, 'windows.txt')), oldWindows);
+  const roots = { original_run: sourceRun, finalization_run: finalized, dataset: f.config.datasetPath };
+  const preserved = savedFiles(roots);
+  const repeated = await finalize(f.config, { python: 'python' }, f.request);
+  const receipt = JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8'));
+  assert.equal(receipt.sample.sample_id, result.sample.sample_id);
+  assert.equal(receipt.sample.identity_sha256, expectedIdentity);
+  assert.equal(receipt.accepted.length, 1);
+  assert.equal(receipt.model_usage.calls, 0);
+  assert.equal(readdirSync(join(f.config.datasetPath, 'samples')).length, 1);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(savedFiles(roots), preserved);
+});
+
+test('published recovery requires matching raw project evidence from a saved or explicit source', async (t) => {
+  const f = fixture(t);
+  const requests = await model(t, f.config, 'pass');
+  const original = await finalize(f.config, { python: 'python' }, f.request);
+  const result = JSON.parse(readFileSync(join(original, 'run.json'), 'utf8'));
+  const archive = join(f.directory, 'project-archives');
+  mkdirSync(join(archive, 'nested'), { recursive: true });
+  const source = join(archive, 'nested', 'original-project.toml');
+  writeFileSync(source, readFileSync(join(original, 'project.toml')));
+  unlinkSync(join(original, 'project.toml'));
+  f.config.project.tasks[0].target_count = 200;
+  f.config.project.tasks[0].instruction = 'Collect further distinct project states';
+  writeFixtureConfiguration(f.config);
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: original, archive };
+  const preserved = savedFiles(roots);
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
+    /Raw project source is missing for the saved project digest/);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(savedFiles(roots), preserved);
+  for (const projectSource of [source, archive]) {
+    const repeated = await finalize(f.config, { python: 'python' }, { ...f.request, projectSources: [projectSource] });
+    const receipt = JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8'));
+    assert.equal(receipt.sample.sample_id, result.sample.sample_id);
+    assert.equal(receipt.model_usage.calls, 0);
+    assert.equal(receipt.accepted.length, 1);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(savedFiles(roots), preserved);
+  }
+});
+
+test('finalization refuses a changed current raw project before preserving a snapshot or calling the model', async (t) => {
+  const f = fixture(t);
+  const requests = await model(t, f.config, 'pass');
+  const raw = Buffer.concat([readFileSync(f.config.projectPath), Buffer.from('\n# Changed after loading\n')]);
+  writeFileSync(f.config.projectPath, raw);
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /Project source digest changed/);
+  const [directory] = readdirSync(f.config.outputPath);
+  assert.equal(existsSync(join(f.config.outputPath, directory, 'project.toml')), false);
+  assert.equal(existsSync(join(f.config.outputPath, directory, 'configuration.json')), false);
+  assert.equal(f.runs()[0].status, 'failed');
+  assert.equal(requests.length, 0);
+  assert.deepEqual(readFileSync(f.config.projectPath), raw);
+});
+
+test('finalization refuses a snapshot changed without matching its original project TOML', async (t) => {
+  const f = fixture(t);
+  const requests = await model(t, f.config, 'pass');
+  f.config.project.tasks[0].acceptance = 'A forged acceptance that was never present in the project source';
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
+    /Saved project snapshot differs from its raw TOML source/);
+  assert.equal(requests.length, 0);
+  assert.ok(f.runs().every((entry) => entry.status === 'failed' && entry.model_usage.calls === 0));
 });
 
 test('rejected saved-image assertion keeps usage and leaves the dataset uncounted', async (t) => {
@@ -261,8 +395,9 @@ test('provider failure is recorded as failed usage without manufacturing tokens 
 
 test('direct capture requires explicit target and finalizes locally without candidate history', async (t) => {
   const f = fixture(t, false);
-  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /target bundle is missing/);
   const requests = await model(t, f.config, 'pass');
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /target bundle is missing/);
+  assert.equal(requests.length, 0);
   await finalize(f.config, { python: 'python' }, { ...f.request, targetBundleName: 'com.example.settings' });
   assert.equal(requests.length, 1);
   const sample = JSON.parse(readFileSync(join(f.capture, 'sample.json'), 'utf8'));

@@ -36,9 +36,12 @@ export class RunState {
   signal: AbortSignal;
   controller = new AbortController();
   private busy = false;
+  /** 调用者明确提供的原始项目文件或目录，统一使用绝对路径。 */
+  readonly projectSources: string[];
 
-  /** @brief 建立运行预算和输出位置。 */
-  constructor(readonly config: LoadedConfiguration, readonly directory: string) {
+  /** @brief 建立运行预算、输出位置和明确的原始项目来源。 */
+  constructor(readonly config: LoadedConfiguration, readonly directory: string, projectSources: string[] = []) {
+    this.projectSources = projectSources.map((source) => path.resolve(source));
     this.signal = AbortSignal.any([this.controller.signal,
       AbortSignal.timeout(config.project.run.max_duration_seconds * 1000)]);
   }
@@ -46,10 +49,11 @@ export class RunState {
   /** @brief 读取项目中正在执行的任务。 */
   get task() { return this.config.project.tasks[this.taskIndex]; }
 
-  /** @brief 由配置原始字节和任务配额固定数据集身份，禁止恢复时混入新规则。 */
+  /** @brief 保存本次配置来源，并由持久化层核对稳定采集契约；配额与提示词属于运行快照。 */
   get datasetIdentity() {
     return { project_sha256: this.config.digests.project, config_sha256: this.config.digests.config,
-      tasks: this.config.project.tasks.map((task) => ({ name: task.name, target_count: task.target_count })) };
+      tasks: this.config.project.tasks.map((task) => ({ name: task.name, target_count: task.target_count })),
+      configuration: this.config, project_sources: [...this.projectSources] };
   }
 
   /** @brief 配额只来自已发布且恢复时重新校验的样本。 */

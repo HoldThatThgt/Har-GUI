@@ -8,6 +8,7 @@ import { verifySavedScreenshot, verifyWindowChanges } from './acceptance.js';
 import { localBridge, type DeviceOptions } from './bridge.js';
 import { resolveModelConfig, type LoadedConfiguration } from './config.js';
 import { RunState } from './state.js';
+import { saveRunConfiguration } from './provenance.js';
 import { UsageRecorder, estimateUsageCost } from './usage.js';
 
 /** @brief 已保存采集的独立验收参数，不包含设备动作或历史观察。 */
@@ -18,6 +19,8 @@ export interface FinalizeOptions {
   taskName: string;
   /** 直接采集没有 candidate.json 时，由调用者明确指定的目标应用。 */
   targetBundleName?: string;
+  /** 调用者明确指定的历史原始项目文件或目录。 */
+  projectSources?: string[];
 }
 
 /** @brief Midscene 官方通用设备接口的静态图片实现，不连接真实设备且不提供任何动作。 */
@@ -150,16 +153,16 @@ async function complete(
   state: RunState, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions, usage: UsageRecorder,
 ) {
   const metadata = await loadCandidate(state, options);
-  const occlusions = verifyWindowChanges(metadata, state.candidate.window_changes);
   const existing = await restorePublication(state, connection);
-  const prepared = await prepare(state, connection);
   if (existing) {
     state.event('publication_verified', { sample_id: existing.sample_id, path: existing.path });
     return existing;
   }
+  const occlusions = verifyWindowChanges(metadata, state.candidate.window_changes);
   if (state.acceptedCount(state.task.name) >= state.task.target_count) {
     throw new Error('Task quota is already complete');
   }
+  const prepared = await prepare(state, connection);
   const accepted = await assertSavedImage(state, usage, prepared.manifest);
   state.signal.throwIfAborted();
   return publish(state, connection, { manifest: prepared.manifest, accepted, occlusions,
@@ -176,7 +179,7 @@ export async function finalize(
   const name = new Date().toISOString().replace(/[:.]/g, '-') + '-finalize-' + randomUUID();
   const directory = path.join(config.outputPath, name);
   await mkdir(directory, { recursive: true });
-  const state = new RunState(config, directory);
+  const state = new RunState(config, directory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const interrupt = () => state.controller.abort(new Error('Finalization interrupted'));
   process.once('SIGINT', interrupt);
@@ -184,7 +187,7 @@ export async function finalize(
   try {
     state.taskIndex = config.project.tasks.findIndex((task) => task.name === options.taskName);
     if (state.taskIndex < 0) throw new Error(`Unknown finalization task: ${options.taskName}`);
-    await writeFile(path.join(directory, 'configuration.json'), JSON.stringify(config, null, 2) + '\n');
+    await saveRunConfiguration(config, directory);
     state.save('running', { operation: 'finalize', capture_directory: path.resolve(options.directory) });
     const sample = await complete(state, connection, { ...options, directory: path.resolve(options.directory) }, usage);
     state.save('complete', { operation: 'finalize', sample, model_usage: modelUsage(state, usage) });

@@ -18,18 +18,43 @@ function isolateSdk(directory: string): void {
   process.env.DEBUG = '';
 }
 
+/** @brief 解析仅用于 run 的本轮新增数量上限，省略时不限制。 */
+function parseSampleLimit(command: string, value?: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (command !== 'run') throw new Error('--max-new-samples is only available for run');
+  const limit = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(limit)) {
+    throw new Error('--max-new-samples must be a non-negative safe integer');
+  }
+  return limit;
+}
+
+/** @brief 仅为执行和独立验收接受明确的历史项目来源，并统一为绝对路径。 */
+function parseProjectSources(command: string, values: string[] = []): string[] {
+  if (values.length && !['run', 'finalize'].includes(command)) {
+    throw new Error('--project-source is only available for run and finalize');
+  }
+  return values.map((value) => {
+    if (!value.trim()) throw new Error('--project-source requires a nonempty file or directory path');
+    return path.resolve(value);
+  });
+}
+
 /** @brief 提供静态 validate 和独立 run 命令。 */
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: 'project.toml' }, config: { type: 'string', default: 'config.toml' },
     device: { type: 'string' }, hdc: { type: 'string' }, python: { type: 'string', default: 'python' },
-    'env-file': { type: 'string' },
+    'env-file': { type: 'string' }, 'max-new-samples': { type: 'string' },
+    'project-source': { type: 'string', multiple: true },
     capture: { type: 'string' }, task: { type: 'string' }, 'target-bundle': { type: 'string' },
   } });
   const command = positionals[0];
   if (positionals.length !== 1 || !['run', 'validate', 'tools', 'finalize'].includes(command)) {
     throw new Error('Usage: npm run agent -- <validate|run|tools|finalize> --project PATH --config PATH');
   }
+  const maxNewSamples = parseSampleLimit(command, values['max-new-samples']);
+  const projectSources = parseProjectSources(command, values['project-source']);
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'har-gui-sdk-'));
   isolateSdk(temporary);
   try {
@@ -44,13 +69,14 @@ async function main(): Promise<void> {
       if (!values.capture || !values.task) throw new Error('Finalize requires --capture and --task');
       const { finalize } = await import('./finalize.js');
       console.log(await finalize(config, { python: values.python }, { directory: path.resolve(values.capture),
-        taskName: values.task, targetBundleName: values['target-bundle'] }));
+        taskName: values.task, targetBundleName: values['target-bundle'], projectSources }));
       return;
     }
     if (!values.device || !/^[A-Za-z0-9_.:-]+$/.test(values.device)) throw new Error('A valid --device is required');
     const hdc = values.hdc ?? fileURLToPath(new URL('../.tools/openharmony/toolchains/hdc.exe', import.meta.url));
     const { run } = await import('./runner.js');
-    console.log(await run(config, { python: values.python, hdc: path.resolve(hdc), serial: values.device }));
+    console.log(await run(config, { python: values.python, hdc: path.resolve(hdc), serial: values.device },
+      { maxNewSamples, projectSources }));
   } finally {
     const resolved = path.resolve(temporary);
     if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith('har-gui-sdk-')) {

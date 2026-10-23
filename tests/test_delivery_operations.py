@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,11 +31,16 @@ class DeliveryOperationTests(unittest.TestCase):
         capture(fake_hdc(), self.helper.directory / "captures").rename(evidence)
         self.evidence = evidence
         self.policy = {"enabled": False, "reason": "Synthetic fixture"}
-        self.options = {"app": "editor", "page_id": "page", "scene": "scene", "state_id": "state",
-                        "canvas": {"width": 3120, "height": 2080}}
+        self.helper.identity["configuration"]["project"]["tasks"][0]["privacy"] = self.policy
+        self.helper.save_configuration("run-a")
+        self.options = {"app": "editor", "page_id": "frame-a", "scene": "scene", "state_id": "frame-a",
+                        "canvas": {"width": 3120, "height": 2080}, "stability_regions": []}
         self.metadata = json.loads((evidence / "metadata.json").read_bytes())
         self.metadata["capture_id"] = "frame-a"
         atomic_json(evidence / "metadata.json", self.metadata)
+        atomic_json(evidence / "candidate.json", {"capture_id": "frame-a", "task_name": "editor",
+                    "target_bundle_name": "com.example.settings", "page_name": "frame-a", "path": str(evidence),
+                    "window_changes": []})
         self.prepare_request = {"directory": str(evidence), "privacy": self.policy, "options": self.options}
         with patch("har_capture.export.load_scene_evidence", return_value={}), \
                 patch("har_capture.export.normalized_arkui", side_effect=self.normalized):
@@ -140,19 +147,185 @@ class DeliveryOperationTests(unittest.TestCase):
         prepared = operations.prepare_delivery(self.prepare_request)
         self.assertEqual(prepared["manifest"]["files"], status["samples"][0]["files"])
 
-    def test_interruption_during_each_pointer_write_is_recoverable(self):
-        for filename in ("metadata.json", "delivery-manifest.json", "publication.json"):
+    def interrupt_publication(self, filename):
+        real = operations.atomic_json
+        def interrupt(path, value):
+            if path.name == filename:
+                raise KeyboardInterrupt()
+            return real(path, value)
+        with patch.object(operations, "atomic_json", interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                operations.publish_delivery(self.publish_request)
+        self.assertEqual(self.helper.rows(), [("frame-a", "committed", None)])
+
+    def assert_interrupted_write_recovers(self, filename):
+        self.interrupt_publication(filename)
+        if filename == "delivery-preparation.json":
+            self.assertTrue((self.evidence / "publication.json").is_file())
+            receipt = json.loads((self.evidence / "delivery-preparation.json").read_bytes())
+            delivery = json.loads((self.evidence / "delivery-manifest.json").read_bytes())
+            self.assertNotEqual(receipt["manifest_sha256"], operations.manifest_digest(delivery))
+        self.assertEqual(operations.resume_dataset(self.publish_request)["counts"]["editor"], 1)
+        receipt = json.loads((self.evidence / "delivery-preparation.json").read_bytes())
+        delivery = json.loads((self.evidence / "delivery-manifest.json").read_bytes())
+        self.assertEqual(receipt["manifest_sha256"], operations.manifest_digest(delivery))
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Completed publication was written")):
+            self.assertEqual(operations.resume_dataset(self.publish_request)["counts"]["editor"], 1)
+        self.assertEqual(before, self.snapshot_files())
+
+    def test_interruption_before_metadata_write_is_recoverable(self):
+        self.assert_interrupted_write_recovers("metadata.json")
+
+    def test_interruption_before_delivery_manifest_write_is_recoverable(self):
+        self.assert_interrupted_write_recovers("delivery-manifest.json")
+
+    def test_interruption_before_publication_receipt_write_is_recoverable(self):
+        self.assert_interrupted_write_recovers("publication.json")
+
+    def test_interruption_before_final_preparation_write_is_recoverable(self):
+        self.assert_interrupted_write_recovers("delivery-preparation.json")
+
+    def test_missing_completed_publication_is_not_recreated_as_an_interruption(self):
+        operations.publish_delivery(self.publish_request)
+        (self.evidence / "publication.json").unlink()
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Tampered publication was repaired")):
+            with self.assertRaisesRegex(CaptureError, "interrupted atomic synchronization"):
+                operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
+
+    def test_tampered_publication_documents_are_never_repaired(self):
+        operations.publish_delivery(self.publish_request)
+        mutations = {
+            "metadata.json": lambda value: value["delivery"].update(path="D:/forged/sample"),
+            "delivery-manifest.json": lambda value: value.update(capture_id="forged"),
+            "publication.json": lambda value: value.update(task_name="forged"),
+            "delivery-preparation.json": lambda value: value.update(rules_sha256="0" * 64),
+        }
+        for filename, mutate in mutations.items():
             with self.subTest(file=filename):
-                result = operations.publish_delivery(self.publish_request) if filename == "metadata.json" else result
-                real = operations.atomic_json
-                def interrupt(path, value):
-                    if path.name == filename:
-                        raise KeyboardInterrupt()
-                    return real(path, value)
-                with patch.object(operations, "atomic_json", interrupt):
-                    with self.assertRaises(KeyboardInterrupt):
-                        operations.synchronize_publication(result)
-                self.assertEqual(operations.resume_dataset(self.publish_request)["counts"]["editor"], 1)
+                path = self.evidence / filename
+                original, modified = path.read_bytes(), json.loads(path.read_bytes())
+                mutate(modified)
+                atomic_json(path, modified)
+                before = self.snapshot_files()
+                with patch.object(operations, "atomic_json", side_effect=AssertionError("Tampering was repaired")):
+                    with self.assertRaises(CaptureError):
+                        operations.resume_dataset(self.publish_request)
+                self.assertEqual(before, self.snapshot_files())
+                path.write_bytes(original)
+
+    def test_candidate_or_raw_tampering_blocks_completion_before_any_sync_write(self):
+        self.interrupt_publication("publication.json")
+        candidate = self.evidence / "candidate.json"
+        original = candidate.read_bytes()
+        changed = json.loads(original)
+        changed["target_bundle_name"] = "forged.bundle"
+        atomic_json(candidate, changed)
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Unverified publication was written")):
+            with self.assertRaisesRegex(CaptureError, "candidate differs"):
+                operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
+        candidate.write_bytes(original)
+        (self.evidence / "accessibility.json").write_text("[]", encoding="utf-8")
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Unverified publication was written")):
+            with self.assertRaisesRegex(CaptureError, "Capture artifact digest mismatch"):
+                operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
+
+    def direct_sample(self):
+        candidate = json.loads((self.evidence / "candidate.json").read_bytes())
+        candidate.update(origin="direct_capture", finalization_directory=str(self.helper.directory / "output" / "run-a"))
+        atomic_json(self.evidence / "sample.json", candidate)
+        (self.evidence / "candidate.json").unlink()
+
+    def test_direct_capture_requires_its_recorded_identity_and_original_finalization_run(self):
+        self.direct_sample()
+        operations.publish_delivery(self.publish_request)
+        path = self.evidence / "sample.json"
+        original = path.read_bytes()
+        mutations = {"origin": "agent", "capture_id": "wrong-capture", "task_name": "wrong-task",
+                     "target_bundle_name": "wrong.bundle", "finalization_directory": "D:/missing-run"}
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                changed = json.loads(original)
+                changed[field] = value
+                atomic_json(path, changed)
+                before = self.snapshot_files()
+                with patch.object(operations, "atomic_json", side_effect=AssertionError("Invalid direct sample written")):
+                    with self.assertRaises(CaptureError):
+                        operations.resume_dataset(self.publish_request)
+                self.assertEqual(before, self.snapshot_files())
+                path.write_bytes(original)
+
+    def test_missing_agent_candidate_is_not_synthesized(self):
+        operations.publish_delivery(self.publish_request)
+        (self.evidence / "candidate.json").unlink()
+        before = self.snapshot_files()
+        with self.assertRaisesRegex(CaptureError, "sample.json"):
+            operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
+
+    def test_completed_copy_resumes_without_reading_or_writing_original_paths(self):
+        operations.publish_delivery(self.publish_request)
+        before_original = self.snapshot_files()
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "project"
+            shutil.copytree(self.helper.directory, copied)
+            configuration = copy.deepcopy(self.helper.identity["configuration"])
+            for key, name in (("projectPath", "project.toml"), ("configPath", "config.toml"),
+                              ("datasetPath", "dataset"), ("outputPath", "output")):
+                configuration[key] = str(copied / name)
+            identity = {**self.helper.identity, "configuration": configuration}
+            request = {"root": str(copied / "dataset"), "identity": identity}
+            before = {str(p.relative_to(copied)): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                      for p in copied.rglob("*") if p.is_file()}
+            real = Path.open
+            def copy_only(path, *args, **kwargs):
+                if path.resolve().is_relative_to(self.helper.directory):
+                    raise AssertionError("Original project path was accessed")
+                return real(path, *args, **kwargs)
+            with patch.object(Path, "open", copy_only), patch.object(
+                    operations, "atomic_json", side_effect=AssertionError("Completed copy was written")):
+                status = operations.resume_dataset(request)
+            self.assertEqual(status["counts"]["editor"], 1)
+            after = {str(p.relative_to(copied)): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                     for p in copied.rglob("*") if p.is_file()}
+            self.assertEqual(before, after)
+        self.assertEqual(before_original, self.snapshot_files())
+
+    def test_interrupted_copy_completes_actual_files_and_retains_original_receipt_paths(self):
+        self.interrupt_publication("publication.json")
+        before_original = self.snapshot_files()
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "project"
+            shutil.copytree(self.helper.directory, copied)
+            configuration = copy.deepcopy(self.helper.identity["configuration"])
+            for key, name in (("projectPath", "project.toml"), ("configPath", "config.toml"),
+                              ("datasetPath", "dataset"), ("outputPath", "output")):
+                configuration[key] = str(copied / name)
+            request = {"root": str(copied / "dataset"),
+                       "identity": {**self.helper.identity, "configuration": configuration}}
+            real = Path.open
+            def copy_only(path, *args, **kwargs):
+                if path.resolve().is_relative_to(self.helper.directory):
+                    raise AssertionError("Original project path was accessed")
+                return real(path, *args, **kwargs)
+            with patch.object(Path, "open", copy_only):
+                status = operations.resume_dataset(request)
+            sample = status["samples"][0]
+            receipt = json.loads((copied / "evidence" / "publication.json").read_bytes())
+            self.assertEqual(receipt["path"], str(self.helper.root / "samples" / "frame-a"))
+            self.assertEqual(receipt["evidence_directory"], str(self.evidence))
+            self.assertEqual(sample["path"], str(copied / "dataset" / "samples" / "frame-a"))
+            metadata = json.loads((copied / "evidence" / "metadata.json").read_bytes())
+            self.assertEqual(metadata["delivery"]["path"], receipt["path"])
+            with patch.object(operations, "atomic_json", side_effect=AssertionError("Completed copy was written")):
+                operations.resume_dataset(request)
+        self.assertEqual(before_original, self.snapshot_files())
 
     def test_uncommitted_export_only_removes_owned_files_and_restores_single_png(self):
         metadata = copy.deepcopy(self.metadata)
@@ -198,6 +371,30 @@ class DeliveryOperationTests(unittest.TestCase):
         atomic_json(self.evidence / "metadata.json", metadata)
         with self.assertRaisesRegex(CaptureError, "differs from the verified file index"):
             operations.prepare_delivery(self.prepare_request)
+
+    def test_published_metadata_cannot_remove_a_geometry_file_index(self):
+        operations.publish_delivery(self.publish_request)
+        path = self.evidence / "metadata.json"
+        metadata = json.loads(path.read_bytes())
+        del metadata["files"]["geometry_92_arkui_geometry"]
+        atomic_json(path, metadata)
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Tampered metadata was repaired")):
+            with self.assertRaisesRegex(CaptureError, "metadata|original capture|capture evidence"):
+                operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
+
+    def test_published_metadata_cannot_change_original_window_facts(self):
+        operations.publish_delivery(self.publish_request)
+        path = self.evidence / "metadata.json"
+        metadata = json.loads(path.read_bytes())
+        metadata["windows"][0]["bounding_box"]["x"] += 1
+        atomic_json(path, metadata)
+        before = self.snapshot_files()
+        with patch.object(operations, "atomic_json", side_effect=AssertionError("Tampered metadata was repaired")):
+            with self.assertRaisesRegex(CaptureError, "metadata|original capture|capture evidence"):
+                operations.resume_dataset(self.publish_request)
+        self.assertEqual(before, self.snapshot_files())
 
     def test_prepared_retry_recomputes_coverage_from_raw_wms_sessions(self):
         metadata = copy.deepcopy(self.metadata)

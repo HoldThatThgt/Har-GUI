@@ -13,6 +13,10 @@ from har_capture.metadata import file_info, image_info
 from har_capture.signatures import build_signatures, digest
 from har_capture.export import sample_prefix
 from har_capture.privacy import atomic_json
+from har_capture.dataset_identity import (
+    configuration_sources, run_identity, validate_identity, validate_run_identity,
+    manifest_configuration, verify_contract, verify_sample_contract,
+)
 
 LOGGER = logging.getLogger(__name__)
 CHECKS = ("coverage", "coordinates", "privacy", "consistency")
@@ -29,25 +33,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS unique_state ON samples(state_hash) WHERE stat
 """
 
 
-def validate_identity(identity: dict) -> None:
-    """@brief 拒绝不完整或歧义的项目身份。 @param identity 配置摘要及任务配额。"""
-    if set(identity) != {"project_sha256", "config_sha256", "tasks"}:
-        fail("Dataset identity requires project_sha256, config_sha256, and tasks")
-    for key in ("project_sha256", "config_sha256"):
-        if not isinstance(identity[key], str) or not re.fullmatch("[0-9a-f]{64}", identity[key]):
-            fail(f"Dataset identity contains an invalid {key}")
-    tasks = identity["tasks"]
-    if not isinstance(tasks, list) or not tasks:
-        fail("Dataset identity requires at least one task")
-    for task in tasks:
-        if set(task) != {"name", "target_count"} or not isinstance(task["name"], str) or not task["name"]:
-            fail("Dataset task identity is invalid")
-        if type(task["target_count"]) is not int or task["target_count"] < 1:
-            fail("Dataset task target_count must be a positive integer")
-    if len({task["name"] for task in tasks}) != len(tasks):
-        fail("Dataset identity contains duplicate task names")
-
-
 def connect_dataset(root: Path, identity: dict) -> sqlite3.Connection:
     """@brief 创建或核对唯一配置身份，不迁移旧数据库。 @param root 数据集目录。
     @param identity 项目身份。 @return 已开启的 SQLite 连接。
@@ -60,10 +45,14 @@ def connect_dataset(root: Path, identity: dict) -> sqlite3.Connection:
     try:
         connection.execute("PRAGMA synchronous=FULL")
         connection.executescript(SCHEMA)
-        connection.execute("INSERT OR IGNORE INTO identity VALUES (1,?,?)", (digest(identity), json.dumps(identity)))
-        stored = connection.execute("SELECT digest FROM identity WHERE singleton=1").fetchone()[0]
-        if stored != digest(identity):
-            fail("Dataset configuration identity differs; refusing to reset or mix quotas")
+        header = run_identity(identity)
+        connection.execute("INSERT OR IGNORE INTO identity VALUES (1,?,?)", (digest(header), json.dumps(header)))
+        stored = connection.execute("SELECT digest,value FROM identity WHERE singleton=1").fetchone()
+        original = json.loads(stored["value"])
+        validate_run_identity(original)
+        if stored["digest"] != digest(original):
+            fail("Stored dataset identity digest does not match its original value")
+        verify_contract(stored["digest"], identity, configuration_sources(identity))
         return connection
     except BaseException:
         connection.close()
@@ -140,21 +129,24 @@ def prepare_manifest(directory: Path, identity: dict, acceptance: dict) -> dict:
     documents = read_documents(directory, files)
     bundle = acceptance["target_bundle_name"]
     signatures = build_signatures(documents["wms"], documents["windows_tree"], documents["windows_akui"], bundle)
-    return {"publication_version": 1, "sample_id": documents["wms"]["capture_id"],
+    manifest = {"publication_version": 1, "sample_id": documents["wms"]["capture_id"],
             "evidence_directory": str(directory.resolve().parent),
             "task_name": task_name, "target_bundle_name": bundle,
-            "identity_sha256": digest(identity), "files": files, "checks": {key: "pass" for key in CHECKS},
+            "identity_sha256": digest(run_identity(identity)), "files": files,
+            "checks": {key: "pass" for key in CHECKS},
             "accepted_at": utc_now(), "visual_acceptance": {
                 "pass": True, "screenshot_sha256": acceptance["accepted_screenshot_sha256"]},
             "model_usage": acceptance["model_usage"], **signatures}
+    verify_sample_contract(documents, manifest, identity["configuration"])
+    return manifest
 
 
-def verify_manifest(directory: Path, manifest: dict, identity: dict) -> None:
+def verify_manifest(directory: Path, manifest: dict, identity: dict, sources: dict) -> None:
     """@brief 恢复时重新核验交付文件、配置和签名，禁止只相信数据库计数。 @param directory 样本目录。
-    @param manifest 登记清单。 @param identity 当前配置身份。
+    @param manifest 登记清单。 @param identity 当前配置身份。 @param sources 本次已核验运行来源。
     """
-    if manifest["identity_sha256"] != digest(identity):
-        fail("Published sample belongs to a different configuration identity")
+    verify_contract(manifest["identity_sha256"], identity, sources)
+    original = manifest_configuration(manifest, identity, sources)
     if manifest.get("publication_version") != 1 or manifest.get("signature_version") != 1:
         fail("Published sample rule version differs from the current implementation")
     if manifest.get("visual_acceptance", {}).get("pass") is not True:
@@ -167,6 +159,7 @@ def verify_manifest(directory: Path, manifest: dict, identity: dict) -> None:
         fail("Published sample has failed verification gates")
     verify_files(directory, manifest["files"])
     documents = read_documents(directory, manifest["files"])
+    verify_sample_contract(documents, manifest, original)
     signatures = build_signatures(documents["wms"], documents["windows_tree"], documents["windows_akui"],
                                   manifest["target_bundle_name"])
     if documents["wms"]["capture_id"] != manifest["sample_id"]:
@@ -175,9 +168,11 @@ def verify_manifest(directory: Path, manifest: dict, identity: dict) -> None:
         fail("Published sample signature no longer matches its artifacts")
 
 
-def complete_prepared(connection: sqlite3.Connection, root: Path, row: sqlite3.Row, identity: dict) -> None:
+def complete_prepared(
+    connection: sqlite3.Connection, root: Path, row: sqlite3.Row, identity: dict, sources: dict,
+) -> None:
     """@brief 完成可核验的准备记录；证据丢失或歧义时明确失败且不计数。 @param connection 数据库。
-    @param root 数据集目录。 @param row 准备记录。 @param identity 当前项目身份。
+    @param root 数据集目录。 @param row 准备记录。 @param identity 当前项目身份。 @param sources 已核验来源。
     """
     manifest = json.loads(row["manifest"])
     source, final = Path(row["source"]), root / "samples" / row["sample_id"]
@@ -186,7 +181,7 @@ def complete_prepared(connection: sqlite3.Connection, root: Path, row: sqlite3.R
             fail("Interrupted publication must have exactly one source or destination directory")
         actual = source if source.exists() else final
         finalize_names(actual, manifest)
-        verify_manifest(actual, manifest, identity)
+        verify_manifest(actual, manifest, identity, sources)
         if actual == source:
             source.rename(final)
         connection.execute("UPDATE samples SET status='committed' WHERE sample_id=?", (row["sample_id"],))
@@ -201,12 +196,13 @@ def recover_dataset(connection: sqlite3.Connection, root: Path, identity: dict) 
     """@brief 串行恢复准备记录并逐份验证所有已发布文件。 @param connection 数据库。
     @param root 数据集目录。 @param identity 当前项目身份。
     """
+    sources = configuration_sources(identity)
     connection.execute("BEGIN IMMEDIATE")
     try:
         for row in connection.execute("SELECT * FROM samples WHERE status='prepared'").fetchall():
-            complete_prepared(connection, root, row, identity)
+            complete_prepared(connection, root, row, identity, sources)
         for row in connection.execute("SELECT * FROM samples WHERE status='committed'").fetchall():
-            verify_manifest(root / "samples" / row["sample_id"], json.loads(row["manifest"]), identity)
+            verify_manifest(root / "samples" / row["sample_id"], json.loads(row["manifest"]), identity, sources)
         known = {row[0] for row in connection.execute("SELECT sample_id FROM samples")}
         if any(path.name not in known for path in (root / "samples").iterdir()):
             fail("Dataset contains an unregistered sample directory")
@@ -230,7 +226,8 @@ def dataset_snapshot(connection: sqlite3.Connection, root: Path, identity: dict)
     failures = [dict(row) for row in connection.execute(
         "SELECT sample_id,task_name,error FROM samples WHERE status='failed' ORDER BY sample_id")]
     return {"samples": samples, "counts": counts,
-            "remaining": {task["name"]: task["target_count"] - counts[task["name"]] for task in identity["tasks"]},
+            "remaining": {task["name"]: max(0, task["target_count"] - counts[task["name"]])
+                          for task in identity["tasks"]},
             "failures": failures}
 
 

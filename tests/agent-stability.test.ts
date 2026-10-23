@@ -12,6 +12,7 @@ import { acceptCandidate } from '../agent/acceptance.js';
 import { finalize } from '../agent/finalize.js';
 import { RunState } from '../agent/state.js';
 import { createRegistry } from '../agent/tools.js';
+import { writeFixtureConfiguration } from './agent-configuration.js';
 
 const REGIONS = [{ bundle_name: 'system.fixture', resource_id: 'clock-leaf' }];
 
@@ -58,15 +59,18 @@ function fixture(t: TestContext) {
   const candidate = { capture_id: 'frame', path: capture, task_name: 'fixture', target_bundle_name: 'app.fixture',
     page_name: 'fixture-page', window_changes: [] };
   writeFileSync(join(capture, 'candidate.json'), JSON.stringify(candidate));
-  const config = { outputPath: join(directory, 'runs'), datasetPath: join(directory, 'dataset'),
+  const config = { projectPath: join(directory, 'project.toml'), configPath: join(directory, 'config.toml'),
+    outputPath: join(directory, 'runs'), datasetPath: join(directory, 'dataset'),
     profile: { provider: 'openai_compatible', base_url: 'https://model.example.test/v1', model: 'fixture',
       model_family: 'deepseek', api_key_env: 'UNUSED_STABILITY_TEST_KEY', supports_vision: true },
-    digests: { project: 'a'.repeat(64), config: 'b'.repeat(64) }, project: {
-      run: { max_duration_seconds: 60, max_actions: 5 }, tools: { enabled: ['Capture'] },
+    digests: { project: '', config: '' }, project: { schema_version: 1,
+      run: { name: 'fixture', output: 'runs', max_duration_seconds: 60, max_actions: 5 },
+      agent: { llm: 'vision' }, tools: { enabled: ['Capture'] },
       dataset: { root: 'dataset', canvas: { width: 100, height: 100 }, stability_regions: REGIONS },
       tasks: [{ name: 'fixture', app: 'Fixture', scene: 'Page', instruction: 'Inspect', acceptance: 'Pass',
         target_count: 1, bundle_names: ['app.fixture'], privacy: { enabled: false, reason: 'Synthetic fixture' } }],
     } } as LoadedConfiguration;
+  writeFixtureConfiguration(config);
   return { directory, capture, candidate, config, window };
 }
 
@@ -111,6 +115,7 @@ test('online and offline preparation retain disabled privacy and its saved selec
       const privacy = { enabled: false, reason: 'Redaction deliberately switched off',
         regions: [{ bundle_name: 'app.fixture', resource_id: 'mail-body' }] };
       f.config.project.tasks[0].privacy = privacy;
+      writeFixtureConfiguration(f.config);
       const requests = interceptBridge(child, f.directory);
       const state = new RunState(f.config, f.directory);
       state.candidate = f.candidate;

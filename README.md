@@ -58,6 +58,7 @@ npm run agent -- run --project project.toml --config config.toml `
 
 ```text
 output/<运行时间>-<随机标识>/
+  project.toml          本次装载时的原始项目字节，按 SHA-256 核对后保存
   configuration.json    已冻结的任务、模型名称、凭据变量名和配置摘要，不包含密钥
   events.jsonl          固定规划阶段、观察摘要、工具参数与结果、窗口变化及验收记录
   model-usage.jsonl     每次模型调用的实际模型、时间、状态和服务商原始用量计数
@@ -138,7 +139,7 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 
 ### 去重与恢复
 
-同一项目再次运行相同命令，会重新核验五文件摘要、配置身份、验收和状态签名，恢复已完成配额。
+同一项目再次运行，会重新核验五文件摘要、采集契约、验收和状态签名，恢复已完成配额。
 等价 JSON 的重复准备与发布恢复保留现有收据、元数据的字节和修改时间；真实变更才原子替换。
 失败 Input 会保存本次坐标、模式、窗口、原生步骤与候选筛选；文本只记录类型、长度和摘要。
 反射坐标修复、字节守恒验证、单次输入补证及仍拒收的证据边界见[后续修复验证](docs/followup-repairs.md)。
@@ -148,9 +149,36 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 
 首次查询不建立空数据库；首份正式样本发布时才绑定项目与模型配置摘要。
 仅留下待核实选择器的原始采集时，可补充 `regions` 并沿用该目录执行 `finalize`，绑定修改后的配置。
-已有数据集拒绝不同配置，不静默重置配额；独立项目各用独立 `dataset.root`。
+提示词、视觉验收描述、隐私原因说明、运行预算和任务目标数量可以调整；剩余数量按当前目标计算。
+已有样本继续使用其原运行的 `configuration.json`、隐私处理收据和发布清单核验，不按新描述重新验收，
+也不改写历史摘要、数据库记录或正式文件。每次运行并排保存原始 `project.toml` 与 `configuration.json`，
+恢复时核对原文字节摘要、解析内容和历史快照。保留整个运行证据目录。
+原文另有归档时，用 `--project-source PATH` 明确提供原项目文件或归档目录，可重复传入；工具只读取，
+不补写旧运行目录。缺少原文、字节摘要不符或解析内容不符都会拒绝恢复。
+任务名称、应用、场景、包名、工具、画布、稳定性规则、隐私开关和区域、模型配置等采集契约必须保持相同。
+`config.toml` 的原始文件摘要仍严格绑定；独立项目各用独立 `dataset.root`，不静默重置配额。
 发布先持久化完整收据，再重命名五文件和移动目录；中断恢复重新核验实际字节并幂等登记。
 存活进程的设备锁会拒绝第二个运行，只有确认原进程退出才回收旧锁。
+
+可用运行参数限制本轮新增数量，不必修改项目总目标：
+
+```powershell
+npm run agent -- run --project project.toml --config config.toml `
+  --device YOUR_DEVICE_SERIAL --max-new-samples 1
+```
+
+`--max-new-samples 1` 在本轮成功发布一个不同的新样本后正常结束，已有样本不占这个上限；省略时按项目目标采集。
+`--max-new-samples 0` 只恢复和核验已有样本，不连接设备或调用模型。
+例如目标 200、已有 1 份时，零新增运行仍剩余 199，不能解释为总配额已满。
+`run.json` 记录 `max_new_samples`、`new_samples` 和 `stop_reason`；
+本轮达到上限为 `run_sample_limit`，全部任务达到项目目标为 `quota_complete`。
+
+对原项目文件另有归档的数据集，只恢复核验的示例：
+
+```powershell
+npm run agent -- run --project project.toml --config config.toml `
+  --project-source PATH_TO_ORIGINAL_PROJECTS --device YOUR_DEVICE_SERIAL --max-new-samples 0
+```
 
 ### 模型用量与费用
 

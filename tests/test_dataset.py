@@ -1,8 +1,10 @@
 """五件套发布、跨运行去重及中断恢复测试。"""
 
 import copy
+import hashlib
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +17,22 @@ from PIL import Image
 from har_capture import dataset
 from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
+from har_capture.dataset_identity import configuration_identity, run_identity
 from tests.test_signatures import fixture
+
+
+def write_project(configuration):
+    script = ("import { stringify } from 'smol-toml'; let value = ''; "
+              "for await (const chunk of process.stdin) value += chunk; "
+              "process.stdout.write(stringify(JSON.parse(value)));")
+    result = subprocess.run(["node", "--input-type=module", "-e", script],
+                            input=json.dumps(configuration["project"]).encode(), capture_output=True,
+                            cwd=Path(__file__).resolve().parent.parent, check=True)
+    path = Path(configuration["projectPath"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(result.stdout)
+    configuration["digests"]["project"] = hashlib.sha256(result.stdout).hexdigest()
+    return result.stdout
 
 
 class DatasetTests(unittest.TestCase):
@@ -23,21 +40,48 @@ class DatasetTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
         self.root = self.directory / "dataset"
-        self.identity = {"project_sha256": "a" * 64, "config_sha256": "b" * 64,
-                         "tasks": [{"name": "editor", "target_count": 3}, {"name": "other", "target_count": 2}]}
+        tasks = [{"name": name, "target_count": count, "app": "editor", "scene": "scene",
+                  "privacy": {"enabled": False, "reason": "test capture"},
+                  "instruction": "Find a page", "acceptance": "Page is visible"}
+                 for name, count in (("editor", 3), ("other", 2))]
+        configuration = {"project": {"schema_version": 1,
+            "run": {"name": "dataset", "output": "output", "max_actions": 20, "max_duration_seconds": 300},
+            "agent": {"llm": "vision"}, "dataset": {"root": "dataset",
+                "canvas": {"width": 3120, "height": 2080}, "stability_regions": []},
+            "tools": {"enabled": ["capture"]}, "tasks": tasks},
+            "profile": {"provider": "openai_compatible", "base_url": "https://model.example/v1",
+                "model": "vision", "model_family": "vlm-ui-tars", "api_key_env": "MODEL_KEY", "supports_vision": True},
+            "projectPath": str(self.directory / "project.toml"), "configPath": str(self.directory / "config.toml"),
+            "outputPath": str(self.directory / "output"), "datasetPath": str(self.root),
+            "digests": {"project": "a" * 64, "config": "b" * 64}}
+        write_project(configuration)
+        self.identity = {**configuration_identity(configuration), "configuration": configuration, "project_sources": []}
+        self.run_name = "run-a"
 
     def tearDown(self):
         self.temporary.cleanup()
 
+    def save_configuration(self, name):
+        configuration = self.identity["configuration"]
+        raw = write_project(configuration)
+        self.identity.update(configuration_identity(configuration))
+        run = Path(configuration["outputPath"]) / name
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "project.toml").write_bytes(raw)
+        (run / "configuration.json").write_text(json.dumps(configuration), encoding="utf-8")
+        return run
+
     def delivery(self, capture_id="frame-a", x=20, task="editor"):
-        source = self.directory / capture_id
-        source.mkdir()
+        run = self.save_configuration(self.run_name)
+        source = run / "captures" / capture_id / "delivery"
+        source.mkdir(parents=True)
         wms, accessibility, arkui = fixture()
         wms["capture_id"] = capture_id
         wms["app_windows"][0]["bounding_box"]["x"] = x
         checks = {key: "pass" for key in dataset.CHECKS}
         wms["checks"] = checks
         wms["sample"] = {"app": "editor", "page_id": "page", "scene": "scene", "state_id": "state"}
+        wms["stability"] = {"status": "verified", "rules": []}
         for index, window in enumerate(wms["app_windows"]):
             window["trees"] = {kind: {"file": f"editor_page_scene_state_{key}.json",
                                       "json_pointer": f"/windows/{index}/tree"}
@@ -51,6 +95,12 @@ class DatasetTests(unittest.TestCase):
             if kind == "screenshot":
                 Image.new("RGB", (3120, 2080), "white").save(destination)
             else:
+                if kind == "wms":
+                    policy = self.identity["configuration"]["project"]["tasks"][0]["privacy"]
+                    sha256 = files["screenshot"]["sha256"]
+                    wms["privacy"] = {"enabled": False, "status": "disabled", "reason": policy["reason"],
+                        "regions": [], "before_sha256": sha256, "after_sha256": sha256,
+                        "policy_sha256": hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()}
                 destination.write_text(json.dumps(documents[kind]), encoding="utf-8")
             files[kind] = file_info(destination)
         acceptance = {"pass": True, "task_name": task, "target_bundle_name": "app.editor",
@@ -72,7 +122,8 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(self.status()["counts"], {"editor": 0, "other": 0})
         self.assertEqual(self.status()["remaining"], {"editor": 3, "other": 2})
         self.assertFalse(self.root.exists())
-        changed = {**self.identity, "config_sha256": "c" * 64}
+        changed = copy.deepcopy(self.identity)
+        changed["config_sha256"] = changed["configuration"]["digests"]["config"] = "c" * 64
         self.assertEqual(dataset.dataset_status(self.root, changed)["counts"]["editor"], 0)
 
     def test_publish_moves_exactly_five_files_and_resume_is_idempotent(self):
@@ -163,7 +214,8 @@ class DatasetTests(unittest.TestCase):
 
     def test_changed_configuration_is_not_silently_reset(self):
         self.publish(self.delivery())
-        changed = {**self.identity, "config_sha256": "c" * 64}
+        changed = copy.deepcopy(self.identity)
+        changed["config_sha256"] = changed["configuration"]["digests"]["config"] = "c" * 64
         with self.assertRaisesRegex(CaptureError, "configuration identity differs"):
             dataset.dataset_status(self.root, changed)
         self.assertEqual(self.status()["counts"]["editor"], 1)
@@ -237,6 +289,7 @@ class DatasetTests(unittest.TestCase):
 
     def test_quota_is_enforced_before_publication(self):
         self.identity["tasks"][0]["target_count"] = 1
+        self.identity["configuration"]["project"]["tasks"][0]["target_count"] = 1
         self.publish(self.delivery())
         source, acceptance = self.delivery("frame-b", x=40)
         with self.assertRaisesRegex(CaptureError, "quota is already complete"):
@@ -271,6 +324,7 @@ class DatasetTests(unittest.TestCase):
 
     def test_interruption_during_each_artifact_rename_resumes_durable_naming_plan(self):
         self.identity["tasks"][0]["target_count"] = 10
+        self.identity["configuration"]["project"]["tasks"][0]["target_count"] = 10
         for index, kind in enumerate(dataset.SUFFIXES):
             with self.subTest(kind=kind):
                 source, acceptance = self.delivery(f"rename-{kind}", x=30 + index)

@@ -261,43 +261,34 @@ def prepare_delivery(request: dict) -> dict:
     return save_preparation(directory, metadata, request, receipt)
 
 
-def synchronize_publication(result: dict) -> None:
-    """@brief 根据持久收据修复原始证据指针；可重复执行，不修改五件套。 @param result 已核验发布收据。"""
-    evidence = Path(result["evidence_directory"]).resolve()
-    metadata_path = evidence / "metadata.json"
-    metadata = json.loads(metadata_path.read_bytes())
-    if metadata["capture_id"] != result["sample_id"]:
-        fail("Published evidence capture identity does not match")
-    delivery = metadata["delivery"]
-    if delivery["files"] not in (result["files"], result["source_files"]):
-        fail("Published evidence file index does not match its durable receipt")
-    if delivery["capture_id"] != result["sample_id"]:
-        fail("Published evidence capture identity does not match its durable receipt")
-    expected = evidence / "delivery"
-    if Path(delivery["path"]).resolve() not in (expected, Path(result["path"]).resolve()):
-        fail("Published evidence delivery pointer is outside the recorded directories")
-    delivery.update(path=result["path"], files=result["files"], publication=result)
-    screenshot = Path(result["path"]) / result["files"]["screenshot"]["file"]
-    metadata["files"]["screenshot"] = {**result["files"]["screenshot"], "file": str(screenshot)}
-    atomic_json(metadata_path, metadata)
-    atomic_json(evidence / "delivery-manifest.json", delivery)
-    atomic_json(evidence / "publication.json", result)
-    preparation_path = evidence / "delivery-preparation.json"
-    receipt = json.loads(preparation_path.read_bytes())
-    receipt.update(status="complete", manifest_sha256=manifest_digest(delivery))
-    atomic_json(preparation_path, receipt)
+def synchronize_publication(result: dict, context: dict) -> None:
+    """@brief 核验后仅补齐明确中断的原子写入，保留原收据路径。 @param result 已登记样本。
+    @param context 原配置和实际读写位置。
+    """
+    from har_capture.publication_evidence import publication_plan, verify_published_evidence
+    pending = publication_plan(result, context)
+    for record in pending:
+        atomic_json(record["path"], record["after"])
+    if pending:
+        verify_published_evidence(result, context)
 
 
 def resume_dataset(request: dict) -> dict:
     """@brief 验证已发布配额并修复在登记后中断的证据同步。 @param request 项目身份与根目录。 @return 进度。"""
     status = dataset_status(Path(request["root"]), request["identity"])
+    from har_capture.dataset_identity import configuration_sources
+    from har_capture.publication_evidence import publication_context
+    sources = configuration_sources(request["identity"])
     for sample in status["samples"]:
-        synchronize_publication(sample)
+        context = publication_context(sample, request["identity"], sources)
+        synchronize_publication(sample, context)
     return status
 
 
 def publish_delivery(request: dict) -> dict:
     """@brief 持久化登记后同步原始证据的最终文件指针。 @param request 发布参数。 @return 正式样本收据。"""
+    from har_capture.dataset_identity import configuration_sources
+    from har_capture.publication_evidence import publication_context
     evidence = Path(request["evidence_directory"]).resolve()
     metadata = json.loads((evidence / "metadata.json").read_bytes())
     directory = Path(request["directory"]).resolve()
@@ -316,7 +307,8 @@ def publish_delivery(request: dict) -> dict:
             fail("Repeated publication request differs from its durable acceptance")
         return result
     result = publish_sample(Path(request["root"]), request["identity"], directory, request["acceptance"])
-    synchronize_publication(result)
+    context = publication_context(result, request["identity"], configuration_sources(request["identity"]))
+    synchronize_publication(result, context)
     return result
 
 

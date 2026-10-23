@@ -72,5 +72,22 @@ test('restored state counts only published samples without restoring old device 
   assert.equal(state.candidate, undefined);
   assert.equal(state.revision, 0);
   assert.deepEqual(state.datasetIdentity, { project_sha256: 'a'.repeat(64), config_sha256: 'b'.repeat(64),
-    tasks: [{ name: 'editor', target_count: 3 }, { name: 'browser', target_count: 2 }] });
+    tasks: [{ name: 'editor', target_count: 3 }, { name: 'browser', target_count: 2 }],
+    configuration: config, project_sources: [] });
+});
+
+test('state preserves explicit raw project sources without adding fields to loaded configuration', async (t) => {
+  const root = await directory(t);
+  const config = { digests: { project: 'a'.repeat(64), config: 'b'.repeat(64) }, project: {
+    run: { max_duration_seconds: 100 }, tasks: [{ name: 'editor', target_count: 200 }],
+  } } as LoadedConfiguration;
+  const sources = [path.join(root, 'old-project.toml'), 'relative-project-archives'];
+  const expected = sources.map((source) => path.resolve(source));
+  const state = new RunState(config, root, sources);
+  sources.push('later-mutation');
+  const identity = state.datasetIdentity;
+  assert.deepEqual(identity.project_sources, expected);
+  identity.project_sources.push('returned-mutation');
+  assert.deepEqual(state.datasetIdentity.project_sources, expected);
+  assert.equal(Object.hasOwn(config, 'project_sources'), false);
 });
