@@ -1082,7 +1082,8 @@ def render_clip(render: dict, values: dict, rectangles: dict, matrices: dict, ze
             "kind": "rounded_rectangle" if any(radii) else "rectangle", "bounds": rectangles[render["id"]],
             "corner_radius_local": radii,
             "bounds_source": "ArkUI.native_zero_area" if zero_pending else "RenderService.current_bounds",
-            "local_bounds": local, "local_to_screen": list(matrix), "corners": affine.corners(matrix, local),
+            "local_bounds": local, "local_to_screen": list(matrix),
+            "corners": [list(point) for point in affine.corners(matrix, local)],
             "mode": "bounds" if bounds_clip else "frame"}
 
 
@@ -1106,7 +1107,8 @@ def content_clip(render: dict, values: dict, rectangles: dict, matrices: dict) -
     local_rect = {"x": local[0], "y": local[1], "width": local[2] - local[0], "height": local[3] - local[1]}
     return {"source": "RenderService.RSTree.CustomClipToFrame", "render_node_id": render["id"],
             "kind": "rectangle", "bounds": affine.bounds(matrix, local_rect), "local_bounds_ltrb": local,
-            "local_to_screen": list(matrix), "corners": affine.corners(matrix, local_rect),
+            "local_to_screen": list(matrix),
+            "corners": [list(point) for point in affine.corners(matrix, local_rect)],
             "mode": "content_and_children"}
 
 

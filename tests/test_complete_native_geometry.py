@@ -69,7 +69,7 @@ class CompleteNativeGeometryTests(unittest.TestCase):
         self.assertEqual(child["geometry"]["screen_bounds"], {"x": 180, "y": 65, "width": 30, "height": 20})
         clip = next(c for c in child["geometry"]["clip_chain"] if c.get("render_node_id") == "101")
         self.assertEqual(clip["local_to_screen"], [0, 1, -1, 0, 200, 60])
-        self.assertEqual(clip["corners"], ((200, 60), (200, 160), (120, 160), (120, 60)))
+        self.assertEqual(clip["corners"], [[200, 60], [200, 160], [120, 160], [120, 60]])
         self.assertEqual(child["geometry"]["rectangular_clip_bounds"],
                          {"x": 180, "y": 65, "width": 20, "height": 20})
 
