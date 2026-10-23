@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { HarmonyAgent } from '@midscene/harmony';
-import type { AgentProgressListener, UIContext } from '@midscene/core';
+import { ScreenshotItem, type AgentProgressListener, type UIContext } from '@midscene/core';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { CollectionAgent, CollectionDevice } from '../agent/device.js';
 import { RunState, type Observation } from '../agent/state.js';
@@ -210,4 +210,55 @@ test('each new aiAct clears its preceding planning binding', async (t) => {
   await emit('start');
   assert.equal(f.device.planningObservation, undefined);
   assert.equal(f.state.signal.aborted, false);
+});
+
+test('semantic context keeps paired PNGs and reuses the validated public context timestamp', async (t) => {
+  const f = fixture(t);
+  const { agent } = mockAgent(t, f.device);
+  const image = `data:image/png;base64,${PAGE_PNG.toString('base64')}`;
+  f.device.pageObservation = { before_image: image, after_image: image,
+    receipt: { after: { crop_bounds: { width: 4, height: 3 } } } } as CollectionDevice['pageObservation'];
+  f.device.frozenScreenshot = image;
+  const timestamp = 123456789;
+  const context = { screenshot: ScreenshotItem.create(image, timestamp), shotSize: { width: 2, height: 1 },
+    shrunkShotToLogicalRatio: 0.5 } as UIContext;
+  const original = t.mock.method(HarmonyAgent.prototype, 'getUIContext', async () => context);
+  const result = await agent.getUIContext();
+  assert.equal(original.mock.callCount(), 1);
+  assert.deepEqual(result.screenshotSequence?.map((frame) => frame.base64), [image, image]);
+  assert.deepEqual(result.screenshotSequence?.map((frame) => frame.capturedAt), [timestamp, timestamp]);
+  assert.equal(result.screenshot.base64, image);
+  assert.equal(result.screenshot, result.screenshotSequence![1]);
+  assert.deepEqual(result.shotSize, { width: 4, height: 3 });
+  assert.equal(result.shrunkShotToLogicalRatio, 1);
+});
+
+test('ordinary planning and saved screenshot acceptance do not inherit semantic screenshot sequences', async (t) => {
+  for (const phase of ['planning', 'saved screenshot']) {
+    await t.test(phase, async (child) => {
+      const f = fixture(child);
+      const { agent } = mockAgent(child, f.device);
+      const image = `data:image/png;base64,${PAGE_PNG.toString('base64')}`;
+      if (phase === 'planning') {
+        f.device.pageObservation = { before_image: image, after_image: image } as CollectionDevice['pageObservation'];
+      } else f.device.frozenScreenshot = image;
+      const context = { screenshot: ScreenshotItem.create(image, 123), shotSize: { width: 4, height: 3 },
+        shrunkShotToLogicalRatio: 1 } as UIContext;
+      child.mock.method(HarmonyAgent.prototype, 'getUIContext', async () => context);
+      const result = await agent.getUIContext();
+      assert.equal(result, context);
+      assert.equal(result.screenshotSequence, undefined);
+    });
+  }
+});
+
+test('semantic pairing cannot bypass an error from the SDK public context validation', async (t) => {
+  const f = fixture(t);
+  const { agent } = mockAgent(t, f.device);
+  const image = `data:image/png;base64,${PAGE_PNG.toString('base64')}`;
+  f.device.pageObservation = { before_image: image, after_image: image } as CollectionDevice['pageObservation'];
+  f.device.frozenScreenshot = image;
+  const failure = new Error('Mocked SDK context validation failed');
+  t.mock.method(HarmonyAgent.prototype, 'getUIContext', async () => { throw failure; });
+  await assert.rejects(agent.getUIContext(), (error) => error === failure);
 });

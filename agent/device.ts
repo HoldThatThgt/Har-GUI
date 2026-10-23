@@ -3,7 +3,8 @@ import { mkdtemp, readFile, unlink, rmdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { HarmonyAgent, HarmonyDevice, type HarmonyAgentOpt } from '@midscene/harmony';
-import type { AgentProgressEvent, AiActProgressData, DeviceAction, ServiceAction } from '@midscene/core';
+import { ScreenshotItem, type AgentProgressEvent, type AiActProgressData,
+  type DeviceAction, type ServiceAction } from '@midscene/core';
 import { imageInfoOfBase64 } from '@midscene/shared/img';
 import { bridge, type DeviceOptions } from './bridge.js';
 import type { PageObservation } from './page-stability.js';
@@ -147,10 +148,24 @@ export class CollectionAgent extends HarmonyAgent {
     }
   }
 
-  /** @brief 记录每张规划截图对应的窗口事实。 */
+  /** @brief 为已校验的页面比较绑定原始双图，其余观察继续关联规划窗口事实。 */
   override async getUIContext(action?: ServiceAction) {
     const context = await super.getUIContext(action);
     const device = this.page as CollectionDevice;
+    if (device.pageObservation && device.frozenScreenshot) {
+      const paired = device.pageObservation;
+      if (device.frozenScreenshot !== paired.after_image) {
+        console.error('Target-page image context does not match the verified after image');
+        throw new Error('Target-page image context does not match the verified after image');
+      }
+      // SDK 时间仅表示本次内存封装；前后顺序来自已核验观察，不推算原始拍摄时间。
+      const timestamp = context.screenshot.capturedAt;
+      context.screenshot = ScreenshotItem.create(paired.after_image, timestamp);
+      context.screenshotSequence = [ScreenshotItem.create(paired.before_image, timestamp), context.screenshot];
+      const { width, height } = paired.receipt.after.crop_bounds;
+      context.shotSize = { width, height };
+      context.shrunkShotToLogicalRatio = 1;
+    }
     if (device.latestObservation && !device.frozenScreenshot) {
       device.state.observations.set(context.screenshot.id, device.latestObservation);
     }

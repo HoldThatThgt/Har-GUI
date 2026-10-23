@@ -55,9 +55,9 @@ async function fixture(t: TestContext, variation = 'cursor blink') {
   const device = { pageObservation, frozenScreenshot: undefined } as unknown as CollectionDevice;
   const calls: any[][] = [];
   const answer: { value: any } = {
-    value: JSON.stringify({ decision: 'same_page', evidence: 'Mocked same-page decision' }),
+    value: { decision: 'same_page', evidence: 'Mocked same-page decision' },
   };
-  const agent = { aiAsk: async (...args: any[]) => {
+  const agent = { aiQuery: async (...args: any[]) => {
     calls.push(args);
     assert.equal(device.frozenScreenshot, pageObservation.after_image);
     return answer.value;
@@ -74,11 +74,13 @@ test('paired semantic mocks allow cursor blink, same-page updates and background
       const receipt = await verifyPageStability(f.directory, f.metadata, f.state.candidate);
       assert.equal(receipt.decision, 'same_page');
       assert.equal(f.calls.length, 1);
-      const call = JSON.stringify(f.calls[0]);
-      assert.ok(call.includes(f.pageObservation.before_image));
-      assert.ok(call.includes(f.pageObservation.after_image));
-      assert.deepEqual(f.calls[0][0].images.map((reference: any) => reference.name), ['before', 'after']);
-      assert.deepEqual(f.calls[0][1], { screenshotIncluded: false, domIncluded: false });
+      assert.deepEqual(Object.keys(f.calls[0][0]).sort(), ['decision', 'evidence']);
+      assert.equal(typeof f.calls[0][0].decision, 'string');
+      assert.equal(typeof f.calls[0][0].evidence, 'string');
+      assert.equal(f.calls[0][1].screenshotIncluded, true);
+      assert.equal(f.calls[0][1].domIncluded, false);
+      assert.equal(typeof f.calls[0][1].context, 'string');
+      assert.doesNotMatch(JSON.stringify(f.calls[0]), /data:image/);
       assert.deepEqual(f.metadata.consistency, original);
       assert.equal(Object.hasOwn(receipt, 'stable'), false);
       assert.doesNotMatch(readFileSync(join(f.directory, 'page-stability.json'), 'utf8'), /data:image|before_image/);
@@ -93,7 +95,7 @@ test('paired semantic mocks reject target navigation and target body blanking', 
   for (const decision of ['page_changed', 'body_blank']) {
     await t.test(decision, async (child) => {
       const f = await fixture(child);
-      f.answer.value = JSON.stringify({ decision, evidence: 'Mocked target navigation or blank-body decision' });
+      f.answer.value = { decision, evidence: 'Mocked target navigation or blank-body decision' };
       await assert.rejects(assessPageStability(f.state, f.device, f.agent, f.metadata), /page|blank/i);
       assert.equal(f.calls.length, 1);
       assert.equal(JSON.parse(readFileSync(join(f.directory, 'page-stability.json'), 'utf8')).decision, decision);
@@ -105,8 +107,7 @@ test('paired semantic mocks reject target navigation and target body blanking', 
 
 test('unobservable is recorded honestly without claiming a stable page or zero pixel differences', async (t) => {
   const f = await fixture(t);
-  f.answer.value = JSON.stringify({ decision: 'unobservable',
-    evidence: 'Mocked insufficient visibility; no stability claim' });
+  f.answer.value = { decision: 'unobservable', evidence: 'Mocked insufficient visibility; no stability claim' };
   await assessPageStability(f.state, f.device, f.agent, f.metadata);
   const receipt = await verifyPageStability(f.directory, f.metadata, f.state.candidate);
   assert.equal(receipt.decision, 'unobservable');
@@ -116,13 +117,15 @@ test('unobservable is recorded honestly without claiming a stable page or zero p
 });
 
 test('semantic decision responses must have the exact enum and nonempty evidence fields', async (t) => {
-  const answers = [null, 'same_page', { decision: 'stable', evidence: 'invalid enum' },
+  const answers = [null, [], [{ decision: 'same_page', evidence: 'Object inside an array' }], 'same_page',
+    JSON.stringify({ decision: 'same_page', evidence: 'Serialized object' }),
+    { decision: 'stable', evidence: 'invalid enum' },
     { decision: 'same_page', evidence: '' }, { decision: 'same_page' },
     { decision: 'same_page', evidence: 'fixture', stable: true }];
   for (const [index, answer] of answers.entries()) {
     await t.test(`invalid response ${index}`, async (child) => {
       const f = await fixture(child);
-      f.answer.value = typeof answer === 'object' ? JSON.stringify(answer) : answer;
+      f.answer.value = answer;
       await assert.rejects(assessPageStability(f.state, f.device, f.agent, f.metadata));
       assert.equal(existsSync(join(f.directory, 'page-stability.json')), false);
       assert.equal(f.device.frozenScreenshot, undefined);

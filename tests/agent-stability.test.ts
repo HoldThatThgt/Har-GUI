@@ -84,7 +84,7 @@ function fixture(t: TestContext) {
         target_count: 1, bundle_names: ['app.fixture'], privacy: { enabled: false, reason: 'Synthetic fixture' } }],
     } } as LoadedConfiguration;
   writeFixtureConfiguration(config);
-  const agent = { aiAsk: async () => JSON.stringify({ decision: 'same_page',
+  const agent = { aiQuery: async () => ({ decision: 'same_page',
     evidence: 'Mocked parameter propagation fixture' }) } as unknown as CollectionAgent;
   return { directory, capture, candidate, config, window, metadata, pageObservation, agent };
 }

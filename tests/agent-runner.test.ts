@@ -197,9 +197,9 @@ function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
       page_name: `page-${count}`, target_window_id: 92, target_bundle_name: 'org.example.editor', window_changes: [] };
     writeFileSync(join(directory, 'candidate.json'), JSON.stringify(state.candidate));
   });
-  t.mock.method(CollectionAgent.prototype, 'aiAsk', async () => {
-    f.events.push('aiAsk');
-    return JSON.stringify({ decision: 'same_page', evidence: 'Mocked cap-test page decision' });
+  t.mock.method(CollectionAgent.prototype, 'aiQuery', async () => {
+    f.events.push('aiQuery');
+    return { decision: 'same_page', evidence: 'Mocked cap-test page decision' };
   });
   t.mock.method(CollectionAgent.prototype, 'aiAssert', async () => {
     f.events.push('aiAssert');
@@ -232,7 +232,7 @@ test('run cap adds one to a restored 200-target dataset and stops before another
   assert.equal(summary.accepted.length, 2);
   assert.equal(summary.actions, 1);
   assert.match(f.prompts[0], /199 samples remain/);
-  assert.deepEqual(f.events, ['connect', 'aiAct', 'aiAsk', 'aiAssert', 'visualize', 'destroy']);
+  assert.deepEqual(f.events, ['connect', 'aiAct', 'aiQuery', 'aiAssert', 'visualize', 'destroy']);
   assert.deepEqual(f.plan().requests.map((request: any) => request.operation),
     ['dataset_status', 'prepare_capture', 'publish_capture', 'export_sample']);
   assert.deepEqual(f.plan().requests[0].identity.tasks, [{ name: 'editor', target_count: 200 }]);
