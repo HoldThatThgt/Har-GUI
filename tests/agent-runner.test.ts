@@ -86,7 +86,7 @@ function fileInfo(file: string, bytes: Buffer) {
 }
 
 function capture(directory: string, captureId: string) {
-  mkdirSync(directory);
+  mkdirSync(directory, { recursive: true });
   const tree = Buffer.from(JSON.stringify({ attributes: { type: 'root' }, children: [] }));
   const windows = Buffer.from(JSON.stringify({ window_id: 92 }));
   const contents = { 'screenshot.png': PNG, 'arkui.json': tree, 'accessibility.json': tree,
@@ -130,7 +130,8 @@ function fixture(t: TestContext, options: FixtureOptions = {}) {
   t.mock.method(console, 'error', () => {});
   return { directory, config, events, prompts, connection, planPath, passAcceptance: options.passAcceptance ?? true,
     plan: () => JSON.parse(readFileSync(planPath, 'utf8')),
-    summaries: () => readdirSync(config.outputPath).map((name) => JSON.parse(
+    summaries: () => readdirSync(config.outputPath).filter((name) => /^\d+-(success|failed|running)$/.test(name))
+      .map((name) => JSON.parse(
       readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
 }
 
@@ -171,10 +172,11 @@ function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
     state.enter('Capture');
     state.leave();
     const captureId = `capture-${count}`;
-    const directory = join(f.directory, captureId);
+    const directory = join(state.directory, 'captures', captureId);
     device.pageObservation = capture(directory, captureId);
     state.candidate = { capture_id: captureId, path: directory, task_name: state.task.name,
       page_name: `page-${count}`, target_window_id: 92, target_bundle_name: 'org.example.editor', window_changes: [] };
+    writeFileSync(join(directory, 'candidate.json'), JSON.stringify(state.candidate));
   });
   t.mock.method(CollectionAgent.prototype, 'aiAsk', async () => {
     f.events.push('aiAsk');
@@ -198,7 +200,10 @@ test('run cap adds one to a restored 200-target dataset and stops before another
   const f = mockRun(t, { restored: [{ sample_id: 'saved', task_name: 'editor' }] });
   const directory = await run(f.config, f.connection, { maxNewSamples: 1 });
   const summary = f.summaries()[0];
-  assert.equal(directory, join(f.config.outputPath, readdirSync(f.config.outputPath)[0]));
+  assert.equal(directory, join(f.config.outputPath, '001-success'));
+  assert.equal(summary.run_index, '001');
+  assert.equal(summary.artifacts_directory, join(f.config.outputPath, '.001'));
+  assert.deepEqual(readdirSync(directory), ['run.json']);
   assert.equal(summary.status, 'complete');
   assert.equal(summary.stop_reason, 'run_sample_limit');
   assert.equal(summary.max_new_samples, 1);
@@ -211,7 +216,9 @@ test('run cap adds one to a restored 200-target dataset and stops before another
     ['dataset_status', 'prepare_delivery', 'publish_sample']);
   assert.deepEqual(f.plan().requests[0].identity.tasks, [{ name: 'editor', target_count: 200 }]);
   assert.deepEqual(f.plan().requests[0].identity.project_sources, []);
-  assert.deepEqual(readFileSync(join(directory, 'project.toml')), readFileSync(f.config.projectPath));
+  assert.deepEqual(readFileSync(join(summary.artifacts_directory, 'project.toml')), readFileSync(f.config.projectPath));
+  assert.equal(summary.accepted[1].path, join(summary.artifacts_directory, 'captures', 'capture-1'));
+  assert.equal(existsSync(join(summary.accepted[1].path, 'candidate.json')), true);
   assert.equal(f.config.project.tasks[0].target_count, 200);
   assert.deepEqual(summary.model_usage.call_ids, []);
 });
@@ -249,8 +256,10 @@ test('run rejects changed raw project bytes before saving provenance or touching
   const changed = Buffer.concat([readFileSync(f.config.projectPath), Buffer.from('\n# Changed after loading\n')]);
   writeFileSync(f.config.projectPath, changed);
   await assert.rejects(run(f.config, f.connection, { maxNewSamples: 0 }), /Project source digest changed/);
-  const directory = join(f.config.outputPath, readdirSync(f.config.outputPath)[0]);
-  assert.equal(f.summaries()[0].status, 'failed');
+  const summary = f.summaries()[0];
+  const directory = summary.artifacts_directory;
+  assert.equal(summary.status, 'failed');
+  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
   assert.equal(existsSync(join(directory, 'project.toml')), false);
   assert.equal(existsSync(join(directory, 'configuration.json')), false);
   assert.deepEqual(f.plan().requests, []);
@@ -264,8 +273,9 @@ test('run preserves exact raw project bytes including comments and CRLF', async 
   writeFileSync(f.config.projectPath, raw);
   f.config.digests.project = createHash('sha256').update(raw).digest('hex');
   const directory = await run(f.config, f.connection, { maxNewSamples: 0 });
-  assert.deepEqual(readFileSync(join(directory, 'project.toml')), raw);
-  assert.equal(JSON.parse(readFileSync(join(directory, 'configuration.json'), 'utf8')).digests.project,
+  const artifacts = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8')).artifacts_directory;
+  assert.deepEqual(readFileSync(join(artifacts, 'project.toml')), raw);
+  assert.equal(JSON.parse(readFileSync(join(artifacts, 'configuration.json'), 'utf8')).digests.project,
     f.config.digests.project);
 });
 
@@ -346,6 +356,9 @@ test('failed publication is not a new sample and does not simulate normal cap co
   assert.equal(f.plan().publish_attempts, 2);
   assert.equal(f.events.filter((event) => event === 'aiAct').length, 2);
   assert.equal(f.events.at(-1), 'destroy');
+  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
+  assert.equal(summary.candidate.path, join(f.config.outputPath, '.001', 'captures', 'capture-2'));
+  assert.equal(existsSync(join(summary.candidate.path, 'metadata.json')), true);
 });
 
 test('failed visual acceptance does not count a capture as a new publication', async (t) => {

@@ -148,6 +148,11 @@ flowchart LR
 `run.json.new_samples` 不含恢复的旧样本；`stop_reason=run_sample_limit` 表示达到本轮上限，
 `stop_reason=quota_complete` 才表示所有任务已达到项目总目标。达到本轮上限属于正常完成。
 
+每次 `run` 和 `finalize` 保留独立运行，按同一 `run.output` 根内的递增序号生成
+`001-running`、`001-success` 或 `001-failed` 结果入口。入口的 `run.json.artifacts_directory`
+指向不改名的 `.001` 固定证据目录；候选、收据、数据库及独立验收的来源路径始终引用该目录。
+运行失败也保留已发布进度及原始证据，不清空旧输出；见[运行输出](run-output.md)。
+
 正式 `samples/<capture_id>/` 严格只有 `_tree.json`、`_windows_tree.json`、
 `_windows_akui.json`、`_shot.png`、`_wms.json`；四份 JSON 共享采集标识和画布。
 原始证据、打码收据、用量、查看页不放进这个五文件目录。

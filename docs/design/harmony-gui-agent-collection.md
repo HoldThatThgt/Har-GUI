@@ -581,7 +581,9 @@ dataset.root/
     {App}_{页面ID}_{场景}_{状态序号}_windows_akui.json
     {App}_{页面ID}_{场景}_{状态序号}_shot.png
     {App}_{页面ID}_{场景}_{状态序号}_wms.json
-run.output/<运行标识>/
+run.output/001-success/run.json  运行结果与固定证据目录入口
+run.output/002-failed/run.json   失败结果与已发布进度
+run.output/.001/
   configuration.json
   events.jsonl
   model-usage.jsonl
@@ -604,6 +606,8 @@ run.output/<运行标识>/
 ```
 
 文件后缀 `_windows_akui.json` 保持 Issue 的拼写，正文概念统一称为 ArkUI。
+`run` 和 `finalize` 在同根递增编号，保留每次运行。结果目录随运行状态改名，
+固定证据目录及全部持久路径保持不变；结构与并发预留见[运行输出](../run-output.md)。
 `App` 使用主任务的应用名称，多窗口中的其他应用仍完整记录在窗口列表中。
 页面 ID 取目标应用结构签名的前十六位，状态序号在数据库事务内按页面分配，跨运行保持稳定。
 发布前同步更名五个文件与 WMS 内部树引用，并重算 JSON 摘要；视觉验收绑定的 PNG 像素摘要不变。

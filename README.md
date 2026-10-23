@@ -57,7 +57,10 @@ npm run agent -- run --project project.toml --config config.toml `
 画布不符时拒收，不拉伸图像。输出结构如下：
 
 ```text
-output/<运行时间>-<随机标识>/
+output/001-success/run.json  本轮正常结束；artifacts_directory 指向固定证据目录
+output/002-failed/run.json   本轮失败；保留错误、已发布进度和固定证据目录
+output/003-running/run.json  本轮尚未正常结束
+output/.001/                不随结果改名的运行证据目录
   project.toml          本次装载时的原始项目字节，按 SHA-256 核对后保存
   configuration.json    已冻结的任务、模型名称、凭据变量名和配置摘要，不包含密钥
   events.jsonl          固定规划阶段、观察摘要、工具参数与结果、窗口变化及验收记录
@@ -85,6 +88,11 @@ dataset/
     <App>_<页面ID>_<场景>_<状态序号>_shot.png
     <App>_<页面ID>_<场景>_<状态序号>_wms.json
 ```
+
+`run` 和 `finalize` 在同一个输出根内共同递增编号，保留旧输出。
+CLI 返回带结果的目录；其中 `run.json.artifacts_directory` 定位配置、日志与原始采集。
+正常结束只表示本次命令成功；达到本轮采集上限时，项目总目标可能仍未完成。
+编号并发预留、固定路径和中断语义见[运行输出](docs/run-output.md)。
 
 正式样本目录严格只有五个文件。开启打码时覆盖唯一截图，关闭时保留原图，随后移动到正式目录；
 不另存原图副本或 screenshot-after。

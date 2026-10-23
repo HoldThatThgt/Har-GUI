@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
+import { open, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -10,6 +9,7 @@ import { bridge, type DeviceOptions } from './bridge.js';
 import { CollectionAgent, CollectionDevice } from './device.js';
 import { RunState } from './state.js';
 import { saveRunConfiguration } from './provenance.js';
+import { withRunOutput } from './run-output.js';
 import { createRegistry } from './tools.js';
 import { UsageRecorder, estimateUsageCost, type UsageRates } from './usage.js';
 
@@ -175,13 +175,11 @@ async function collectRemaining(
   finally { await agent.destroy(); }
 }
 
-/** @brief 使用设备锁执行一次完整运行，并始终写明成功或失败。 */
-export async function run(
-  config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions = {},
-): Promise<string> {
+/** @brief 在固定证据目录使用设备锁执行采集，保留真实配额和失败信息。 */
+async function executeRun(
+  config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions, directory: string,
+): Promise<void> {
   const { maxNewSamples } = options;
-  const directory = path.join(config.outputPath, new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomUUID());
-  await mkdir(directory, { recursive: true });
   const state = new RunState(config, directory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const lockPath = path.join(path.dirname(connection.hdc), `har-gui-${connection.serial}.lock`);
@@ -205,7 +203,6 @@ export async function run(
       () => maxNewSamples !== undefined && newSampleCount(state, restored) >= maxNewSamples);
     state.save('complete', { device: connection.serial, ...progress(), stop_reason: stopReason,
       model_usage: usageSnapshot(usage, config.profile.pricing) });
-    return directory;
   } catch (error) {
     console.error('Collection run failed:', String(error));
     state.save('failed', { error: String(error), candidate: state.candidate, ...progress(),
@@ -216,4 +213,11 @@ export async function run(
     process.off('SIGTERM', interrupt);
     if (lock) { await lock.close(); await unlink(lockPath); }
   }
+}
+
+/** @brief 保留每次采集运行并返回带递增序号和结果的目录；证据路径始终固定。 */
+export async function run(
+  config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions = {},
+): Promise<string> {
+  return withRunOutput(config.outputPath, (directory) => executeRun(config, connection, options, directory));
 }

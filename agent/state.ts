@@ -85,7 +85,7 @@ export class RunState {
   /** @brief 写入可独立检查的运行结果。 */
   save(status: string, extra: object = {}): void {
     writeFileSync(path.join(this.directory, 'run.json'), JSON.stringify({
-      status, updated_at: new Date().toISOString(), actions: this.actions,
+      status, artifacts_directory: this.directory, updated_at: new Date().toISOString(), actions: this.actions,
       accepted: this.accepted, ...extra,
     }, null, 2) + '\n');
   }

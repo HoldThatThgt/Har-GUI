@@ -92,7 +92,7 @@ with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_ef
 function fixture(t: TestContext, candidate = true, captureInRun = false, redacted = false) {
   mockSyntheticGeometry(t);
   const directory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-test-'));
-  let capture = captureInRun ? join(directory, 'runs', 'run-A', 'captures') : join(directory, 'capture');
+  let capture = captureInRun ? join(directory, 'runs', '.001', 'captures') : join(directory, 'capture');
   mkdirSync(capture, { recursive: true });
   t.after(() => {
     assert.equal(dirname(directory), resolve(tmpdir()));
@@ -124,8 +124,18 @@ function fixture(t: TestContext, candidate = true, captureInRun = false, redacte
         instruction: 'Inspect the saved fixture', acceptance: 'The saved screenshot is white' }] } };
   writeFixtureConfiguration(config);
   return { directory, capture, config, request: { directory: capture, taskName: 'editor' },
-    runs: () => readdirSync(config.outputPath).map((name) => JSON.parse(
+    runs: () => readdirSync(config.outputPath).filter((name) => /^\d+-(success|failed|running)$/.test(name))
+      .map((name) => JSON.parse(
       readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
+}
+
+/** @brief 从结果索引取得始终不改名的运行证据目录。 */
+function artifacts(directory: string): string {
+  const result = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+  assert.equal(result.artifacts_directory, join(dirname(directory), `.${result.run_index}`));
+  assert.equal(resolve(result.artifacts_directory), result.artifacts_directory);
+  assert.deepEqual(readdirSync(directory), ['run.json']);
+  return result.artifacts_directory;
 }
 
 /** 记录全部原始证据、发布收据及正式五件套的字节摘要和精确修改时间。 */
@@ -148,6 +158,16 @@ function savedFiles(roots: Record<string, string>) {
   return result;
 }
 
+/** @brief 直接读取真实 SQLite 的持久来源与原清单，不经过桥接结果重建。 */
+function publishedRows(directory: string) {
+  const script = `import json,sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as database:
+    rows = database.execute('SELECT source,manifest,status FROM samples').fetchall()
+print(json.dumps([{'source':r[0],'manifest':json.loads(r[1]),'status':r[2]} for r in rows]))`;
+  return JSON.parse(execFileSync('python', ['-B', '-c', script, join(directory, 'dataset.sqlite3')],
+    { windowsHide: true, encoding: 'utf8', env: { ...process.env, PYTHONUTF8: '1' } }));
+}
+
 /** 将已发布收据改为等价的不同键序、缩进、转义和换行，验证恢复不会重新序列化。 */
 function varyReceipts(capture: string): void {
   for (const name of ['metadata.json', 'delivery-manifest.json', 'delivery-preparation.json', 'publication.json']) {
@@ -163,21 +183,24 @@ function varyReceipts(capture: string): void {
 }
 
 /** 使用进程内 Fetch 替身返回固定视觉响应，保留 SDK 解析及用量流程，不建立网络连接。 */
-async function model(t: TestContext, config: LoadedConfiguration, mode: 'pass' | 'fail' | 'error') {
+async function model(t: TestContext, config: LoadedConfiguration,
+  mode: 'pass' | 'fail' | 'error' | ('pass' | 'fail' | 'error')[]) {
   const requests: any[] = [];
   config.profile.base_url = 'https://model.fixture.invalid/v1';
   t.mock.method(globalThis, 'fetch', async (input: any, options: any) => {
     assert.match(String(input), /^https:\/\/model\.fixture\.invalid\/v1\//);
     requests.push(JSON.parse(options.body));
+    const outcome = Array.isArray(mode) ? mode.shift() : mode;
+    assert.ok(outcome, 'Every mocked model call needs an explicit response');
     const headers = { 'content-type': 'application/json' };
-    if (mode === 'error') return new Response('{"error":{"message":"fixture"}}', { status: 400, headers });
+    if (outcome === 'error') return new Response('{"error":{"message":"fixture"}}', { status: 400, headers });
     return new Response(JSON.stringify({ id: 'local-response', object: 'chat.completion', created: 1,
       model: 'fixture-vision',
       usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
         prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60 },
       choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant',
         content: '<observation>private-model-observation</observation><data-json>'
-          + JSON.stringify({ StatementIsTruthy: mode === 'pass' }) + '</data-json>' } }] }), { status: 200, headers });
+          + JSON.stringify({ StatementIsTruthy: outcome === 'pass' }) + '</data-json>' } }] }), { status: 200, headers });
   });
   writeFixtureConfiguration(config);
   return requests;
@@ -240,9 +263,12 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
   assert.equal(readdirSync(result.sample.path).length, 5);
   assert.equal(result.sample.files.screenshot.sha256, expectedHash);
   assert.equal(existsSync(join(f.capture, 'delivery')), false);
-  assert.doesNotMatch(readFileSync(join(run, 'model-usage.jsonl'), 'utf8'), /private-model|data:image|local-fixture-key/);
+  assert.equal(basename(run), '001-success');
+  assert.doesNotMatch(readFileSync(join(artifacts(run), 'model-usage.jsonl'), 'utf8'),
+    /private-model|data:image|local-fixture-key/);
   varyReceipts(f.capture);
-  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: run };
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: run,
+    original_artifacts: artifacts(run) };
   const preserved = savedFiles(roots);
   f.config.project.tasks[0].instruction = 'Find further distinct pages for the expanded project';
   f.config.project.tasks[0].acceptance = 'The requested expanded-project page is visible';
@@ -259,13 +285,14 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
     assert.equal(receipt.sample.sample_id, result.sample.sample_id, repeat);
     assert.equal(receipt.model_usage.calls, 0);
     assert.equal(receipt.accepted.length, 1);
-    assert.deepEqual(JSON.parse(readFileSync(join(resumed, 'configuration.json'), 'utf8')), f.config);
+    assert.deepEqual(JSON.parse(readFileSync(join(artifacts(resumed), 'configuration.json'), 'utf8')), f.config);
     assert.deepEqual(savedFiles(roots), preserved);
   }
-  const originalConfiguration = JSON.parse(readFileSync(join(run, 'configuration.json'), 'utf8'));
+  const originalConfiguration = JSON.parse(readFileSync(join(artifacts(run), 'configuration.json'), 'utf8'));
   assert.equal(originalConfiguration.digests.project, originalProjectDigest);
   assert.equal(originalConfiguration.project.tasks[0].target_count, 1);
-  assert.equal(createHash('sha256').update(readFileSync(join(run, 'project.toml'))).digest('hex'), originalProjectDigest);
+  assert.equal(createHash('sha256').update(readFileSync(join(artifacts(run), 'project.toml'))).digest('hex'),
+    originalProjectDigest);
   const status = await localBridge('python', { operation: 'dataset_status', root: f.config.datasetPath,
     identity: { project_sha256: f.config.digests.project, config_sha256: f.config.digests.config,
       tasks: f.config.project.tasks.map(({ name, target_count }) => ({ name, target_count })),
@@ -280,7 +307,7 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
 test('unpublished capture keeps its old run origin while a new project run finalizes and publishes it', async (t) => {
   const f = fixture(t, true, true);
   const requests = await model(t, f.config, 'pass');
-  const sourceRun = join(f.config.outputPath, 'run-A');
+  const sourceRun = join(f.config.outputPath, '.001');
   const sourceConfiguration = join(sourceRun, 'configuration.json');
   writeFileSync(sourceConfiguration, JSON.stringify(f.config, null, 2) + '\n');
   writeFileSync(join(sourceRun, 'project.toml'), readFileSync(f.config.projectPath));
@@ -303,6 +330,8 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.equal(f.config.digests.config, modelDigest);
   const finalized = await finalize(f.config, { python: 'python' }, f.request);
   const result = JSON.parse(readFileSync(join(finalized, 'run.json'), 'utf8'));
+  assert.equal(basename(finalized), '002-success');
+  assert.equal(result.artifacts_directory, join(f.config.outputPath, '.002'));
   const expectedIdentity = createHash('sha256').update(JSON.stringify({ config_sha256: modelDigest,
     project_sha256: f.config.digests.project, tasks: [{ name: 'editor', target_count: 200 }] })).digest('hex');
   assert.equal(result.status, 'complete');
@@ -313,16 +342,23 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.equal(readdirSync(join(f.config.datasetPath, 'samples')).length, 1);
   assert.equal(requests.length, 1);
   const sample = JSON.parse(readFileSync(join(f.capture, 'sample.json'), 'utf8'));
-  assert.equal(sample.finalization_directory, finalized);
+  assert.equal(sample.finalization_directory, artifacts(finalized));
   assert.equal(sample.path, f.capture);
+  const [row] = publishedRows(f.config.datasetPath);
+  assert.equal(row.status, 'committed');
+  assert.equal(row.source, join(f.capture, 'delivery'));
+  assert.equal(row.manifest.evidence_directory, f.capture);
+  assert.equal(row.manifest.sample_id, captureId);
   assert.deepEqual(readFileSync(sourceConfiguration), oldConfiguration);
   assert.equal(createHash('sha256').update(readFileSync(join(sourceRun, 'project.toml'))).digest('hex'),
     originalProjectDigest);
   assert.deepEqual(readFileSync(join(f.capture, 'candidate.json')), oldCandidate);
   assert.deepEqual(readFileSync(join(f.capture, 'windows.txt')), oldWindows);
-  const roots = { original_run: sourceRun, finalization_run: finalized, dataset: f.config.datasetPath };
+  const roots = { original_run: sourceRun, finalization_run: finalized, finalization_artifacts: artifacts(finalized),
+    dataset: f.config.datasetPath };
   const preserved = savedFiles(roots);
   const repeated = await finalize(f.config, { python: 'python' }, f.request);
+  assert.equal(basename(repeated), '003-success');
   const receipt = JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8'));
   assert.equal(receipt.sample.sample_id, result.sample.sample_id);
   assert.equal(receipt.sample.identity_sha256, expectedIdentity);
@@ -330,6 +366,48 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.equal(receipt.model_usage.calls, 0);
   assert.equal(readdirSync(join(f.config.datasetPath, 'samples')).length, 1);
   assert.equal(requests.length, 1);
+  assert.deepEqual(savedFiles(roots), preserved);
+  const { run } = await import('../agent/runner.js');
+  const resumed = await run(f.config, { python: 'python', hdc: join(f.directory, 'missing-hdc.exe'), serial: 'fixture' },
+    { maxNewSamples: 0 });
+  const restored = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
+  assert.equal(basename(resumed), '004-success');
+  assert.equal(restored.actions, 0);
+  assert.equal(restored.accepted[0].sample_id, result.sample.sample_id);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(savedFiles(roots), preserved);
+});
+
+test('failed finalization keeps its numbered evidence while a successful retry publishes and resumes once', async (t) => {
+  const f = fixture(t, true, true);
+  const requests = await model(t, f.config, ['fail', 'pass']);
+  const source = join(f.config.outputPath, '.001');
+  writeFileSync(join(source, 'configuration.json'), JSON.stringify(f.config, null, 2) + '\n');
+  writeFileSync(join(source, 'project.toml'), readFileSync(f.config.projectPath));
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /Project acceptance failed/);
+  const failed = join(f.config.outputPath, '002-failed');
+  const summary = JSON.parse(readFileSync(join(failed, 'run.json'), 'utf8'));
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.candidate.path, f.capture);
+  assert.equal(summary.model_usage.completed_calls, 1);
+  assert.equal(existsSync(join(f.config.datasetPath, 'dataset.sqlite3')), false);
+  const failedRoots = { failed, failed_artifacts: artifacts(failed) };
+  const failedFiles = savedFiles(failedRoots);
+  const success = await finalize(f.config, { python: 'python' }, f.request);
+  assert.equal(basename(success), '003-success');
+  const result = JSON.parse(readFileSync(join(success, 'run.json'), 'utf8'));
+  assert.equal(result.sample.evidence_directory, f.capture);
+  assert.equal(JSON.parse(readFileSync(join(f.capture, 'sample.json'), 'utf8')).finalization_directory,
+    artifacts(success));
+  assert.equal(publishedRows(f.config.datasetPath).length, 1);
+  assert.deepEqual(savedFiles(failedRoots), failedFiles);
+  const roots = { ...failedRoots, source, success, success_artifacts: artifacts(success), dataset: f.config.datasetPath };
+  const preserved = savedFiles(roots);
+  const repeated = await finalize(f.config, { python: 'python' }, f.request);
+  assert.equal(basename(repeated), '004-success');
+  assert.equal(JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8')).model_usage.calls, 0);
+  assert.equal(requests.length, 2);
+  assert.equal(publishedRows(f.config.datasetPath).length, 1);
   assert.deepEqual(savedFiles(roots), preserved);
 });
 
@@ -341,12 +419,13 @@ test('published recovery requires matching raw project evidence from a saved or 
   const archive = join(f.directory, 'project-archives');
   mkdirSync(join(archive, 'nested'), { recursive: true });
   const source = join(archive, 'nested', 'original-project.toml');
-  writeFileSync(source, readFileSync(join(original, 'project.toml')));
-  unlinkSync(join(original, 'project.toml'));
+  writeFileSync(source, readFileSync(join(artifacts(original), 'project.toml')));
+  unlinkSync(join(artifacts(original), 'project.toml'));
   f.config.project.tasks[0].target_count = 200;
   f.config.project.tasks[0].instruction = 'Collect further distinct project states';
   writeFixtureConfiguration(f.config);
-  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: original, archive };
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: original,
+    original_artifacts: artifacts(original), archive };
   const preserved = savedFiles(roots);
   await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
     /Raw project source is missing for the saved project digest/);
@@ -369,9 +448,10 @@ test('finalization refuses a changed current raw project before preserving a sna
   const raw = Buffer.concat([readFileSync(f.config.projectPath), Buffer.from('\n# Changed after loading\n')]);
   writeFileSync(f.config.projectPath, raw);
   await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /Project source digest changed/);
-  const [directory] = readdirSync(f.config.outputPath);
-  assert.equal(existsSync(join(f.config.outputPath, directory, 'project.toml')), false);
-  assert.equal(existsSync(join(f.config.outputPath, directory, 'configuration.json')), false);
+  const directory = f.runs()[0].artifacts_directory;
+  assert.equal(existsSync(join(directory, 'project.toml')), false);
+  assert.equal(existsSync(join(directory, 'configuration.json')), false);
+  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
   assert.equal(f.runs()[0].status, 'failed');
   assert.equal(requests.length, 0);
   assert.deepEqual(readFileSync(f.config.projectPath), raw);
@@ -417,7 +497,8 @@ test('prepared redaction preserves the original paired-page receipt and accepts 
   const pixel = await image.extract({ left: 1034, top: 153, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
   assert.deepEqual([...pixel], [0, 0, 0]);
   assert.deepEqual(readFileSync(join(f.capture, 'page-stability.json')), semantic);
-  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: directory };
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: directory,
+    original_artifacts: artifacts(directory) };
   const preserved = savedFiles(roots);
   const repeated = await finalize(f.config, { python: 'python' }, f.request);
   assert.equal(JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8')).model_usage.calls, 0);

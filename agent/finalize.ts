@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Agent } from '@midscene/core';
 import type { AbstractInterface } from '@midscene/core/device';
@@ -9,6 +8,7 @@ import { localBridge, type DeviceOptions } from './bridge.js';
 import { resolveModelConfig, type LoadedConfiguration } from './config.js';
 import { RunState } from './state.js';
 import { saveRunConfiguration } from './provenance.js';
+import { withRunOutput } from './run-output.js';
 import { verifyPageStability } from './page-stability.js';
 import { UsageRecorder, estimateUsageCost } from './usage.js';
 
@@ -172,16 +172,13 @@ async function complete(
     usage: modelUsage(state, usage) });
 }
 
-/** @brief 为已保存的采集创建独立最终验收运行，成功和失败都保存实际模型用量。
+/** @brief 在固定证据目录完成独立验收，成功和失败都保存实际模型用量。
  * @param config 当前任务及模型配置。 @param connection 仅供本地 Python 操作使用的进程参数。
- * @param options 证据目录、任务及明确目标应用。 @return 独立最终验收运行目录。
+ * @param options 证据目录、任务及明确目标应用。 @param directory 本次固定运行证据目录。
  */
-export async function finalize(
-  config: LoadedConfiguration, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions,
-): Promise<string> {
-  const name = new Date().toISOString().replace(/[:.]/g, '-') + '-finalize-' + randomUUID();
-  const directory = path.join(config.outputPath, name);
-  await mkdir(directory, { recursive: true });
+async function executeFinalize(
+  config: LoadedConfiguration, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions, directory: string,
+): Promise<void> {
   const state = new RunState(config, directory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const interrupt = () => state.controller.abort(new Error('Finalization interrupted'));
@@ -194,7 +191,6 @@ export async function finalize(
     state.save('running', { operation: 'finalize', capture_directory: path.resolve(options.directory) });
     const sample = await complete(state, connection, { ...options, directory: path.resolve(options.directory) }, usage);
     state.save('complete', { operation: 'finalize', sample, model_usage: modelUsage(state, usage) });
-    return directory;
   } catch (error) {
     console.error('Saved capture finalization failed:', String(error));
     state.save('failed', { operation: 'finalize', error: String(error), candidate: state.candidate,
@@ -206,4 +202,11 @@ export async function finalize(
     await writeFile(path.join(directory, 'model-usage-summary.json'), JSON.stringify(modelUsage(state, usage), null, 2)
       + '\n');
   }
+}
+
+/** @brief 为独立验收分配递增运行身份，返回结果目录并保持原始采集路径不变。 */
+export async function finalize(
+  config: LoadedConfiguration, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions,
+): Promise<string> {
+  return withRunOutput(config.outputPath, (directory) => executeFinalize(config, connection, options, directory));
 }
