@@ -97,7 +97,7 @@ class CoordinateTests(unittest.TestCase):
         native["$children"][0]["$rect"] = "[-30.00, 35.00],[10.00,50.00]"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[ClipToBounds:[true]]",
-            "Scale[2.0 0.5], OtherModifiers:[ClipToBounds:[true], Scale:[x:2.0 y:0.5]]")
+            "ScaleX[2.0] ScaleY[0.5], OtherModifiers:[ClipToBounds:[true], Scale:[x:2.0 y:0.5]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
@@ -112,7 +112,7 @@ class CoordinateTests(unittest.TestCase):
         args[1]["transform"].update(scale_x=1.5, scale_y=76 / 150)
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[ClipToFrame:[true]]",
-            "Scale[1.5 0.5] Translate[10 -5], "
+            "ScaleX[1.5] ScaleY[0.5] TranslateX[10] TranslateY[-5], "
             "OtherModifiers:[ClipToFrame:[true], Scale:[x:1.5 y:0.5], Translate:[x:10 y:-5]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
@@ -128,7 +128,8 @@ class CoordinateTests(unittest.TestCase):
         native["$rect"] = "[-7,26.75],[33,41.75]"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Frame[5 -10 20 30], OtherModifiers:[]",
-            "Frame[5 -10 20 30], Scale[-2 -0.5] Pivot[0.25 0.75] Translate[3 -2] CornerRadius[1 2 3 4], "
+            "Frame[5 -10 20 30], ScaleX[-2] ScaleY[-0.5] Pivot[0.25,0.75] "
+            "TranslateX[3] TranslateY[-2] CornerRadius[1 2 3 4], "
             "ClipToBounds[True], OtherModifiers:[Scale:[x:-2 y:-0.5], "
             "Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2], CornerRadius:[x:1 y:2 z:3 w:4], "
             "CustomClipToFrame:[x:2 y:4 z:8 w:18]]")
@@ -149,7 +150,7 @@ class CoordinateTests(unittest.TestCase):
         self.assert_failed(args, "scene_render_vector_missing:Scale")
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Frame[5 -10 20 30], OtherModifiers:[]",
-            "Frame[5 -10 20 30], Scale[-1 1], OtherModifiers:[Scale:[x:-1 y:1]]")
+            "Frame[5 -10 20 30], ScaleX[-1] ScaleY[1], OtherModifiers:[Scale:[x:-1 y:1]]")
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[16,10],[36,40]"
         self.assert_failed(args, "native_geometry_local_projection_mismatch")
 
@@ -164,7 +165,7 @@ class CoordinateTests(unittest.TestCase):
         args[0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[ClipToBounds:[true]]",
-            "Scale[-1 1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
+            "ScaleX[-1] ScaleY[1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
         # 官方祖先包围框偏移计算保留负尺寸，ToBounds 不对端点排序，必须拒收。
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[5,10],[-15,40]"
         self.assert_failed(args, "negative_native_geometry_size")
@@ -177,10 +178,10 @@ class CoordinateTests(unittest.TestCase):
         args[3]["arkui_geometry"]["$children"][0]["$children"] = []
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[ClipToBounds:[true]]",
-            "Scale[-1 1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
+            "ScaleX[-1] ScaleY[1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Frame[5 -10 20 30], OtherModifiers:[]",
-            "Frame[5 -10 20 30], Scale[-1 1], OtherModifiers:[Scale:[x:-1 y:1]]")
+            "Frame[5 -10 20 30], ScaleX[-1] ScaleY[1], OtherModifiers:[Scale:[x:-1 y:1]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],

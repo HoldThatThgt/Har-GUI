@@ -113,7 +113,7 @@ def mapping_render_tree(system=False):
             render_line(1, "LOGICAL_DISPLAY_NODE", 6962141986818, "0 0 3120 2080",
                         "OtherModifiers:[Pivot:[x:0 y:0]]"),
             render_line(2, "SURFACE_NODE", 19649475381948, "203.3 0 2048 2230",
-                        "nodeName: [session106], Scale[0.876682 0.876682] Pivot[0 0], ClipToFrame[True], "
+                        "nodeName: [session106], ScaleX[0.876682] ScaleY[0.876682] Pivot[0,0], ClipToFrame[True], "
                         "OtherModifiers:[Scale:[x:0.876682 y:0.876682], "
                         "Pivot:[x:0 y:0], ClipToFrame:[true]]")]
     if system:
@@ -141,7 +141,8 @@ def ancestor_mapping_fixture(reversed_render_order=False):
     args[1]["transform"].update(scale_x=899 / 2048, scale_y=978 / 2230)
     rows = args[3]["render_tree"].splitlines(keepends=True)
     group_row = render_line(2 if not reversed_render_order else 3, "CANVAS_NODE", 111, "0 0 3120 2080",
-                            "Scale[0.5 0.5] Pivot[0 0], OtherModifiers:[Scale:[x:0.5 y:0.5], Pivot:[x:0 y:0]]")
+                            "ScaleX[0.5] ScaleY[0.5] Pivot[0,0], "
+                            "OtherModifiers:[Scale:[x:0.5 y:0.5], Pivot:[x:0 y:0]]")
     if reversed_render_order:
         rows = rows[:3] + [group_row] + ["  " + row for row in rows[3:]]
     else:
@@ -165,7 +166,7 @@ def omitted_ancestor_fixture(state, transformed=False):
         args[1]["bounding_box"]["x"] = 203
         args[1]["transform"].update(scale_x=0.876953, scale_y=0.876682)
         detached_row = detached_row.replace("Scale:[x:0.5 y:0.5]", "Scale:[x:1 y:1]")
-        detached_row = detached_row.replace("Scale[0.5 0.5]", "Scale[1 1]")
+        detached_row = detached_row.replace("ScaleX[0.5] ScaleY[0.5]", "ScaleX[1] ScaleY[1]")
     args[3]["render_tree"] = "".join(rows[:2]) + "".join(row[2:] for row in rows[3:])
     if state == "lazy":
         group["raw"] = group["raw"].replace("lazyLoad[0] nodeState[ACTIVE]", "lazyLoad[1] nodeState[LAZY_LOAD]")
@@ -227,10 +228,10 @@ def transformed_mixed_leaf_fixture():
     args[3]["render_tree"] = args[3]["render_tree"].replace(
         "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
         "CANVAS_NODE[103], Properties: Bounds[20 30 200 100] Frame[20 30 200 100], "
-        "Scale[2 0.5] Pivot[0.5 0.5], OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
+        "ScaleX[2] ScaleY[0.5] Pivot[0.5,0.5], OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
     args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
         "Frame[10 20 -1 11], OtherModifiers:[]", "Frame[10 20 -1 11], "
-        "Scale[2 0.5] Pivot[0.25 0.75] Translate[3 -2], "
+        "ScaleX[2] ScaleY[0.5] Pivot[0.25,0.75] TranslateX[3] TranslateY[-2], "
         "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2]]")
     return args
 
@@ -312,7 +313,7 @@ class WindowMappingTests(unittest.TestCase):
             {"$ID": 701, "$type": "WindowScene", "$rect": "[203.30,0.00],[1101.02,977.50]"}]
         rows = args[3]["render_tree"].splitlines(keepends=True)
         surface = render_line(3, "SURFACE_NODE", 110, "0 0 2048 2230",
-                              "Scale[0.5 0.5] Pivot[0 0], ClipToFrame[True], "
+                              "ScaleX[0.5] ScaleY[0.5] Pivot[0,0], ClipToFrame[True], "
                               "OtherModifiers:[Scale:[x:0.5 y:0.5], "
                               "Pivot:[x:0 y:0], ClipToFrame:[true]]")
         args[3]["render_tree"] = "".join(rows[:3]) + surface + "".join("  " + row for row in rows[3:])
@@ -693,7 +694,7 @@ class WindowMappingTests(unittest.TestCase):
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Scale:[x:0.876682 y:0.876682]", "Scale:[x:-0.876682 y:0.876682]")
         args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
-            "Scale[0.876682 0.876682]", "Scale[-0.876682 0.876682]")
+            "ScaleX[0.876682] ScaleY[0.876682]", "ScaleX[-0.876682] ScaleY[0.876682]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified",
                          result["coordinate_validation"]["issues"])

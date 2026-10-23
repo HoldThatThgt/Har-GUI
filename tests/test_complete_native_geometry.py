@@ -141,8 +141,8 @@ class CompleteNativeGeometryTests(unittest.TestCase):
         self.rejected(args, "ambiguous_render_clip:ClipToBounds")
 
     def test_current_transform_and_clip_cannot_be_supplied_by_matching_pending_fields(self):
-        for field, code in (("Scale[-1 1]", "current_render_vector_mismatch:Scale"),
-                            ("Translate[100 0]", "current_render_vector_mismatch:Translate"),
+        for field, code in (("ScaleX[-1] ScaleY[1]", "current_render_vector_mismatch:Scale"),
+                            ("TranslateX[100] TranslateY[0]", "current_render_vector_mismatch:Translate"),
                             ("TranslateZ[100]", "unsupported_render_transform:TranslateZ"),
                             ("ClipBounds[Path[x]]", "unsupported_current_render_modifier:ClipBounds")):
             args = fixture()

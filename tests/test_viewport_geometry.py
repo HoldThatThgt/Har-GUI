@@ -65,7 +65,8 @@ def viewport_render_tree(surface_size, application_size, transform):
             render_line(2, "SURFACE_NODE", 901, f"546 204 {width} {height}",
                         "nodeName: [session126], ClipToFrame[True], OtherModifiers:[ClipToFrame:[true]]"),
             render_line(3, "SURFACE_NODE", 902, f"0 0 {surface_width} {surface_height}",
-                        f"Scale[{sx} {sy}] Pivot[0 0] Translate[{tx} {ty}], ClipToFrame[True], "
+                        f"ScaleX[{sx}] ScaleY[{sy}] Pivot[0,0] "
+                        f"TranslateX[{tx}] TranslateY[{ty}], ClipToFrame[True], "
                         f"OtherModifiers:[Scale:[x:{sx} y:{sy}], Pivot:[x:0 y:0], "
                         f"Translate:[x:{tx} y:{ty}], ClipToFrame:[true]]"),
             render_line(4, "ROOT_NODE", 100, f"0 0 {width} {height}", "OtherModifiers:[]"),

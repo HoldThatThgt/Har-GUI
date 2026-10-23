@@ -15,6 +15,7 @@ RRECT_DUMP = re.compile(
     rf"radius:\[\[({NUMBER}) ({NUMBER})\] \[({NUMBER}) ({NUMBER})\] "
     rf"\[({NUMBER}) ({NUMBER})\] \[({NUMBER}) ({NUMBER})\]\]")
 CLIP_TO_BOUNDS = 1 << 0
+ROSEN_FLOAT_EPSILON = 2 ** -23
 RECT = re.compile(rf"^\[({NUMBER}),\s*({NUMBER})\],\[({NUMBER}),\s*({NUMBER})\]$")
 LOCAL_RECT = re.compile(rf"^RectT \(({NUMBER}),\s*({NUMBER})\) - \[({NUMBER}) x ({NUMBER})\]$")
 RENDER_NODE = re.compile(r"^( *)\| (\w+_NODE)\[(\d+)\]")
@@ -243,7 +244,7 @@ def modifier_values(line: str) -> dict:
 
 
 def verify_modifiers(render: dict) -> dict:
-    """@brief 验证当前与待应用变换并拒绝未知裁剪。 @param render 渲染节点。 @return 已验证修饰器。"""
+    """@brief 独立验证当前属性和修饰器变换并拒绝未知裁剪。 @param render 渲染节点。 @return 已验证修饰器。"""
     values = modifier_values(render["line"])
     verify_inactive_render_rrect(render, values)
     for key, entries in values.items():
@@ -292,7 +293,7 @@ def current_drawable_status(render: dict) -> int:
 
 def verify_inactive_render_rrect(render: dict, values: dict) -> None:
     """@brief 空形状候选必须另有当前裁剪关闭的状态位，打印零本身不证明裁剪未生效。
-    @param render 当前渲染记录。 @param values 已完整解析的待应用修饰器。
+    @param render 当前渲染记录。 @param values 已完整解析的修饰器集合。
     @see docs/render-modifiers.md 官方序列化与当前裁剪状态来源。
     """
     entries = values.get("ClipRrect")
@@ -306,7 +307,7 @@ def verify_inactive_render_rrect(render: dict, values: dict) -> None:
     numbers = list(map(number, match.groups()))
     if numbers[2] > 0 and numbers[3] > 0:
         raise ValueError("unsupported_render_modifier:ClipRrect")
-    # GetClipToRRect 是此状态位的或条件；当前关闭证据与待应用形状独立，不能用后者替代。
+    # GetClipToRRect 是此状态位的或条件；当前关闭证据与修饰器形状独立，不能用后者替代。
     if current_drawable_status(render) & CLIP_TO_BOUNDS or current_clip_flags(render)["ClipToBounds"]:
         raise ValueError("unverified_current_render_clip:ClipRrect")
 
@@ -336,14 +337,20 @@ def verify_render_spatial_transform(render: dict, values: dict) -> None:
             raise ValueError("unsupported_current_render_modifier:" + name)
         current.setdefault(name, []).append(value)
     verify_spatial_values(render, current)
+    for name in ("TranslateZ", "PivotZ", "ScaleZ", "Quaternion"):
+        if name in current:
+            raise ValueError("unsupported_current_render_transform:" + name)
+    # 当前字段只在非默认值时输出；一位小数的 0.0 不能证明未进入三维旋转路径。
+    if "RotationX" in current or "RotationY" in current:
+        verify_zero_spatial_rotation(render, values)
 
 
 def verify_spatial_values(render: dict, values: dict) -> None:
-    """@brief 对当前或待应用的完整三维状态执行相同二维适用条件。 @param render 同一实际节点。
+    """@brief 对当前属性或修饰器的完整三维值执行相同二维适用条件。 @param render 同一实际节点。
     @param values 一层真实属性，缺省沿用官方变换默认值。
     """
     rotations = [scalar_modifier(values, name, 0) for name in ("RotationX", "RotationY")]
-    camera = scalar_modifier(values, "CameraDistance", 0)
+    scalar_modifier(values, "CameraDistance", 0)
     for name in ZERO_ONLY:
         if scalar_modifier(values, name, 0) != 0:
             raise ValueError("unsupported_render_transform:" + name)
@@ -357,14 +364,21 @@ def verify_spatial_values(render: dict, values: dict) -> None:
     if any(value.lower() != "false" for value in applicable) and scalar_modifier(values, "PositionZ", 0) != 0:
         raise ValueError("unsupported_render_transform:PositionZ")
     if any(value != 0 for value in rotations):
-        boxes = current_render_boxes(render)
-        zero = all(len(value.split()) == 4 and all(number(part) == 0 for part in value.split()[2:])
-                   for value in boxes)
-        clip = re.findall(r"ClipTo(?:Bounds|Frame)\[([^\]]+)\]", render_current_properties(render))
-        if not zero or render["children_count"] or camera != 0 or not render_has_no_draw_content(render):
-            raise ValueError("unsupported_render_transform:RotationX_or_Y")
-        if any(value.lower() != "false" for value in clip):
-            raise ValueError("unsupported_render_spatial_clip")
+        verify_zero_spatial_rotation(render, values)
+
+
+def verify_zero_spatial_rotation(render: dict, values: dict) -> None:
+    """@brief 非默认三维旋转只保留已有的零尺寸无绘制叶例外，不把打印零当二维证明。
+    @param render 当前渲染节点。 @param values 独立核验的修饰器集合。
+    """
+    boxes = current_render_boxes(render)
+    zero = all(len(value.split()) == 4 and all(number(part) == 0 for part in value.split()[2:]) for value in boxes)
+    clip = re.findall(r"ClipTo(?:Bounds|Frame)\[([^\]]+)\]", render_current_properties(render))
+    if (not zero or render["children_count"] or scalar_modifier(values, "CameraDistance", 0) != 0
+            or not render_has_no_draw_content(render)):
+        raise ValueError("unsupported_render_transform:RotationX_or_Y")
+    if any(value.lower() != "false" for value in clip):
+        raise ValueError("unsupported_render_spatial_clip")
 
 
 def screen_rect(rect: dict, mapping: dict) -> dict:
@@ -594,25 +608,56 @@ def verify_render_vectors(render: dict, node: dict) -> None:
 
 
 def verify_current_vector(render: dict, name: str, original: str, axes: list) -> None:
-    """@brief 当前生效向量独立匹配原始局部变换，缺省不从待应用值补齐。 @param render 当前记录。
+    """@brief 当前属性按官方打印区间独立匹配原文，不从修饰器集合补齐。 @param render 当前记录。
     @param name 向量名。 @param original 原始字段。 @param axes 真正影响几何的分量。
     """
-    entries = re.findall(r"\b" + name + r"\[([^\]]+)\]", render_current_properties(render))
     raw = re.findall(NUMBER, original)
-    default = {"Scale": [1, 1], "Translate": [0, 0], "Pivot": [0.5, 0.5]}[name]
-    if not entries:
-        if any(number(raw[index]) != default[index] for index in axes):
-            raise ValueError("current_render_vector_missing:" + name)
-        return
-    if len(entries) != 1:
-        raise ValueError("ambiguous_current_render_vector:" + name)
-    current = re.findall(NUMBER, entries[0])
-    if len(raw) != 2 or len(current) != 2:
+    if len(raw) != 2:
         raise ValueError("invalid_current_render_vector:" + name)
+    current = current_vector_intervals(render, name)
     for index in axes:
-        radius = printed_number_radius(raw[index]) + printed_number_radius(current[index])
-        if abs(number(raw[index]) - number(current[index])) > radius + 1e-12:
-            raise ValueError("current_render_vector_mismatch:" + name)
+        low, high = printed_interval(raw[index])
+        other_low, other_high = current["parameters"][index]
+        if low > other_high + 1e-12 or high < other_low - 1e-12:
+            reason = "mismatch" if current["present"][index] else "missing"
+            raise ValueError("current_render_vector_" + reason + ":" + name)
+
+
+def printed_interval(value: str) -> tuple:
+    """@brief 把实际数值文本转成其十进制舍入区间。 @param value 原始打印文本。 @return 数值上下界。"""
+    center, radius = number(value), printed_number_radius(value)
+    return center - radius, center + radius
+
+
+def current_vector_intervals(render: dict, name: str) -> dict:
+    """@brief 区分当前逐轴字段、轴心字段及官方默认省略条件，不解析修饰器集合。
+    @param render 当前渲染记录。 @param name Scale、Translate 或 Pivot。 @return 参数和有效变换区间。
+    """
+    properties = render_current_properties(render)
+    default = {"Scale": 1.0, "Translate": 0.0, "Pivot": 0.5}[name]
+    fields = [name] if name == "Pivot" else [name + "X", name + "Y"]
+    if name != "Pivot" and re.search(r"\b" + name + r"\[", properties):
+        raise ValueError("invalid_current_render_vector_format:" + name)
+    texts = []
+    for field in fields:
+        starts = re.findall(r"\b" + field + r"\[", properties)
+        values = re.findall(r"\b" + field + r"\[([^\]]*)\]", properties)
+        if len(starts) != len(values) or len(values) > 1:
+            raise ValueError("ambiguous_current_render_vector:" + name)
+        if not values:
+            texts.extend([None, None] if name == "Pivot" else [None])
+            continue
+        pattern = rf"\s*({NUMBER})\s*,\s*({NUMBER})\s*" if name == "Pivot" else rf"\s*({NUMBER})\s*"
+        match = re.fullmatch(pattern, values[0])
+        if match is None:
+            raise ValueError("invalid_current_render_vector:" + name)
+        texts.extend(match.groups())
+    parameters = [printed_interval(text) if text is not None else
+                  (default - ROSEN_FLOAT_EPSILON, default + ROSEN_FLOAT_EPSILON) for text in texts]
+    # 两轴均按 ROSEN_EQ 省略时，官方几何实现不会执行这组 Scale 或 Translate 操作。
+    applied = ([(default, default)] * 2 if name != "Pivot" and all(text is None for text in texts)
+               else parameters)
+    return {"parameters": parameters, "matrix": applied, "present": [text is not None for text in texts]}
 
 
 def verify_render_scalar(render: dict, attrs: dict, name: str) -> None:
@@ -642,7 +687,7 @@ def verify_render_scalar(render: dict, attrs: dict, name: str) -> None:
 
 
 def render_current_properties(render: dict) -> str:
-    """@brief 只读取已经生效的 Properties 段，排除绘制命令与待应用修饰器。 @param render 渲染记录。
+    """@brief 只读取已经生效的 Properties 段，排除绘制命令与修饰器集合。 @param render 渲染记录。
     @return 当前属性原文。
     """
     current = re.split(r"RSUIContextToken:|DrawCmdModifiers|OtherModifiers:", render["line"], maxsplit=1)[0]
@@ -673,7 +718,7 @@ def current_render_boxes(render: dict) -> tuple[str, str]:
 
 
 def owned_render_modifier(render: dict, name: str, process_id: int) -> str | None:
-    """@brief 待应用属性必须唯一且显式属于当前应用进程，不能借用其他进程的同名属性。
+    """@brief 修饰器属性必须唯一且显式属于当前应用进程，不能借用其他进程的同名属性。
     @param render 渲染记录。 @param name 属性名。 @param process_id 已核验进程。 @return 唯一原值或空。
     """
     matches = [(owner, value) for owner, content in modifier_groups(render["line"])
@@ -1089,8 +1134,8 @@ def current_clip_flags(render: dict) -> dict:
 
 
 def current_corner_radii(render: dict, values: dict) -> list:
-    """@brief 圆角裁剪使用当前形状，并独立核对存在的待应用圆角。 @param render 当前记录。
-    @param values 自身待应用修饰器。 @return 当前四角半径。
+    """@brief 圆角裁剪使用当前形状，并独立核对存在的修饰器圆角。 @param render 当前记录。
+    @param values 自身修饰器集合。 @return 当前四角半径。
     """
     current = re.findall(r"\bCornerRadius\[([^\]]+)\]", render_current_properties(render))
     if len(current) > 1:
@@ -1229,7 +1274,8 @@ def verify_render_transform_chain(ancestors: list, context: dict) -> None:
     @param ancestors 当前节点至根的渲染链。 @param context 原生坐标证据。
     """
     mapping = context["mapping"]
-    matrix = mapping["projection"][0] if mapping["coordinate_space"] == "scene" else mapping["affine"]
+    matrix = affine.interval_exact(mapping["projection"][0] if mapping["coordinate_space"] == "scene"
+                                   else mapping["affine"])
     inside_root, radius = False, 0.0
     for render in reversed(ancestors):
         inside_root = inside_root or render["id"] == context["root_render_id"]
@@ -1243,36 +1289,40 @@ def verify_render_transform_chain(ancestors: list, context: dict) -> None:
             verify_component_render_parent(node, render, context)
         verify_render_vectors(render, node)
         logical = render["id"] in context["unapplied_render_ids"] or render["id"] in context["zero_clip_proofs"]
-        local = local_projection(node, IDENTITY_PROJECTION)[0][0] if logical else current_local_matrix(render)
-        radius += 0.11 * max(*(abs(value) for value in matrix[:4]), 1)
-        matrix = affine.compose(matrix, local)
+        local = (affine.interval_exact(local_projection(node, IDENTITY_PROJECTION)[0][0]) if logical
+                 else current_local_matrix(render))
+        radius += 0.11 * max(*(abs(value) for entry in matrix[:4] for value in entry), 1)
+        matrix = affine.interval_compose(matrix, local)
         expected = context["matrices"][render["id"]]
         bounds = list(map(number, LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"]).groups()))
-        size = bounds[2:] if logical else list(map(number, current_render_boxes(render)[0].split()))[2:]
+        size = ([(value, value) for value in bounds[2:]] if logical else
+                [printed_interval(value) for value in current_render_boxes(render)[0].split()[2:]])
         original = affine.corners(expected, {"x": 0, "y": 0, "width": bounds[2], "height": bounds[3]})
-        actual = affine.corners(matrix, {"x": 0, "y": 0, "width": size[0], "height": size[1]})
-        arithmetic = math.ulp(max(*(abs(value) for value in matrix + expected), 1)) * len(ancestors) * 16
-        if any(abs(a - b) > radius + arithmetic for first, second in zip(actual, original, strict=True)
-               for a, b in zip(first, second, strict=True)):
+        actual = affine.interval_corners(matrix, size)
+        magnitude = max(*(abs(value) for entry in matrix for value in entry), *(abs(value) for value in expected), 1)
+        arithmetic = math.ulp(magnitude) * len(ancestors) * 16
+        if any(value < interval[0] - radius - arithmetic or value > interval[1] + radius + arithmetic
+               for first, second in zip(actual, original, strict=True)
+               for interval, value in zip(first, second, strict=True)):
             raise ValueError("render_transform_chain_mismatch")
 
 
 def current_local_matrix(render: dict) -> tuple:
-    """@brief 用当前真实局部框和生效变换构造矩阵，不从待应用字段补齐。 @param render 当前记录。
-    @return 当前局部到实际父坐标系的完整二维矩阵。
+    """@brief 用当前字段的实际打印精度构造区间矩阵，不把舍入值当精确值或借用修饰器。
+    @param render 当前记录。 @return 当前局部到父坐标系的二维区间矩阵。
     """
-    bounds = list(map(number, current_render_boxes(render)[0].split()))
+    bounds = [printed_interval(value) for value in current_render_boxes(render)[0].split()]
     if len(bounds) != 4:
         raise ValueError("invalid_current_render_bounds")
-    values = {}
-    for name, value in re.findall(r"(\w+)\[([^\]]*)\]", render_current_properties(render)):
-        values.setdefault(name, []).append(value)
-    scale = render_vector(values, "Scale", (1, 1))
-    if any(value == 0 for value in scale):
+    scale = current_vector_intervals(render, "Scale")["matrix"]
+    if any(low <= 0 <= high for low, high in scale):
         raise ValueError("unsupported_render_zero_scale")
-    return affine.local(dict(zip(("x", "y", "width", "height"), bounds)), scale,
-                        render_vector(values, "Translate", (0, 0)), render_vector(values, "Pivot", (0.5, 0.5)),
-                        scalar_modifier(values, "Rotation", 0))
+    entries = re.findall(r"\bRotation\[([^\]]*)\]", render_current_properties(render))
+    if len(entries) > 1 or (entries and re.fullmatch(NUMBER, entries[0]) is None):
+        raise ValueError("ambiguous_render_scalar:Rotation")
+    rotation = printed_interval(entries[0]) if entries else (0.0, 0.0)
+    return affine.interval_local(bounds, scale, current_vector_intervals(render, "Translate")["matrix"],
+                                 current_vector_intervals(render, "Pivot")["matrix"], rotation)
 
 
 def verify_overlay_render(node_id: str, context: dict) -> None:
