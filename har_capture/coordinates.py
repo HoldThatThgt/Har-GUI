@@ -420,10 +420,11 @@ def local_projection(node: dict, parent: tuple) -> tuple:
     scale = list(map(number, attrs.get("scale(x,y)", "1,1").split(",")))
     translate = list(map(number, attrs.get("translate(x,y)", "0,0").split(",")))
     pivot = list(map(number, re.findall(NUMBER, attrs.get("Center", "x:0.5 y:0.5"))))
-    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2 or any(value == 0 for value in scale):
+    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2:
         raise ValueError("invalid_local_axis_transform")
     verify_raw_spatial_transform(node, (width, height))
     rotation = number(attrs.get("Rotation", "0"))
+    # 前向投影不求逆；有限零缩放须保留塌缩矩阵，并继续投影所有后代。
     local = affine.local({"x": x, "y": y, "width": width, "height": height}, scale, translate, pivot, rotation)
     matrix = affine.compose(parent[0], local)
     magnitude = max(*(abs(value) for value in parent[0][:4]), *(abs(value) for value in matrix[:4]), 1)

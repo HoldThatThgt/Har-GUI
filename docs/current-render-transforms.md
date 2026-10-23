@@ -43,3 +43,24 @@ RS current 的这些字段打印一位小数。出现 `ScaleX[1.0]` 不能证明
 
 现场证据是顺序读取，原有 `atomic=false` 语义不变。
 后续只读现场可以复现并验证修复，不能代替历史失败当时缺失的几何原文，也不能追认旧采集成功。
+
+## 原始零缩放的前向投影
+
+有限零缩放会把后代的面积压缩为线或点，仍是合法的前向变换。
+局部投影不求逆矩阵，因此不能仅因某个缩放分量为零就拒绝，也不能删除该层或改为单位矩阵。
+子节点原始尺寸照常保留，所有后代继续用合成矩阵投影，并与各自的原生矩形独立核对。
+有限数值、向量长度、空间变换、父链及几何交叉核验要求均不变。
+
+官方 [ArkUI 变换更新](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/render/adapter/rosen_render_context.cpp#L2660-L2677)
+直接传递缩放值；[变换后的绘制矩形](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/render/adapter/rosen_render_context.cpp#L2969-L2996)
+及 [RS 二维矩阵](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/common/rs_obj_abs_geometry.cpp#L193-L215)
+都允许零比例参与前向计算。
+
+夸克窗口 211 的七个 `__Common__` 使用 `0,0` 缩放，其局部框为 `0×0`，图片后代仍有 `53×53` 局部框。
+这些父子节点均在独立未挂载渲染树中，当前 RS 框为 `-inf`。
+逻辑坐标来自原始变换与原生矩形的交叉核验；不绘制状态来自实际未挂载记录，
+不把 staging 或修饰器中的零值当成当前 RS 已应用变换。
+当前 RS 矩阵的跨零打印区间限制没有改变，本次支持不等于已验证已挂载零缩放的全部情况。
+
+原错误被准备阶段统一记录在根节点 1，但该根本身使用单位变换；实际首个失败节点是后代 351。
+修复处理真实的子分支变换，不跳过根节点，也不修改历史失败记录。
