@@ -42,7 +42,8 @@ flowchart LR
 普通应用的渲染标识不能冒用 SceneBoard 节点。
 
 普通应用使用实际应用根最近的场景父坐标系，包含 session 之下应用 Surface 的偏移与缩放，
-并核验其视口尺寸。应用自身的局部根偏移照常参与变换。
+逐层交叉核验场景、原生投影和实际 RS 属性。父级视口和应用根各自保留尺寸，不要求二者相等。
+应用自身的局部根偏移照常参与变换。
 系统窗口已在场景屏幕空间，使用其场景父变换进行原生交叉核验，不重复缩放。
 每个 Frame 的 `geometry.source.window_mapping` 保存来源文件及 session、viewport、显示器和屏幕标识。
 外层裁剪按实际 RS 节点身份使用同一精确矩形，保留圆角和内容裁剪的来源。
@@ -50,6 +51,40 @@ flowchart LR
 普通已挂载 Frame 也交叉核验局部矩形、Scale、Translate 以及影响几何的 Pivot。
 打印数值以各自明确的小数精度区间交叉核验；原生投影和裁剪的既有误差阈值未扩大。
 Skew、Persp、未知裁剪和活动动画继续拒收。
+
+## 父级视口和应用根尺寸不同
+
+父级视口决定坐标变换和裁剪，应用根保留自己的局部边界。
+官方 [RS 父级矩阵合成](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L2248-L2283)
+使用父级绝对矩阵；[几何更新](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/property/rs_properties.cpp#L545-L552)
+将该矩阵传给当前节点，不要求父子宽高相等。
+[ClipToFrame](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/drawable/rs_property_drawable.cpp#L257-L276)
+按当前 RS Frame 做交集裁剪，不改写子节点的原始边界。
+
+```mermaid
+flowchart LR
+    Session[外层会话 2091×1394] --> Surface[内层 Surface 2090×1394]
+    Surface --> Transform[保留实际父级变换]
+    Transform --> Root[应用根屏幕边界 2091×1394]
+    Surface --> Clip[实际 RS Frame 裁剪 2090×1394]
+    Root --> Result[边界与裁剪分别导出]
+    Clip --> Result
+```
+
+冻结今日头条窗口中，应用根和外层会话均为 `2091×1394`，内层 Surface 的实际 RS Bounds/Frame
+均为 `2090×1394`，并启用 `ClipToFrame`。应用根通过父级平移得到
+`screen_bounds={x:546,y:204,width:2091,height:1394}`，有效矩形裁剪为
+`rectangular_clip_bounds={x:546,y:204,width:2090,height:1394}`。
+内层 Surface 保留在真实父链与 `clip_chain` 中，不改选更高的同尺寸祖先，也不按宽高比缩放。
+
+该内层场景节点的布局 `FrameRect` 为 `2090.40×1393.60`，绘制 `PaintRect` 为 `2090×1394`。
+官方 [GetPaintRectWithoutTransform](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/render/adapter/rosen_render_context.cpp#L3254-L3259)
+返回绘制框；[SavePaintRect](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/render/adapter/rosen_render_context.cpp#L8341-L8364)
+从像素网格处理后的偏移和尺寸保存该框。这说明布局框与绘制框可以不同；本次核验采用实际绘制框、
+原生投影和 RS 属性，不从差值推断设备执行了哪一条舍入分支。
+
+只删除跨父子节点的尺寸相等要求；原有身份、父链、原生投影、局部变换、RS 属性与裁剪校验继续执行，
+打印精度和误差阈值未改变。尺寸不同不授予其他几何错误豁免。
 
 ## WMS 比例的发布语义
 
@@ -73,11 +108,20 @@ WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的�
 实际 RS 父链不能跳过已挂载的场景 Frame。
 缺失 Frame 只有在明确懒加载未物化或位于独立未挂载树、且其局部仿射变换严格恒等时才可省略。
 它们不贡献屏幕变换；未挂载节点的无效 Bounds 不作为活跃几何，也不改读待应用属性代替它。
+应用无绘制子树的父关系同样按实际挂载链核验：经过明确未挂载或未物化的恒等帧后，
+首个实际挂载的原生帧必须与当前 RS 父节点一致，不能跳过仍在渲染树上的帧或任意选择更高祖先。
 
 部分零面积节点仍挂在 RS 树上，官方 Bounds 和 Frame 均为 `-inf`。
-只有原始与原生投影均零面积、实际 RS 无子节点、`hasDrawContent=0`、
-`hasChildrenDrawContent=0` 同时成立时，才保留其原生框并标记 `rendered=false`。
-这证明没有绘制，不表示 PrepareSeq 为零。正面积、存在子节点或缺少绘制证据时继续拒收。
+原始与原生投影的宽高均为零，并有唯一的 `hasDrawContent=0` 和 `hasChildrenDrawContent=0`，
+才可以保留原生框并标记 `rendered=false`。非叶节点还须验证实际 RS 子树：每个渲染后代都唯一关联
+原始和原生零尺寸 Frame，父关系一致，均有完整无绘制标记，并通过局部变换与裁剪检查。
+有结构子节点不等于存在绘制内容；正面积、后代绘制、身份冲突、缺少证明或未知变换裁剪仍拒收。
+
+官方 [RS 树输出](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L1288-L1296)
+分别记录自身绘制内容、后代绘制内容和准备跳过状态。
+[绘制内容计算](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/feature/dynamic_layer_skip/rs_dynamic_layer_skip_controller.cpp#L87-L155)
+将后代绘制状态汇总为 `SUBTREE`；它并不以是否存在子节点作为无绘制定义。
+`PrepareSeq` 和 `IsSubTreeSkipped` 均不能单独证明无绘制。无穷大 RS 矩形不会被当作坐标使用。
 双非正尺寸占位框沿用原有严格无绘制验证。
 单轴负尺寸仅支持明确的 `-1`、另一轴为正，并同时核验 RS Bounds/Frame、真正叶节点及唯一的双零绘制标记。
 完整带符号端点投影必须匹配原生框，自身未证明裁剪仍拒收；详见[单轴负尺寸节点](mixed-dimension-nodes.md)。
@@ -94,7 +138,23 @@ WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的�
 打码开关继续位于 `project.toml` 每个任务的 `privacy.enabled`。
 关闭时保留原图，开启时按声明区域处理；原始双树保留，开关不改变坐标和全窗覆盖门槛。
 
-## 本次验证结果
+## 当前离线验证
+
+2026-10-23 使用冻结今日头条窗口的完整 ArkUI 树及同批坐标来源，在独立副本上调用生产
+`normalized_arkui` 导出接口成功：原始 133 个节点全部保留，90/90 个 Frame 验证通过，
+43 个非布局节点原样保留，没有坐标问题。
+应用根宽度保留 `2091`，实际矩形裁剪宽度为 `2090`。
+
+零尺寸容器 `1363` 与子节点 `1364` 均保留原生位置 `[0,169]`，屏幕边界为 `(546,373,0,0)`，
+并按完整无绘制证据标记不绘制。中间 `Stack 1360` 有明确未挂载证据且变换为恒等，
+实际父关系核验经过该帧后关联到挂载的 `Column 1359`，没有接受任意祖先。
+全部已验证组件边界与独立原生矩形经实际父变换后的逐字段最大差为 `0.0`。
+
+13 份原文件及附带索引的字节、摘要和修改时间保持不变。本轮没有连接设备、重新采集或调用模型。
+提供的输入是坐标分析子集，完整窗口的 ArkUI JSON 已实际导出；未补造缺失截图或无障碍树，
+未生成正式五件套、发布样本或改变配额。原始失败记录保持原样。
+
+## 既有验证记录
 
 | 证据 | UC Frame | 全部可见应用 | 交付状态 |
 | --- | --- | --- | --- |

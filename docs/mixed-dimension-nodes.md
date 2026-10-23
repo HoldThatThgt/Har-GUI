@@ -55,7 +55,7 @@ Skew、非零旋转、未知变换、附着状态冲突、非标准单轴负值�
 ## 输出与证据边界
 
 接口沿用 `geometry.status=verified`、`screen_bounds`、`native_window_rect`、
-`rendered=false`、`render_state=not_rendered` 与 `render_state_source=RenderService.no_draw_leaf`。
+`rendered=false`、`render_state=not_rendered` 与 `render_state_source=RenderService.no_draw_content`。
 正面积几何表示变换后的组件包围框，不表示该处存在绘制像素。原始属性、正文和结构均不删除或改写。
 没有新增配置、依赖、旧格式兼容、迁移、按应用放行或近似坐标路径。
 

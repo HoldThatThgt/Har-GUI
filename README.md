@@ -511,6 +511,8 @@ ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘�
 
 窗口到屏幕的映射使用同批 SceneBoard 浮点父链，WMS 的整数外包与比例只用于交叉核验。
 来源、实际渲染祖先、应用 Surface 和无绘制节点的规则见[精确窗口映射](docs/exact-window-mapping.md)。
+父级 Surface 和应用根的尺寸分别核验；应用根保留裁剪前边界，实际 RS 裁剪单独保存在
+`clip_chain` 与 `rectangular_clip_bounds`，尺寸不同不会触发跨节点的相等要求。
 新采集必须包含 `coordinate_evidence.scene_sources`；缺失时拒绝导出，需要重新采集。
 
 | 节点字段 | 含义 |

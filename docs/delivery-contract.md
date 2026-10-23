@@ -165,4 +165,11 @@ flowchart LR
 不能证明的变换、裁剪或可见窗口缺树将明确拒收，不填假坐标，也不靠忽略节点凑齐。
 应用 ArkUI 的 `screen_bounds` 是裁剪前的轴对齐组件边界；`clip_chain` 保留矩形及圆角裁剪，
 不表示实际遮挡后的像素区域。离屏渲染节点有明确的 `rendered=false` 证据，非布局节点保留为不适用。
+父级 Surface 与应用根可以具有不同尺寸：映射使用真实父级变换，`rectangular_clip_bounds` 单独记录
+组件边界与实际裁剪链的矩形交集。原始组件尺寸不因此被改写；内层父级和裁剪均须独立核验，
+详见[父级视口与应用根](exact-window-mapping.md#父级视口和应用根尺寸不同)。
+零尺寸容器的无穷大 RS 矩形在完整无绘制子树证据通过后，可以保留其原生零尺寸边界并标记不绘制；
+不删除容器或子节点，不把无穷大值用作屏幕坐标，也不单凭跳过准备状态认定无绘制。
+无绘制节点使用 `render_state_source=RenderService.no_draw_content`，
+`geometry.source.no_draw_render_node_ids` 保留经核验的实际渲染节点标识。
 系统窗口保留独立原生双树；当前正式应用 ArkUI 的坐标校验不等于系统树全部节点均已转换坐标。

@@ -35,6 +35,16 @@ SOURCES = {
     "render_envelope": "https://github.com/openharmony/graphic_graphic_2d/blob/"
                        "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
                        "rosen/modules/render_service_base/src/common/rs_obj_abs_geometry.cpp",
+    "render_parent_transform": "https://github.com/openharmony/graphic_graphic_2d/blob/"
+                               "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
+                               "rosen/modules/render_service_base/src/property/rs_properties.cpp#L545-L552",
+    "render_frame_clip": "https://github.com/openharmony/graphic_graphic_2d/blob/"
+                         "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
+                         "rosen/modules/render_service_base/src/drawable/rs_property_drawable.cpp#L257-L276",
+    "render_draw_content": "https://github.com/openharmony/graphic_graphic_2d/blob/"
+                           "c19cedf62fefde6bf184aa815feeaf0346aa4d49/"
+                           "rosen/modules/render_service_base/src/feature/dynamic_layer_skip/"
+                           "rs_dynamic_layer_skip_controller.cpp#L87-L155",
     "window_scale_retention": "https://github.com/openharmony/window_window_manager/blob/"
                               "8b0d8fe1b973d865904c942c286b3d2a3b9b08e7/"
                               "window_scene/session/host/src/layout_controller.cpp#L253-L259",
@@ -318,16 +328,23 @@ def verify_mixed_render_bounds(local: list, boxes: tuple) -> None:
             raise ValueError("invalid_render_bounds")
 
 
-def component_render_bounds(render: dict, local: list) -> tuple[list | None, bool]:
-    """@brief 区分真实局部矩形和明确无绘制的叶节点，不把未生效 Bounds 用作屏幕坐标。
-    @param render 已挂载节点。 @param local 原始局部框。 @return 可比较矩形及无绘制状态。
+def render_has_no_draw_content(render: dict) -> bool:
+    """@brief 只接受唯一且明确的自身及子树无绘制标记，不使用缓存跳过状态。 @param render 渲染节点。
+    @return 两个官方绘制内容标记是否均为零。
+    """
+    return (re.findall(r"\bhasDrawContent:\s*(\d+),", render["line"]) == ["0"]
+            and re.findall(r"\bhasChildrenDrawContent:\s*(\d+),", render["line"]) == ["0"])
+
+
+def component_render_bounds(render: dict, local: list, empty_subtree: bool) -> tuple[list | None, bool]:
+    """@brief 区分真实局部矩形和已证明无绘制的节点，不把未生效 Bounds 用作屏幕坐标。
+    @param render 已挂载节点。 @param local 原始局部框。 @param empty_subtree 已核验完整空子树。
+    @return 可比较矩形及无绘制状态。
     """
     match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
     if match is None:
         raise ValueError("render_modifier_evidence_missing")
-    no_draw = (render["children_count"] == 0
-               and re.findall(r"\bhasDrawContent:\s*(\d+),", render["line"]) == ["0"]
-               and re.findall(r"\bhasChildrenDrawContent:\s*(\d+),", render["line"]) == ["0"])
+    no_draw = render_has_no_draw_content(render) and (render["children_count"] == 0 or empty_subtree)
     if match[1].split() == ["-inf"] * 4 and match[2].split() == ["-inf"] * 4:
         if local[2:] != [0, 0] or not no_draw:
             raise ValueError("non_finite_geometry")
@@ -347,14 +364,14 @@ def component_render_bounds(render: dict, local: list) -> tuple[list | None, boo
     return bounds, no_draw and max(local[2:]) <= 0
 
 
-def verify_render_geometry(render: dict, node: dict) -> bool:
+def verify_render_geometry(render: dict, node: dict, empty_subtree: bool) -> bool:
     """@brief 校验真实 RS 节点与同一原始组件的局部框及变换打印区间。 @param render 渲染节点。
-    @param node 原始组件。 @return 是否为明确无绘制的叶节点。
+    @param node 原始组件。 @param empty_subtree 已核验完整空子树。 @return 是否为明确无绘制的节点。
     """
     attrs = node["attributes"]
     match = LOCAL_RECT.fullmatch(attrs["PaintRect without transform"])
     expected = list(map(number, match.groups()))
-    bounds, no_draw = component_render_bounds(render, expected)
+    bounds, no_draw = component_render_bounds(render, expected, empty_subtree)
     if bounds is not None and any(abs(a - b) > 0.11 for a, b in zip(bounds, expected, strict=True)):
         raise ValueError("scene_render_bounds_mismatch:" + render["id"])
     values = verify_modifiers(render)
@@ -507,7 +524,7 @@ def verify_scene_ancestors(records: dict, ancestors: list, render: dict, detache
         if item["id"] not in records["nodes"]:
             raise ValueError("unmapped_scene_render_ancestor:" + item["id"])
         record = records["nodes"][item["id"]]
-        verify_render_geometry(item, record[0])
+        verify_render_geometry(item, record[0], False)
         matched.append(str(record[0]["attributes"]["ID"]))
     for child, expected in zip(matched, matched[1:] + [None]):
         parent = records["parents"][child]
@@ -540,20 +557,16 @@ def scene_window_identity(root: dict, window: dict, scene: dict) -> dict:
     return node
 
 
-def application_viewport(records: dict, ancestors: list, native_bounds: dict) -> tuple:
+def application_viewport(records: dict, ancestors: list) -> tuple:
     """@brief 取应用根的实际场景父坐标系，包含会话内子 Surface 的完整变换。 @param records 场景索引。
-    @param ancestors 实际 RS 祖先链。 @param native_bounds 应用原生视口。 @return 渲染标识、节点与完整变换。
+    @param ancestors 实际 RS 祖先链。 @return 渲染标识、节点与完整变换，父级裁剪独立保留。
     """
     for ancestor in ancestors[1:]:
         record = records["nodes"].get(ancestor["id"])
         if record is None:
             continue
         node, projection = record
-        match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
-        local = list(map(number, match.groups()))
-        if any(abs(local[index + 2] - native_bounds[key]) > 0.02
-               for index, key in enumerate(("width", "height"))):
-            raise ValueError("scene_application_viewport_size_mismatch")
+        # 子节点通过实际父矩阵映射，父子尺寸不同不产生缩放；生效范围由独立裁剪链决定。
         return ancestor["id"], node, projection
     raise ValueError("scene_application_viewport_missing")
 
@@ -587,7 +600,7 @@ def scene_mapping(root: dict, window: dict, canvas: dict, evidence: dict) -> dic
     projection = records["parent_projection"] if window["is_system"] else (0, 0, 1, 1, 0)
     viewport_id, viewport_node, affine = ((session_id, node, records["nodes"][session_id][1])
                                          if window["is_system"]
-                                         else application_viewport(records, ancestors, native_bounds))
+                                         else application_viewport(records, ancestors))
     direction = projection if window["is_system"] else affine
     mapping = {"affine": affine, "projection": projection, "canvas": canvas,
                "coordinate_space": "scene" if window["is_system"] else "window",
@@ -624,7 +637,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
     """@brief 建立 ArkUI 到渲染节点的几何索引。 @param raw 原始根。 @param native 原生索引。
     @param mapping 屏幕映射。 @return 节点关联、原生窗口投影和渲染矩形。
     """
-    links, rectangles, projections, directions, overlays = {}, {}, {}, {}, set()
+    links, rectangles, projections, directions, overlays, frames = {}, {}, {}, {}, set(), {}
     pending = [(raw, mapping["projection"], False, None)]
     while pending:
         node, projection, overlay, parent_id = pending.pop()
@@ -639,6 +652,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
                 raise ValueError("overlay_non_layout_parent_unverified:" + node_id)
             overlays.add(node_id)
         if "FrameRect" in attrs:
+            frames[node_id] = node
             projection, rect = local_projection(node, projection)
             if node_id not in native or "$rect" not in native[node_id]:
                 if not overlay:
@@ -664,7 +678,7 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
         raw_only = ",".join(sorted(raw_frames - native_frames))
         raise ValueError(f"native_geometry_frame_set_mismatch:native_only={native_only};raw_only={raw_only}")
     return {"links": links, "rectangles": rectangles, "projections": projections,
-            "directions": directions, "overlays": overlays}
+            "directions": directions, "overlays": overlays, "raw_frames": frames}
 
 
 def render_ancestors(node_id: str, nodes: dict) -> list[dict]:
@@ -837,6 +851,122 @@ def verify_overlay_render(node_id: str, context: dict) -> None:
             raise ValueError("overlay_render_projection_mismatch")
 
 
+def empty_subtree_frames(root: dict, context: dict) -> dict:
+    """@brief 为待验证空子树唯一关联原始及原生零尺寸帧，保留非布局包装节点。 @param root 当前组件。
+    @param context 本批来源。 @return 按真实渲染标识索引的原始帧。
+    """
+    frames, pending = {}, [root]
+    while pending:
+        node = pending.pop()
+        attrs = node["attributes"]
+        pending.extend(node["children"])
+        if "FrameRect" not in attrs:
+            continue
+        node_id = str(attrs["ID"])
+        render_id = context["links"][node_id]["id"]
+        native = context["native"].get(node_id)
+        if (native is None or node_id in context["overlays"]
+                or native["$type"] != attrs["type"].split(",", 1)[0]
+                or (attrs.get("compid") and native.get("compid") != attrs["compid"])):
+            raise ValueError("empty_render_subtree_frame_unverified:" + render_id)
+        match = LOCAL_RECT.fullmatch(attrs["PaintRect without transform"])
+        local = list(map(number, match.groups())) if match else []
+        bounds = native_rect(native["$rect"])
+        if len(local) != 4 or local[2:] != [0, 0] or any(bounds[key] != 0 for key in ("width", "height")):
+            raise ValueError("empty_render_subtree_nonzero_geometry:" + render_id)
+        frames[render_id] = node
+    return frames
+
+
+def actual_render_subtree(root_id: str, nodes: dict) -> list[dict]:
+    """@brief 验证实际渲染子树与打印的完整子节点计数，不用原始组件树猜测挂载关系。 @param root_id 根标识。
+    @param nodes 正式渲染索引。 @return 按实际父关系遍历的完整子树。
+    """
+    children = {}
+    for node in nodes.values():
+        children.setdefault(node["parent"], []).append(node["id"])
+    result, pending, seen = [], [root_id], set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in seen or node_id not in nodes:
+            raise ValueError("invalid_render_parent_chain")
+        seen.add(node_id)
+        node = nodes[node_id]
+        descendants = children.get(node_id, [])
+        declared = re.findall(r"\bsortedChildren:\s*(\d+)\(", node["line"])
+        if (node["children_count"] != len(descendants)
+                or (declared != [str(len(descendants))] if descendants else declared not in ([], ["0"]))):
+            raise ValueError("empty_render_subtree_children_unverified:" + node_id)
+        result.append(node)
+        pending.extend(reversed(descendants))
+    return result
+
+
+def verify_empty_render_parent(node: dict, render: dict, context: dict) -> None:
+    """@brief 穿过非布局节点及已证明省略的恒等帧，核对实际 RS 父节点。 @param node 原始帧。
+    @param render 已挂载帧。 @param context 原生父链和唯一渲染关联。
+    """
+    parent = context["parents"][str(node["attributes"]["ID"])]
+    while parent is not None:
+        expected = context["links"].get(parent)
+        if expected is not None:
+            if expected["id"] in context["render"]:
+                if render["parent"] != expected["id"]:
+                    raise ValueError("empty_render_subtree_parent_mismatch:" + render["id"])
+                return
+            record = (context["raw_frames"][parent], None)
+            verify_omitted_scene_frame(record, context["render"], context["detached_render"])
+        parent = context["parents"][parent]
+    raise ValueError("empty_render_subtree_parent_mismatch:" + render["id"])
+
+
+def verify_empty_render_modifiers(render: dict, node: dict) -> None:
+    """@brief 验证空帧的完整局部变换并拒绝生效或未知裁剪，不读取无穷框作为几何。 @param render 渲染帧。
+    @param node 原始帧。
+    """
+    verify_render_geometry(render, node, True)
+    values = verify_modifiers(render)
+    flags = re.findall(r"ClipTo(?:Bounds|Frame)\[([^\]]+)\]", render["line"])
+    if any(value.lower() != "false" for value in flags):
+        raise ValueError("unsupported_empty_render_clip:" + render["id"])
+    for name, entries in values.items():
+        if "clip" in name.lower() and (name not in {"ClipToBounds", "ClipToFrame"}
+                                       or any(entry.lower() != "false" for entry in entries)):
+            raise ValueError("unsupported_empty_render_clip:" + render["id"])
+
+
+def empty_render_subtree(node: dict, context: dict) -> list[str]:
+    """@brief 仅对完整原始、原生和实际 RS 空子树生成无绘制证明，失败仍绑定当前组件。 @param node 当前帧。
+    @param context 本批来源。 @return 经逐节点验证的渲染标识，非候选返回空集合。
+    """
+    root_id = context["links"][str(node["attributes"]["ID"])]["id"]
+    render = context["render"].get(root_id)
+    match = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
+    local = list(map(number, match.groups())) if match else []
+    if (render is None or len(local) != 4 or local[2:] != [0, 0] or not render_has_no_draw_content(render)):
+        return []
+    bounds = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
+    if bounds is None or any(value.split() != ["-inf"] * 4 for value in bounds.groups()):
+        return []
+    pending, frame_child = list(node["children"]), False
+    while pending and not frame_child:
+        child = pending.pop()
+        frame_child = "FrameRect" in child["attributes"]
+        pending.extend(child["children"])
+    if render["children_count"] == 0 and not frame_child:
+        return []
+    frames = empty_subtree_frames(node, context)
+    actual = actual_render_subtree(root_id, context["render"])
+    if set(frames) != {item["id"] for item in actual}:
+        raise ValueError("empty_render_subtree_membership_mismatch:" + root_id)
+    for item in actual:
+        if not render_has_no_draw_content(item):
+            raise ValueError("empty_render_subtree_draw_content_unverified:" + item["id"])
+        verify_empty_render_parent(frames[item["id"]], item, context)
+        verify_empty_render_modifiers(item, frames[item["id"]])
+    return [item["id"] for item in actual]
+
+
 def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     """@brief 生成来自原生几何的已验证框。 @param node 原始节点。 @param context 上下文。
     @param inherited 祖先裁剪。 @return 带证据的几何。
@@ -844,7 +974,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     node_id = str(node["attributes"].get("ID"))
     native = context["native"].get(node_id, {})
     link = context["links"][node_id]
-    no_draw = False
+    no_draw, no_draw_nodes = False, []
     bounds = context["rectangles"][link["id"]]
     if node_id in context["overlays"]:
         verify_overlay_render(node_id, context)
@@ -855,7 +985,8 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
     else:
         clips = inherited if hidden and link["id"] not in context["render"] else frame_clips(link, context, inherited)
     if link["id"] in context["render"]:
-        no_draw = verify_render_geometry(context["render"][link["id"]], node)
+        no_draw_nodes = empty_render_subtree(node, context)
+        no_draw = verify_render_geometry(context["render"][link["id"]], node, bool(no_draw_nodes))
     clipped = None if detached else bounds
     for clip in clips:
         clipped = intersection(clipped, clip["bounds"])
@@ -864,7 +995,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
             "rendered": not (hidden or detached or no_draw), "native_window_rect": native.get("$rect"),
             "render_state": "not_rendered" if hidden or detached or no_draw else "rendered",
             "render_state_source": ("RenderService.allNodeNotOnTree" if detached else
-                                    "RenderService.no_draw_leaf" if no_draw else "ArkUI_and_RenderService"),
+                                    "RenderService.no_draw_content" if no_draw else "ArkUI_and_RenderService"),
             "source": {"method": "ArkUI.PaintRectAncestorComposition",
                        "commands": ["WindowManagerService.-element", "WindowManagerService.-allInfo",
                                     "RenderService.RSTree", "RenderService.allNodeNotOnTree"], "node_id": node_id,
@@ -874,6 +1005,7 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
                        "native_traversal_omission": ("UINode.DumpSimplifyTree.excludes_OverlayNode"
                                                      if node_id in context["overlays"] else None),
                        "render_node_id": link["id"],
+                       "no_draw_render_node_ids": no_draw_nodes or ([link["id"]] if no_draw else []),
                        "render_node_materialized": link["id"] in context["render"] or detached,
                        "render_node_on_screen_tree": link["id"] in context["render"]}}
 
