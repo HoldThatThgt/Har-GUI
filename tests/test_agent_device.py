@@ -306,11 +306,16 @@ class AgentDeviceTests(unittest.TestCase):
                         "display": {"id": 0}, "windows": [{"window_id": 92, "trees": {"arkui": {"file": "tree"}}}]}
             (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
             hdc = Mock(spec=Hdc)
-            with patch("har_capture.agent_device.capture", return_value=path) as collector:
-                response = capture_frame(hdc, {"output_dir": temporary})
-            collector.assert_called_once_with(hdc, path, 0, [])
+            transient = {"before_image": "before", "after_image": "after", "receipt": {}}
+            with patch("har_capture.agent_device.capture", return_value={
+                    "path": path, "page_observation": transient}) as collector:
+                response = capture_frame(hdc, {"output_dir": temporary, "target_window_id": 92,
+                                                "target_bundle_name": "com.example.settings"})
+            collector.assert_called_once_with(hdc, path, 0, [],
+                                              {"window_id": 92, "bundle_name": "com.example.settings"})
             self.assertEqual(response["windows"], metadata["windows"])
             self.assertEqual(response["metadata_path"], str(path / "metadata.json"))
+            self.assertEqual(response["page_observation"], transient)
 
     def test_cli_writes_one_json_result_and_a_nonzero_failure(self):
         for request, expected_code in (({"operation": "list_applications"}, 0), ({"operation": "shell"}, 1)):

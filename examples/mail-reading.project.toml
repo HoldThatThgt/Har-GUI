@@ -9,7 +9,7 @@ max_duration_seconds = 900
 [dataset]
 root = "../output/mail-reading/dataset"
 canvas = { width = 3120, height = 2080 }
-# 下列标识来自已验证设备；在其他设备上须先核实系统叶子与正文容器。
+# 系统标识仅记录项目声明；下方打码所用正文容器仍须在目标设备核实。
 stability_regions = [
   { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_time" },
   { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_date" },
@@ -36,7 +36,8 @@ instruction = """
 只查看现有内容，禁止发送、回复、删除、转发、下载附件或修改账号。
 先 ReadWindows；已有邮箱窗口则使用现有窗口，否则通过 ReadApplication 选择界面入口再启动。
 当前最大化时先还原再最大化，当前浮动时直接最大化，并核实实际窗口变化。
-选择已有邮件阅读，等待正文加载稳定，再调用 Capture，target_bundle_name 使用真实包名。
+选择已有邮件阅读，等待正文加载稳定，再调用 Capture。
+target_window_id 与 target_bundle_name 使用 ReadWindows 返回的目标窗口标识和真实包名。
 未登录或没有邮件则明确停止，不创建账号、不编造正文。
 """
 acceptance = """

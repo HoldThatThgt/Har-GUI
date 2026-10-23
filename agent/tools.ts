@@ -144,34 +144,50 @@ async function toggleWindow(device: CollectionDevice, parameters: any) {
   return result;
 }
 
+const captureParameters = z.object({
+  page_name: z.string().min(1).describe('A short page category, without path separators'),
+  variation: z.string().min(1).describe('The actual page/window state collected'),
+  target_bundle_name: z.string().min(1).describe('The main task application bundle returned by ReadWindows'),
+  target_window_id: z.number().int().safe().positive().describe('The exact target window ID from ReadWindows'),
+}).strict();
+
+/** @brief 将明确的目标窗口传入采集器，瞬时裁图只留在设备内存中。 */
+async function captureCandidate(device: CollectionDevice, input: unknown) {
+  try {
+    device.pageObservation = undefined;
+    const parameters = captureParameters.parse(input);
+    const observation = await checkWindows(device);
+    const target = observation.windows.find((window) => !window.is_system
+      && window.window_id === parameters.target_window_id && window.bundle_name === parameters.target_bundle_name);
+    if (!target) throw new Error('Capture target is not the specified visible application window');
+    const allowed = device.state.task.bundle_names;
+    if (allowed && !allowed.includes(parameters.target_bundle_name)) throw new Error('Bundle is outside task scope');
+    const { page_observation: paired, ...result } = await bridge(device.connection, { operation: 'capture',
+      output_dir: `${device.state.directory}/captures`, display_id: target.display_id,
+      target_bundle_name: target.bundle_name, target_window_id: target.window_id,
+      stability_regions: device.state.config.project.dataset.stability_regions }, device.state.signal);
+    if (!paired) throw new Error('Capture response has no paired target-page observation');
+    device.pageObservation = paired;
+    device.state.candidate = { ...result, ...parameters, task_name: device.state.task.name,
+      sample_id: randomUUID(), window_changes: [...device.state.changes] };
+    await writeFile(path.join(result.path, 'candidate.json'), JSON.stringify(device.state.candidate, null, 2) + '\n');
+    return { capture_id: result.capture_id, path: result.path, pending_acceptance: true as const };
+  } catch (error) {
+    device.pageObservation = undefined;
+    throw error;
+  }
+}
+
 /** @brief 调用原有采集器保存单张截图和双树，计数由后续验收决定。 */
 function registerCapture(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
   registry.register({ mutates: false, resultSchema: z.object({
     capture_id: z.string(), path: z.string(), pending_acceptance: z.literal(true),
   }), action: {
     name: 'Capture', description: 'Persist the current screen as a dataset candidate with WMS and both UI trees. '
+      + 'Specify target_window_id and its target_bundle_name from ReadWindows; never choose an implicit window. '
       + 'This tool is the ONLY operation that saves a sample. Observing screenshots does NOT save samples. '
       + 'You MUST execute Capture before reporting task completion; wait for pending_acceptance=true feedback.',
-    paramSchema: z.object({ page_name: z.string().min(1).describe('A short page category, without path separators'),
-      variation: z.string().min(1).describe('The actual page/window state collected'),
-      target_bundle_name: z.string().min(1).describe('The main task application bundle returned by ReadWindows') }),
-    call: async (parameters, context) => {
-      const device = getDevice();
-      const observation = await checkWindows(device);
-      if (!observation.windows.some((window) => !window.is_system
-        && window.bundle_name === parameters.target_bundle_name)) {
-        throw new Error('Capture target bundle is not a visible application');
-      }
-      const allowed = device.state.task.bundle_names;
-      if (allowed && !allowed.includes(parameters.target_bundle_name)) throw new Error('Bundle is outside task scope');
-      const result = await bridge(device.connection, { operation: 'capture',
-        output_dir: `${device.state.directory}/captures`,
-        stability_regions: device.state.config.project.dataset.stability_regions }, device.state.signal);
-      device.state.candidate = { ...result, ...parameters, task_name: device.state.task.name,
-        sample_id: randomUUID(), window_changes: [...device.state.changes] };
-      await writeFile(path.join(result.path, 'candidate.json'), JSON.stringify(device.state.candidate, null, 2) + '\n');
-      return { capture_id: result.capture_id, path: result.path, pending_acceptance: true };
-    },
+    paramSchema: captureParameters, call: (parameters) => captureCandidate(getDevice(), parameters),
   } });
 }
 

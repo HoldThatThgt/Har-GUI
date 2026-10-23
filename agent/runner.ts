@@ -68,6 +68,8 @@ async function collectTasks(
       state.observations.clear();
       device.planningObservation = undefined;
       device.latestObservation = undefined;
+      device.pageObservation = undefined;
+      device.frozenScreenshot = undefined;
       await collectSample(state, device, agent, usage,
         state.task.target_count - state.acceptedCount(state.task.name));
     }
@@ -99,6 +101,8 @@ async function collectSample(
       windowsHide: true, signal: state.signal, env: { ...process.env, PYTHONUTF8: '1' },
     });
   } finally {
+    device.pageObservation = undefined;
+    device.frozenScreenshot = undefined;
     const summary = { started_at: startedAt, finished_at: new Date().toISOString(),
       ...usageSnapshot(usage, state.config.profile.pricing, startIndex) };
     state.event('sample_usage', { task_name: state.task.name,

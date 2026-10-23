@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -30,20 +29,35 @@ const PREPARED_FIXTURE = `
 import json, sys
 from pathlib import Path
 from unittest.mock import patch
-from tests.support import fake_hdc, synthetic_screen_geometry
+from tests.support import fake_hdc, synthetic_screen_geometry, layout_data, raw_layout, raw_accessibility
 from har_capture.collector import capture
 from har_capture.delivery_operations import prepare_delivery
+from har_capture.privacy import atomic_json
 root = Path(sys.argv[1])
 geometry = patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry)
 geometry.start()
+closing_geometry = patch('har_capture.window_geometry.read_window_geometry',side_effect=lambda hdc,windows: windows)
+closing_geometry.start()
+target = {'window_id':92,'bundle_name':'com.example.settings'}
+redacted = len(sys.argv) > 4 and sys.argv[4] == 'redacted'
+layout = layout_data()
+if redacted:
+    layout['children'][1]['attributes']['id'] = 'synthetic-body'
+hdc = fake_hdc({'layout':raw_layout(layout),'accessibility':raw_accessibility(layout['children'])})
 if len(sys.argv) > 3 and sys.argv[3] == 'agent_run':
-    root = capture(fake_hdc(),root)
+    root = capture(hdc,root,0,[],target)['path']
 else:
-    source = capture(fake_hdc(),root.parent / 'collected')
+    source = capture(hdc,root.parent / 'collected',0,[],target)['path']
     root.rmdir()
     source.rename(root)
 metadata = json.loads((root / 'metadata.json').read_bytes())
-policy = {'enabled':False,'reason':'Synthetic fixture'}
+observation = json.loads((root / 'page-observation.json').read_bytes())
+atomic_json(root / 'page-stability.json',{'rule_version':1,'capture_id':metadata['capture_id'],
+    'target':observation['target'],'observation_sha256':metadata['files']['page_observation']['sha256'],
+    'decision':'same_page','evidence':'Synthetic mocked target page comparison'})
+policy = {'enabled':redacted,'reason':'Synthetic fixture'}
+if redacted:
+    policy['regions'] = [{'bundle_name':'com.example.settings','resource_id':'synthetic-body'}]
 options = {'app':'editor','page_id':sys.argv[2] or metadata['capture_id'],'scene':'scene',
            'state_id':metadata['capture_id'],'canvas':{'width':3120,'height':2080},'stability_regions':[]}
 def normalized(directory,window,canvas,scenes):
@@ -75,7 +89,7 @@ with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_ef
 }
 
 /** 在测试临时目录建立真实五件套及可重新核验的准备凭证。 */
-function fixture(t: TestContext, candidate = true, captureInRun = false) {
+function fixture(t: TestContext, candidate = true, captureInRun = false, redacted = false) {
   mockSyntheticGeometry(t);
   const directory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-test-'));
   let capture = captureInRun ? join(directory, 'runs', 'run-A', 'captures') : join(directory, 'capture');
@@ -87,13 +101,14 @@ function fixture(t: TestContext, candidate = true, captureInRun = false) {
   });
   t.mock.method(console, 'error', () => {});
   t.mock.method(console, 'warn', () => {});
-  execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : '', captureInRun ? 'agent_run' : ''], {
+  execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : '',
+    captureInRun ? 'agent_run' : '', redacted ? 'redacted' : ''], {
     windowsHide: true, env: { ...process.env, PYTHONUTF8: '1' },
   });
   if (captureInRun) capture = join(capture, readdirSync(capture)[0]);
   const metadata = JSON.parse(readFileSync(join(capture, 'metadata.json'), 'utf8'));
   if (candidate) writeFileSync(join(capture, 'candidate.json'), JSON.stringify({ capture_id: metadata.capture_id,
-    path: capture, task_name: 'editor', target_bundle_name: 'com.example.settings',
+    path: capture, task_name: 'editor', target_window_id: 92, target_bundle_name: 'com.example.settings',
     page_name: 'page', window_changes: [] }));
   const config: LoadedConfiguration = { projectPath: join(directory, 'project.toml'),
     configPath: join(directory, 'config.toml'), outputPath: join(directory, 'runs'),
@@ -103,7 +118,9 @@ function fixture(t: TestContext, candidate = true, captureInRun = false) {
     project: { schema_version: 1, run: { name: 'fixture', output: 'runs', max_actions: 1, max_duration_seconds: 60 },
       agent: { llm: 'vision' }, dataset: { root: 'dataset', canvas: { width: 3120, height: 2080 }, stability_regions: [] },
       tools: { enabled: ['Capture'] }, tasks: [{ name: 'editor', app: 'editor', scene: 'scene', target_count: 1,
-        privacy: { enabled: false, reason: 'Synthetic fixture' }, bundle_names: ['com.example.settings'],
+        privacy: { enabled: redacted, reason: 'Synthetic fixture', ...(redacted
+          ? { regions: [{ bundle_name: 'com.example.settings', resource_id: 'synthetic-body' }] } : {}) },
+        bundle_names: ['com.example.settings'],
         instruction: 'Inspect the saved fixture', acceptance: 'The saved screenshot is white' }] } };
   writeFixtureConfiguration(config);
   return { directory, capture, config, request: { directory: capture, taskName: 'editor' },
@@ -145,26 +162,24 @@ function varyReceipts(capture: string): void {
   }
 }
 
-/** 使用真正 HTTP 和 OpenAI SDK 流程返回可控视觉验收响应，不连接外部服务。 */
+/** 使用进程内 Fetch 替身返回固定视觉响应，保留 SDK 解析及用量流程，不建立网络连接。 */
 async function model(t: TestContext, config: LoadedConfiguration, mode: 'pass' | 'fail' | 'error') {
   const requests: any[] = [];
-  const server = createServer(async (request, response) => {
-    let content = '';
-    for await (const chunk of request) content += chunk;
-    requests.push(JSON.parse(content));
-    response.setHeader('content-type', 'application/json');
-    if (mode === 'error') { response.statusCode = 400; response.end('{"error":{"message":"fixture"}}'); return; }
-    response.end(JSON.stringify({ id: 'local-response', object: 'chat.completion', created: 1, model: 'fixture-vision',
+  config.profile.base_url = 'https://model.fixture.invalid/v1';
+  t.mock.method(globalThis, 'fetch', async (input: any, options: any) => {
+    assert.match(String(input), /^https:\/\/model\.fixture\.invalid\/v1\//);
+    requests.push(JSON.parse(options.body));
+    const headers = { 'content-type': 'application/json' };
+    if (mode === 'error') return new Response('{"error":{"message":"fixture"}}', { status: 400, headers });
+    return new Response(JSON.stringify({ id: 'local-response', object: 'chat.completion', created: 1,
+      model: 'fixture-vision',
       usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
         prompt_cache_hit_tokens: 40, prompt_cache_miss_tokens: 60 },
       choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant',
         content: '<observation>private-model-observation</observation><data-json>'
-          + JSON.stringify({ StatementIsTruthy: mode === 'pass' }) + '</data-json>' } }] }));
+          + JSON.stringify({ StatementIsTruthy: mode === 'pass' }) + '</data-json>' } }] }), { status: 200, headers });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  config.profile.base_url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
   writeFixtureConfiguration(config);
-  t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
   return requests;
 }
 
@@ -182,12 +197,16 @@ test('static screenshot device exposes fixed canvas and no action or connection 
   assert.equal(await device.screenshotBase64(), device.frozenScreenshot);
 });
 
-test('offline finalization uses the saved final PNG, accounts real model usage, and publishes once', async (t) => {
+test('offline finalization uses the saved final PNG, records mocked provider usage, and publishes once', async (t) => {
   const f = fixture(t);
   const requests = await model(t, f.config, 'pass');
   const originalProjectDigest = f.config.digests.project;
   const modelDigest = f.config.digests.config;
   const metadata = JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8'));
+  const originalObservation = JSON.parse(readFileSync(join(f.capture, 'page-observation.json'), 'utf8'));
+  assert.equal(metadata.privacy.enabled, false);
+  assert.equal(metadata.privacy.before_sha256, originalObservation.before.screenshot_sha256);
+  assert.equal(metadata.privacy.before_sha256, metadata.privacy.after_sha256);
   const expectedHash = metadata.delivery.files.screenshot.sha256;
   const savedInputs: string[] = [];
   const original = SavedScreenshotDevice.prototype.screenshotBase64;
@@ -368,6 +387,71 @@ test('finalization refuses a snapshot changed without matching its original proj
   assert.ok(f.runs().every((entry) => entry.status === 'failed' && entry.model_usage.calls === 0));
 });
 
+test('unpublished offline finalization cannot invent a missing paired-page verdict', async (t) => {
+  const f = fixture(t);
+  const requests = await model(t, f.config, 'pass');
+  unlinkSync(join(f.capture, 'page-stability.json'));
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /page-stability\.json|semantic/i);
+  assert.equal(requests.length, 0);
+  assert.equal(existsSync(join(f.capture, 'page-stability.json')), false);
+  assert.equal(existsSync(join(f.capture, 'publication.json')), false);
+  assert.ok(f.runs().every((entry) => entry.status === 'failed' && entry.model_usage.calls === 0));
+});
+
+test('prepared redaction preserves the original paired-page receipt and accepts only the final masked image', async (t) => {
+  const f = fixture(t, true, false, true);
+  const requests = await model(t, f.config, 'pass');
+  const metadata = JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8'));
+  const observation = JSON.parse(readFileSync(join(f.capture, 'page-observation.json'), 'utf8'));
+  const semantic = readFileSync(join(f.capture, 'page-stability.json'));
+  assert.equal(metadata.privacy.enabled, true);
+  assert.notEqual(metadata.privacy.before_sha256, metadata.privacy.after_sha256);
+  assert.equal(observation.before.screenshot_sha256, metadata.privacy.before_sha256);
+  assert.equal(metadata.files.screenshot.sha256, metadata.privacy.after_sha256);
+  const directory = await finalize(f.config, { python: 'python' }, f.request);
+  const result = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+  assert.equal(result.status, 'complete');
+  assert.equal(result.sample.files.screenshot.sha256, metadata.privacy.after_sha256);
+  assert.equal(requests.length, 1);
+  const image = sharp(readFileSync(join(result.sample.path, result.sample.files.screenshot.file)));
+  const pixel = await image.extract({ left: 1034, top: 153, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
+  assert.deepEqual([...pixel], [0, 0, 0]);
+  assert.deepEqual(readFileSync(join(f.capture, 'page-stability.json')), semantic);
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original_run: directory };
+  const preserved = savedFiles(roots);
+  const repeated = await finalize(f.config, { python: 'python' }, f.request);
+  assert.equal(JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8')).model_usage.calls, 0);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(savedFiles(roots), preserved);
+});
+
+test('offline paired-page verification rejects missing or changed privacy provenance before any model request', async (t) => {
+  for (const enabled of [false, true]) {
+    for (const corruption of ['missing privacy receipt', 'changed privacy receipt', 'metadata privacy conflict']) {
+      await t.test(`enabled ${enabled}: ${corruption}`, async (child) => {
+        const f = fixture(child, true, false, enabled);
+        const requests = await model(child, f.config, 'pass');
+        const privacyPath = join(f.capture, 'privacy.json');
+        if (corruption === 'missing privacy receipt') unlinkSync(privacyPath);
+        if (corruption === 'changed privacy receipt') {
+          const privacy = JSON.parse(readFileSync(privacyPath, 'utf8'));
+          privacy.before_sha256 = '0'.repeat(64);
+          writeFileSync(privacyPath, JSON.stringify(privacy));
+        }
+        if (corruption === 'metadata privacy conflict') {
+          const metadataPath = join(f.capture, 'metadata.json');
+          const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+          metadata.privacy.before_sha256 = '0'.repeat(64);
+          writeFileSync(metadataPath, JSON.stringify(metadata));
+        }
+        await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /privacy|redact|screenshot/i);
+        assert.equal(requests.length, 0);
+        assert.equal(existsSync(join(f.capture, 'publication.json')), false);
+      });
+    }
+  }
+});
+
 test('rejected saved-image assertion keeps usage and leaves the dataset uncounted', async (t) => {
   const f = fixture(t);
   const requests = await model(t, f.config, 'fail');
@@ -413,7 +497,8 @@ test('task, target identity and prepared file tampering fail before any model re
   const rawFile = join(f.capture, 'windows.txt');
   const original = readFileSync(rawFile);
   writeFileSync(rawFile, 'tampered raw window evidence');
-  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /digest mismatch/);
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
+    /Page observation raw WMS or layout source differs from its captured index/);
   writeFileSync(rawFile, original);
   const metadata = JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8'));
   writeFileSync(join(f.capture, 'delivery', metadata.delivery.files.tree.file), '{}');

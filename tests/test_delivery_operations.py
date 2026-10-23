@@ -16,7 +16,7 @@ from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
 from har_capture.privacy import atomic_json
 from tests import test_dataset
-from tests.support import fake_hdc, synthetic_screen_geometry
+from tests.support import fake_hdc, save_page_stability, synthetic_closing_geometry, synthetic_screen_geometry
 
 
 class DeliveryOperationTests(unittest.TestCase):
@@ -25,10 +25,15 @@ class DeliveryOperationTests(unittest.TestCase):
                          side_effect=synthetic_screen_geometry)
         geometry.start()
         self.addCleanup(geometry.stop)
+        closing = patch("har_capture.window_geometry.read_window_geometry", side_effect=synthetic_closing_geometry)
+        closing.start()
+        self.addCleanup(closing.stop)
         self.helper = test_dataset.DatasetTests()
         self.helper.setUp()
         evidence = self.helper.directory / "evidence"
-        capture(fake_hdc(), self.helper.directory / "captures").rename(evidence)
+        captured = capture(fake_hdc(), self.helper.directory / "captures",
+                           target={"window_id": 92, "bundle_name": "com.example.settings"})
+        captured["path"].rename(evidence)
         self.evidence = evidence
         self.policy = {"enabled": False, "reason": "Synthetic fixture"}
         self.helper.identity["configuration"]["project"]["tasks"][0]["privacy"] = self.policy
@@ -38,6 +43,7 @@ class DeliveryOperationTests(unittest.TestCase):
         self.metadata = json.loads((evidence / "metadata.json").read_bytes())
         self.metadata["capture_id"] = "frame-a"
         atomic_json(evidence / "metadata.json", self.metadata)
+        save_page_stability(evidence, self.metadata)
         atomic_json(evidence / "candidate.json", {"capture_id": "frame-a", "task_name": "editor",
                     "target_bundle_name": "com.example.settings", "page_name": "frame-a", "path": str(evidence),
                     "window_changes": []})
@@ -65,6 +71,59 @@ class DeliveryOperationTests(unittest.TestCase):
         return {str(path.relative_to(self.helper.directory)):
                 (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
                 for path in self.helper.directory.rglob("*") if path.is_file()}
+
+    def historical_receipts(self):
+        # 在发布前构造旧格式合成夹具，所有后续恢复都必须保留这些原始字节。
+        metadata = copy.deepcopy(self.metadata)
+        metadata.pop("page_stability")
+        metadata["files"].pop("page_observation")
+        for name in ("page-observation.json", "page-stability.json"):
+            (self.evidence / name).unlink()
+        metadata["stability"] = {"status": "verified", "rule_version": 1, "rules": [],
+                                 "regions": [], "allowed_text_fields": ["text", "originalText"]}
+        metadata["consistency"].update(status="verified", stable=True)
+        metadata["consistency"]["pixels"]["status"] = "verified"
+        observations = {"stability": metadata["stability"], "consistency": metadata["consistency"],
+                        "pixel_consistency": metadata["consistency"]["pixels"]}
+        for kind, value in observations.items():
+            path = self.evidence / metadata["files"][kind]["file"]
+            atomic_json(path, value)
+            metadata["files"][kind] = file_info(path)
+        original_path = self.evidence / "capture-evidence.json"
+        original = json.loads(original_path.read_bytes())
+        screenshot = original["files"]["screenshot"]
+        original.update(stability=metadata["stability"], consistency=metadata["consistency"],
+                        files={**metadata["files"], "screenshot": screenshot})
+        atomic_json(original_path, original)
+        manifest = metadata["delivery"]
+        wms_path = Path(manifest["path"]) / manifest["files"]["wms"]["file"]
+        wms = json.loads(wms_path.read_bytes())
+        wms.pop("page_stability")
+        wms.update(stability=metadata["stability"], consistency=metadata["consistency"])
+        atomic_json(wms_path, wms)
+        manifest["files"]["wms"] = file_info(wms_path)
+        self.receipt["manifest_sha256"] = operations.manifest_digest(manifest)
+        for name, value in (("metadata.json", metadata), ("delivery-manifest.json", manifest),
+                            ("delivery-preparation.json", self.receipt)):
+            atomic_json(self.evidence / name, value)
+        self.publish_request["acceptance"]["export"] = manifest
+
+    def test_old_published_receipts_restore_without_new_page_checks_or_byte_changes(self):
+        self.historical_receipts()
+        published = operations.publish_delivery(self.publish_request)
+        original = self.snapshot_files()
+        hooks = ("verify_page_stability", "verify_project_rules", "verify_capture_evidence")
+        with patch.object(operations, hooks[0], side_effect=AssertionError("New semantic check was called")), \
+                patch.object(operations, hooks[1], side_effect=AssertionError("New rule check was called")), \
+                patch.object(operations, hooks[2], side_effect=AssertionError("New capture check was called")):
+            for _ in range(2):
+                status = operations.resume_dataset(self.publish_request)
+                self.assertEqual(status["counts"]["editor"], 1)
+                self.assertEqual(len(status["samples"]), 1)
+                self.assertEqual(operations.publish_delivery(self.publish_request), published)
+                self.assertEqual(self.snapshot_files(), original)
+        self.assertFalse((self.evidence / "page-observation.json").exists())
+        self.assertFalse((self.evidence / "page-stability.json").exists())
 
     def preserve_alternate_json(self, names):
         for name in names:
@@ -403,14 +462,14 @@ class DeliveryOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, "coverage does not match"):
             operations.prepare_delivery(self.prepare_request)
 
-    def test_prepared_retry_recomputes_consistency_and_rejects_pixel_tolerance(self):
+    def test_prepared_retry_recomputes_diagnostics_and_rejects_internally_conflicting_pixel_counts(self):
         metadata = copy.deepcopy(self.metadata)
         pixels = json.loads((self.evidence / "pixel-consistency.json").read_bytes())
         pixels["changed_pixel_count"] = 199
         atomic_json(self.evidence / "pixel-consistency.json", pixels)
         metadata["files"]["pixel_consistency"] = file_info(self.evidence / "pixel-consistency.json")
         atomic_json(self.evidence / "metadata.json", metadata)
-        with self.assertRaisesRegex(CaptureError, "not passed exact comparison"):
+        with self.assertRaisesRegex(CaptureError, "conflict with their observation"):
             operations.prepare_delivery(self.prepare_request)
 
     def test_stable_publication_names_update_every_window_tree_reference(self):

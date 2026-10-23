@@ -19,7 +19,7 @@ OPERATIONS = {
     "list_applications": {"query", "offset", "limit"},
     "read_application": {"bundle_name"},
     "launch_application": {"bundle_name", "ability_name"},
-    "capture": {"output_dir", "display_id", "stability_regions"},
+    "capture": {"output_dir", "display_id", "stability_regions", "target_window_id", "target_bundle_name"},
     "window_size_control": {"window_id"},
     "window_title_bar": {"window_id"},
     "input_text": {"x", "y", "value", "mode", "window_id", "bundle_name", "display_id"},
@@ -307,11 +307,14 @@ def capture_frame(hdc: Hdc, request: dict) -> dict:
     if not isinstance(output, str) or not output.strip():
         fail("Capture requires a nonempty output_dir")
     display = integer_parameter(request, "display_id", 0)
-    destination = capture(hdc, Path(output), display, request.get("stability_regions", []))
+    target = {"window_id": request.get("target_window_id"), "bundle_name": request.get("target_bundle_name")}
+    result = capture(hdc, Path(output), display, request.get("stability_regions", []), target)
+    destination = result["path"]
     metadata_path = destination / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     keys = ("capture_id", "started_at", "finished_at", "display", "windows")
-    return {"path": str(destination), "metadata_path": str(metadata_path), **{key: metadata[key] for key in keys}}
+    return {"path": str(destination), "metadata_path": str(metadata_path),
+            "page_observation": result["page_observation"], **{key: metadata[key] for key in keys}}
 
 
 def execute_operation(hdc: Hdc | None, request: object) -> dict:

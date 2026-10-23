@@ -7,14 +7,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from har_capture.hdc import CaptureError, Hdc, cleanup_remote, fail, utc_now
+from har_capture.hdc import Hdc, cleanup_remote, fail, utc_now
 from har_capture.capture_checks import (compare_capture_states, compare_screen_pixels, coverage_report,
                                         session_visibility)
 from har_capture.metadata import associate_windows, file_info, image_info, load_layout, parse_windows
 from har_capture.tree_capture import collect_trees
 from har_capture.geometry_capture import collect_geometry_evidence
 from har_capture.system_accessibility import supplement_missing_windows
-from har_capture.stability import resolve_stability, validate_rules
+from har_capture.stability import observe_stability, validate_rules
+from har_capture.page_observation import closing_target, observe_page, target_window, validate_target
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,8 +42,8 @@ def capture_remote(hdc: Hdc, remote: dict, display_id: int) -> str:
 
 
 def closing_observation(hdc: Hdc, stage: Path, remote: dict, options: dict) -> dict:
-    """@brief 在采集末尾读取状态，末帧图片仅暂存并立即删除。 @param hdc 连接。
-    @param stage 本地证据。 @param remote 临时路径。 @param options 画布与动态区域声明。 @return 一致性证据。
+    """@brief 记录末尾原始差异并返回临时目标裁图，末帧随后删除。 @param hdc 连接。
+    @param stage 本地证据。 @param remote 临时路径。 @param options 原采集与明确目标。 @return 观测和临时图片。
     """
     windows = hdc.run(["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"], "closing_windows")
     (stage / "closing-windows.txt").write_text(windows, encoding="utf-8")
@@ -61,21 +62,22 @@ def closing_observation(hdc: Hdc, stage: Path, remote: dict, options: dict) -> d
     before = {"windows": parse_windows((stage / "windows.txt").read_text(encoding="utf-8")),
               "layout": load_layout(stage / "layout.json")}
     after = {"windows": parse_windows(windows), "layout": load_layout(stage / "closing-layout.json")}
-    proof = {"display": options["display"],
-             "sessions": session_visibility((stage / "session-details.txt").read_text(encoding="utf-8"))}
-    stability = resolve_stability({"before": before, "after": after}, proof, options["stability_regions"])
-    write_json(stage / "stability.json", stability)
+    write_json(stage / "stability.json", observe_stability(options["stability_regions"]))
+    page = None
     with tempfile.TemporaryDirectory(prefix="har-capture-check-") as temporary:
         path = Path(temporary) / "observation.png"
         hdc.receive(remote["closing_screen"], path, "receive_closing_screen")
-        pixels = compare_screen_pixels((stage / "screenshot.png").read_bytes(), path.read_bytes(), stability["regions"])
+        images = ((stage / "screenshot.png").read_bytes(), path.read_bytes())
+        pixels = compare_screen_pixels(*images)
+        if options["target"] is not None:
+            target = target_window(options, options["target"])
+            final = closing_target(hdc, options, target, after["windows"])
+            page = observe_page(stage, images, (target, final), options["display"])
+            write_json(stage / "page-observation.json", page["receipt"])
     write_json(stage / "pixel-consistency.json", pixels)
-    state = compare_capture_states(before, after, stability)
-    state["pixels"] = pixels
+    state = {**compare_capture_states(before, after), "pixels": pixels}
     write_json(stage / "consistency.json", state)
-    if pixels["status"] != "verified":
-        fail("Screen content changed during collection")
-    return state
+    return {"consistency": state, "page_observation": page}
 
 
 def collect_files(hdc: Hdc, stage: Path, remote: dict, display_id: int) -> dict:
@@ -150,10 +152,11 @@ def attach_coordinate_evidence(metadata: dict, geometry: dict) -> None:
             metadata["files"][f"geometry_{window['window_id']}_{kind}"] = item[kind]
 
 
-def complete_capture(hdc: Hdc, stage: Path, remote: dict, display_id: int, stability_regions: list) -> dict:
+def complete_capture(hdc: Hdc, stage: Path, remote: dict, options: dict) -> dict:
     """@brief 执行一次完整采集及验证。 @param hdc 连接。 @param stage 临时目录。
-    @param remote 设备路径。 @param display_id 显示器 ID。 @param stability_regions 项目声明。 @return 元数据。
+    @param remote 设备路径。 @param options 显示器、声明和明确目标。 @return 元数据及临时图片。
     """
+    display_id = options["display_id"]
     hdc.connect()
     device = hdc.device_info()
     trees = collect_files(hdc, stage, remote, display_id)
@@ -178,19 +181,21 @@ def complete_capture(hdc: Hdc, stage: Path, remote: dict, display_id: int, stabi
     attach_coordinate_evidence(metadata, geometry)
     from har_capture.window_geometry import attach_captured_screen_geometry
     attach_captured_screen_geometry(stage, metadata)
-    metadata["consistency"] = closing_observation(hdc, stage, remote, {
-        "display": metadata["display"], "stability_regions": stability_regions})
+    observed = closing_observation(hdc, stage, remote, {**metadata, **options})
+    metadata["consistency"] = observed["consistency"]
     metadata["stability"] = json.loads((stage / "stability.json").read_bytes())
     for kind, filename in (("coverage", "coverage.json"), ("consistency", "consistency.json"),
                            ("closing_layout", "closing-layout.json"), ("closing_windows", "closing-windows.txt"),
                            ("pixel_consistency", "pixel-consistency.json"), ("stability", "stability.json")):
         metadata["files"][kind] = file_info(stage / filename)
+    if observed["page_observation"] is not None:
+        metadata["files"]["page_observation"] = file_info(stage / "page-observation.json")
     write_json(stage / "capture-evidence.json", metadata)
     if metadata["coverage"]["status"] != "verified":
         ids = [item["window_id"] for item in metadata["coverage"]["unresolved_windows"]]
         fail(f"Visible windows are missing verified dual trees: {ids}")
     metadata.update(device=device, device_cleanup=cleanup_remote(hdc, remote))
-    return metadata
+    return {"metadata": metadata, "page_observation": observed["page_observation"]}
 
 
 def enrich_inventory(inventory: dict, windows: list[dict], text: str) -> list[dict]:
@@ -222,12 +227,14 @@ def save_failure(hdc: Hdc, stage: Path, error: BaseException, remote: dict) -> P
     return failed
 
 
-def capture(hdc: Hdc, output: Path, display_id: int = 0, stability_regions: list | None = None) -> Path:
+def capture(hdc: Hdc, output: Path, display_id: int = 0, stability_regions: list | None = None,
+            target: dict | None = None) -> dict:
     """@brief 采集并发布独立目录，绝不覆盖旧记录。 @param hdc 连接。 @param output 输出根目录。
-    @param display_id 显示器 ID。 @param stability_regions 显式动态资源选择器。 @return 成功目录路径。
+    @param display_id 显示器 ID。 @param stability_regions 原项目声明。 @param target 明确目标。 @return 目录和临时裁图。
     """
     hdc.records.clear()
     stability_regions = validate_rules([] if stability_regions is None else stability_regions)
+    target = validate_target(target)
     capture_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ-") + uuid.uuid4().hex[:8]
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -237,7 +244,9 @@ def capture(hdc: Hdc, output: Path, display_id: int = 0, stability_regions: list
     prefix = "/data/local/tmp/har-capture-" + capture_id
     remote = {"screenshot": prefix + ".png", "layout": prefix + ".json"}
     try:
-        metadata = complete_capture(hdc, stage, remote, display_id, stability_regions)
+        result = complete_capture(hdc, stage, remote, {"display_id": display_id,
+            "stability_regions": stability_regions, "target": target})
+        metadata = result["metadata"]
         metadata.update(capture_id=capture_id, status="complete", started_at=started, finished_at=utc_now(),
                         clock="host_utc", z_order_source="WindowManagerService.ZOrd",
                         z_order_direction="higher_is_front_on_same_display",
@@ -252,7 +261,7 @@ def capture(hdc: Hdc, output: Path, display_id: int = 0, stability_regions: list
         write_json(stage / "metadata.json", metadata)
         final = output / capture_id
         stage.rename(final)
-        return final
+        return {"path": final, "page_observation": result["page_observation"]}
     except (Exception, KeyboardInterrupt) as error:
         save_failure(hdc, stage, error, remote)
         raise

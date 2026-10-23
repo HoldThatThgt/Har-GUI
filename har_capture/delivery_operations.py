@@ -5,8 +5,7 @@ import json
 import math
 from pathlib import Path
 
-from har_capture.capture_checks import (compare_capture_states, coverage_report, session_visibility,
-                                        verify_pixel_receipt)
+from har_capture.capture_checks import compare_capture_states, coverage_report, verify_pixel_receipt
 from har_capture.dataset import SUFFIXES, dataset_status, publish_sample, read_documents, verify_files
 from har_capture.export import sample_prefix, write_delivery
 from har_capture.hdc import fail
@@ -14,7 +13,8 @@ from har_capture.metadata import file_info, image_info, load_layout, parse_windo
 from har_capture.privacy import atomic_json, redact_capture, validate_policy, verify_privacy_receipt
 from har_capture.signatures import digest
 from har_capture.system_accessibility import read_window_accessibility
-from har_capture.stability import resolve_stability, verify_project_rules
+from har_capture.stability import observe_stability, verify_project_rules
+from har_capture.page_observation import verify_page_stability
 
 
 def verify_raw_files(directory: Path, metadata: dict, skip_screenshot: bool) -> None:
@@ -115,7 +115,7 @@ def verify_capture_windows(directory: Path, metadata: dict, inventory: dict) -> 
 
 
 def verify_capture_evidence(directory: Path, metadata: dict, skip_screenshot: bool = False) -> None:
-    """@brief 为初次准备和恢复统一核验原始摘要、窗口覆盖与首尾一致性。 @param directory 原始目录。
+    """@brief 为初次准备核验原始摘要、窗口覆盖与首尾观测绑定。 @param directory 原始目录。
     @param metadata 采集元数据。 @param skip_screenshot 打码恢复前只延后图片摘要核验。
     """
     if metadata.get("status") != "complete":
@@ -127,14 +127,12 @@ def verify_capture_evidence(directory: Path, metadata: dict, skip_screenshot: bo
     before = {"windows": inventory, "layout": load_layout(directory / "layout.json")}
     after = {"windows": parse_windows((directory / "closing-windows.txt").read_text(encoding="utf-8")),
              "layout": load_layout(directory / "closing-layout.json")}
-    proof = {"display": metadata["display"], "sessions": session_visibility(
-        (directory / "session-details.txt").read_text(encoding="utf-8"))}
-    stability = resolve_stability({"before": before, "after": after}, proof, metadata["stability"]["rules"])
+    stability = observe_stability(metadata["stability"]["rules"])
     if stability != metadata["stability"] or stability != json.loads((directory / "stability.json").read_bytes()):
-        fail("Capture stability receipt differs from its original system leaf evidence")
-    state = compare_capture_states(before, after, stability)
+        fail("Capture observation declaration differs from its original evidence")
+    state = compare_capture_states(before, after)
     pixels = json.loads((directory / "pixel-consistency.json").read_bytes())
-    verify_pixel_receipt(pixels, stability)
+    verify_pixel_receipt(pixels, metadata["display"])
     state["pixels"] = pixels
     if state != metadata["consistency"] or state != json.loads((directory / "consistency.json").read_bytes()):
         fail("Capture consistency receipt differs from its original evidence")
@@ -178,6 +176,8 @@ def verify_preparation(directory: Path, metadata: dict, request: dict, receipt: 
         fail("Prepared delivery does not match its naming or canvas rules")
     if wms["stability"] != metadata["stability"]:
         fail("Prepared delivery stability evidence differs from its verified original capture")
+    if wms.get("page_stability") != metadata.get("page_stability"):
+        fail("Prepared delivery target page receipt differs from its original metadata")
     policy_hash = hashlib.sha256(json.dumps(request["privacy"], sort_keys=True).encode()).hexdigest()
     verify_privacy_receipt(wms["privacy"])
     if (wms["privacy"]["policy_sha256"] != policy_hash or wms["privacy"] != metadata["privacy"]
@@ -246,13 +246,17 @@ def prepare_delivery(request: dict) -> dict:
     if metadata.get("delivery"):
         if receipt is None:
             fail("Prepared delivery has no rule identity receipt")
+        metadata["page_stability"] = verify_page_stability(directory, metadata)
         return save_preparation(directory, metadata, request, receipt)
     if receipt:
         restore_uncommitted_delivery(directory, metadata, request)
     elif (directory / "delivery").exists():
         fail("Unregistered delivery directory prevents preparation")
+    page_stability = verify_page_stability(directory, metadata)
+    metadata["page_stability"] = page_stability
     verify_capture_evidence(directory, metadata, skip_screenshot=True)
     metadata = redact_capture(directory, request["privacy"])
+    metadata["page_stability"] = page_stability
     verify_raw_files(directory, metadata, skip_screenshot=False)
     receipt = {"rule_version": 1, "rules_sha256": rules_hash, "capture_id": metadata["capture_id"],
                "status": "started", "screenshot_sha256": metadata["files"]["screenshot"]["sha256"]}

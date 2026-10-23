@@ -11,6 +11,7 @@ import type { LoadedConfiguration } from '../agent/config.js';
 import type { RunState } from '../agent/state.js';
 import { saveRunConfiguration } from '../agent/provenance.js';
 import { writeFixtureConfiguration } from './agent-configuration.js';
+import { writePageObservation } from './agent-page-fixture.js';
 
 const sdkDirectory = mkdtempSync(join(tmpdir(), 'har-gui-runner-sdk-'));
 process.env.MIDSCENE_RUN_DIR = sdkDirectory;
@@ -84,23 +85,31 @@ function fileInfo(file: string, bytes: Buffer) {
   return { file, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
-function capture(directory: string, captureId: string): void {
+function capture(directory: string, captureId: string) {
   mkdirSync(directory);
   const tree = Buffer.from(JSON.stringify({ attributes: { type: 'root' }, children: [] }));
-  const contents = { 'screenshot.png': PNG, 'arkui.json': tree, 'accessibility.json': tree };
+  const windows = Buffer.from(JSON.stringify({ window_id: 92 }));
+  const contents = { 'screenshot.png': PNG, 'arkui.json': tree, 'accessibility.json': tree,
+    'layout.json': tree, 'closing-layout.json': tree, 'windows.txt': windows, 'closing-windows.txt': windows };
   for (const [file, bytes] of Object.entries(contents)) writeFileSync(join(directory, file), bytes);
   const bounds = { x: 0, y: 0, width: 4, height: 3 };
   const metadata = { capture_id: captureId, status: 'complete', display: { id: 0, width: 4, height: 3 },
     coverage: { status: 'verified', covered_window_ids: [92], excluded_windows: [], unresolved_windows: [] },
-    consistency: { status: 'verified', stable: true, atomic: false, pixels: { status: 'verified' } },
+    consistency: { status: 'observed', atomic: false, pixels: { status: 'observed', changed: false } },
     window_inventory: [{ window_id: 92 }], foreground_window_ids_without_tree: [],
     files: { screenshot: { ...fileInfo('screenshot.png', PNG), width: 4, height: 3 },
-      arkui: fileInfo('arkui.json', tree), accessibility: fileInfo('accessibility.json', tree) },
-    windows: [{ window_id: 92, bundle_name: 'org.example.editor', z_order: 17,
+      arkui: fileInfo('arkui.json', tree), accessibility: fileInfo('accessibility.json', tree),
+      windows: fileInfo('windows.txt', windows), closing_windows: fileInfo('closing-windows.txt', windows),
+      layout: fileInfo('layout.json', tree), closing_layout: fileInfo('closing-layout.json', tree) },
+    windows: [{ window_id: 92, process_id: 202, display_id: 0, is_system: false,
+      bundle_name: 'org.example.editor', z_order: 17,
       bounding_box: bounds, screen_bounds: bounds,
       trees: { arkui: { file: 'arkui.json', node_count: 1 },
         accessibility: { file: 'accessibility.json', node_count: 1 } } }] };
+  const observation = writePageObservation(directory, metadata, 92,
+    { before: PNG, after: PNG, afterScreen: PNG });
   writeFileSync(join(directory, 'metadata.json'), JSON.stringify(metadata));
+  return observation;
 }
 
 function fixture(t: TestContext, options: FixtureOptions = {}) {
@@ -145,10 +154,12 @@ function mockBridge(t: TestContext, f: ReturnType<typeof fixture>): void {
 
 function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
   let state: RunState;
+  let device: InstanceType<typeof CollectionDevice>;
   let count = 0;
   t.mock.method(CollectionDevice.prototype, 'connect', async function (this: InstanceType<typeof CollectionDevice>) {
     f.events.push('connect');
     state = this.state;
+    device = this;
   });
   t.mock.method(CollectionAgent.prototype, 'aiAct', async (prompt: string) => {
     f.events.push('aiAct');
@@ -156,13 +167,18 @@ function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
     count += 1;
     assert.equal(state.observations.size, 0);
     assert.equal(state.candidate, undefined);
+    assert.equal(device.pageObservation, undefined);
     state.enter('Capture');
     state.leave();
     const captureId = `capture-${count}`;
     const directory = join(f.directory, captureId);
-    capture(directory, captureId);
+    device.pageObservation = capture(directory, captureId);
     state.candidate = { capture_id: captureId, path: directory, task_name: state.task.name,
-      page_name: `page-${count}`, target_bundle_name: 'org.example.editor', window_changes: [] };
+      page_name: `page-${count}`, target_window_id: 92, target_bundle_name: 'org.example.editor', window_changes: [] };
+  });
+  t.mock.method(CollectionAgent.prototype, 'aiAsk', async () => {
+    f.events.push('aiAsk');
+    return JSON.stringify({ decision: 'same_page', evidence: 'Mocked cap-test page decision' });
   });
   t.mock.method(CollectionAgent.prototype, 'aiAssert', async () => {
     f.events.push('aiAssert');
@@ -190,7 +206,7 @@ test('run cap adds one to a restored 200-target dataset and stops before another
   assert.equal(summary.accepted.length, 2);
   assert.equal(summary.actions, 1);
   assert.match(f.prompts[0], /199 samples remain/);
-  assert.deepEqual(f.events, ['connect', 'aiAct', 'aiAssert', 'visualize', 'destroy']);
+  assert.deepEqual(f.events, ['connect', 'aiAct', 'aiAsk', 'aiAssert', 'visualize', 'destroy']);
   assert.deepEqual(f.plan().requests.map((request: any) => request.operation),
     ['dataset_status', 'prepare_delivery', 'publish_sample']);
   assert.deepEqual(f.plan().requests[0].identity.tasks, [{ name: 'editor', target_count: 200 }]);

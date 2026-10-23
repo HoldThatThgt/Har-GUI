@@ -68,7 +68,9 @@ output/<运行时间>-<随机标识>/
     metadata.json       窗口边界、包名、层叠顺序、采集时间和文件摘要
     accessibility.json  原始无障碍控件树
     arkui/              ArkUI JSON 及原始文本
-    candidate.json      任务、目标包名和窗口变化证据，用于离线后处理
+    candidate.json      任务、目标窗口与包名和窗口变化证据，用于离线后处理
+    page-observation.json  目标窗口首尾观测摘要与原始文件关联，不包含图片
+    page-stability.json  目标页面变化、主体空白或无法观察的判断收据
     privacy.json        打码区域、规则摘要和图片前后摘要
     sample.json         任务、页面、变化证据和最终图片验收结果
     model-usage-summary.json  本样本导航、执行和验收的模型用量及可计算的费用估算
@@ -93,13 +95,11 @@ dataset/
 导航截图和 SDK 临时日志在运行结束时清理。视觉验收只读取最终保存的 PNG，不重拍当前设备；
 Midscene 会在内存中将其编码为模型使用的图片表示。验收收据绑定 PNG 摘要。
 失败保留本地证据并返回非零退出码，不增加配额。
-采集前后核对窗口、可见树属性和截图像素；末帧仅临时用于检查后删除。
-原始树保持不变，比较会规范化等价的零模糊值，以及 Web、XComponent 宿主下的运行期注册树标识。
-宿主身份、低位元素身份、树分区、文字、几何和顺序仍严格比较，
-规则与离线验证边界见[无障碍树稳定性比较](docs/accessibility-stability.md)，规则版本随采集记录保存。
-默认整屏像素零差。项目可在 `dataset.stability_regions` 显式声明系统动态叶子，
-只在稳定性比较时忽略其矩形像素及 `text`、`originalText`，原图和树保持原样。
-应用节点、非叶子容器及采集后改变的规则均拒绝；字段与设备标识示例见[交付契约](docs/delivery-contract.md)。
+首尾像素、窗口与控件树差异只作为诊断，不因光标闪烁、同页局部更新或背景窗口变化拒收。
+`Capture` 明确目标窗口标识与包名，复用 Midscene 参考图片接口判断目标是否换页或主体变空。
+首尾目标裁图仅在内存中使用，判断收据绑定实际观测摘要；原图和控件树保持原样。
+无法观察的主体明确记录 `unobservable`，不能宣称稳定性已证实，最终图片仍需通过任务验收。
+字段、收据和离线限制见[目标页面稳定性](docs/target-page-stability.md)。
 顺序采集始终标记 `atomic=false`，一致性检查不等于硬件原子快照。
 
 ### 采后打码与独立发布
@@ -126,8 +126,8 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 
 `selectors` 只列资源标识、类型和坐标，不打印正文。`apply` 不调用模型或设备，按同一个开关处理，
 开启时原地覆盖唯一截图、更新摘要并删除含旧图的查看页。`finalize` 在最终图片上调用视觉模型，验证通过后登记五件套，
-无需连接设备；它不导航、不输入，也不读取当前屏幕。直接使用 `capture.py` 得到的采集没有
-`candidate.json`，需要额外传 `--target-bundle` 明确主任务应用。
+无需连接设备；它不导航、不输入，也不读取当前屏幕。未发布候选必须已有有效的目标观测与页面判断收据，
+缺失时不能离线补做首尾比较。直接使用 `capture.py` 得到的原始采集不能仅靠 `--target-bundle` 进入正式发布。
 选择器读取前核对原始无障碍文件摘要；所有动作的日志与反馈隐藏定位描述，Input 另隐藏输入正文，保留已解析坐标。
 
 开启打码但未提供 `regions` 时，保留原始采集等待核实选择器，不计配额；任何已声明选择器未匹配都停止后处理。
@@ -208,7 +208,7 @@ npm run agent -- run --project project.toml --config config.toml `
 | `MoveWindow` | 按当前系统标题栏的无障碍身份定位拖动点，用官方 `uinput` 鼠标拖动到指定屏幕像素坐标 |
 | `ResizeWindow` | 拖动浮动窗口右下边框到指定宽高，保持左上角不变，并核验实际尺寸 |
 | `OccludeWindow` | 移动一个真实应用窗口，使其位于目标窗口前方并形成部分矩形交集 |
-| `Capture` | 明确主任务包名，持久化候选；打码、导出、验收、去重和发布通过后计数 |
+| `Capture` | 明确目标窗口标识与包名，持久化候选；打码、导出、验收、去重和发布通过后计数 |
 
 Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任意 shell 与结束应用工具未公开。
 查询结果通过 SDK 的规划反馈进入下一轮。动作绑定实际规划截图，窗口身份或边界变化时中止；
@@ -249,13 +249,14 @@ WMS 矩形与层叠顺序，不将透明系统窗口的矩形当作像素遮挡�
 限定范围时 `Scroll` 也必须定位；按键始终校验实际聚焦应用。运行失败会保存原因，
 不会绕开范围检查继续执行。
 
-### 当前五件套实机验证
+### 既有五件套实机验证
 
 2026-10-22 在加入显式打码开关前的版本中，已登录华为邮箱完成了一份邮件阅读样本。
 Agent 自主读取窗口、还原、最大化并采集，
 随后独立遮盖阅读正文与邮件列表摘要，视觉模型验收最终保存的 PNG，正式目录只有五个文件。
 任务现已更新为 `privacy.enabled` 配置，见 `examples/mail-reading.project.toml`；其中资源标识需在目标设备核实。
 下表数字对应当时的已发布证据，原始证据与配置未改写；新开关关闭时的验证另列在表后。
+这些实测早于目标页面判断规则变更；新规则本轮仅完成离线合成与模拟回归，尚未进行真机或真实模型验证。
 
 | 检查 | 本次实测 |
 | --- | --- |
@@ -405,10 +406,12 @@ captures/<UTC时间>-<随机标识>/
   session-details.txt   窗口会话详情，提供 isSystem 和 uiNodeId 证据
   metadata.json         应用、窗口、时间和文件摘要
   commands.json         每条 HDC 命令的时间、退出码、输出字节数和摘要，不复制正文
-  closing-layout.json   采集末尾的树，用于复核页面稳定性
+  closing-layout.json   采集末尾的原始树，保留变化诊断与观测来源
   closing-windows.txt   采集末尾的 WMS 清单
-  consistency.json      前后语义属性与画面检查结果，始终 atomic=false
-  pixel-consistency.json  像素差异证据；末帧图片只暂存用于比较后删除
+  consistency.json      首尾原始 WMS 与树差异，始终 atomic=false，不按差异拒收
+  pixel-consistency.json  完整画面像素差异；不屏蔽区域，不按差异拒收
+  page-observation.json  显式目标的首尾身份、几何、图片与原始文件摘要
+  page-stability.json   页面内容判断收据；末尾裁图仅在内存中用于本次判断
 ```
 
 ```mermaid

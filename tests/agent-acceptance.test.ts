@@ -44,7 +44,7 @@ function fixture(t: TestContext) {
   const metadata: any = {
     capture_id: 'fixture-capture', status: 'complete', display: { id: 0, width: 4, height: 3 },
     coverage: { status: 'verified', covered_window_ids: [92], excluded_windows: [], unresolved_windows: [] },
-    consistency: { status: 'verified', stable: true, atomic: false, pixels: { status: 'verified' } },
+    consistency: { status: 'observed', atomic: false, pixels: { status: 'observed', changed: false } },
     window_inventory: [{ window_id: 92 }], foreground_window_ids_without_tree: [],
     files: {
       screenshot: { ...fileInfo('screenshot.png', PNG), width: 4, height: 3 },
@@ -334,19 +334,31 @@ test('saved-image acceptance binds the final digest without prematurely counting
   assert.equal(state.accepted.length, 0);
 });
 
-test('unmatched visible windows and unstable capture evidence cannot reach saved-image acceptance', async (t) => {
+test('unmatched visible windows and invalid observation evidence cannot reach saved-image acceptance', async (t) => {
   for (const mutate of [
     (metadata: any) => { metadata.foreground_window_ids_without_tree = [99]; },
     (metadata: any) => { metadata.window_inventory.push({ window_id: 99 }); },
     (metadata: any) => { metadata.coverage.unresolved_windows.push({ window_id: 99 }); },
     (metadata: any) => { metadata.consistency.status = 'failed'; },
-    (metadata: any) => { metadata.consistency.pixels.status = 'failed'; },
+    (metadata: any) => { metadata.consistency.status = 'verified'; },
   ]) {
     const f = fixture(t);
     mutate(f.metadata);
     f.save();
-    await assert.rejects(verifyCapture(f.directory), /coverage|stability/i);
+    await assert.rejects(verifyCapture(f.directory), /coverage|observ|consisten/i);
   }
+});
+
+test('observed raw pixel and tree changes remain diagnostics rather than a stability verdict', async (t) => {
+  const f = fixture(t);
+  f.metadata.consistency.pixels.changed = true;
+  f.metadata.consistency.pixels.changed_pixel_count = 165;
+  f.metadata.consistency.checks = { layout: { changed: true }, windows: { changed: false } };
+  f.save();
+  const result = await verifyCapture(f.directory);
+  assert.equal(result.consistency.status, 'observed');
+  assert.equal(result.consistency.pixels.changed, true);
+  assert.equal(Object.hasOwn(result.consistency, 'stable'), false);
 });
 
 test('saved-image acceptance describes the privacy switch without changing custom acceptance', async (t) => {

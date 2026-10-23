@@ -43,8 +43,8 @@ class CollectorTests(unittest.TestCase):
 
     def test_each_capture_has_independent_files_and_preserves_layout_bytes(self):
         first_hdc, second_hdc = fake_hdc(), fake_hdc()
-        first = capture(first_hdc, self.output)
-        second = capture(second_hdc, self.output)
+        first = capture(first_hdc, self.output)["path"]
+        second = capture(second_hdc, self.output)["path"]
         original = raw_layout()
         self.assertNotEqual(first, second)
         self.assertEqual(len(list(self.output.iterdir())), 2)
@@ -59,7 +59,7 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(metadata["status"], "complete")
             self.assertEqual(metadata["files"]["layout"]["sha256"], hashlib.sha256(original).hexdigest())
             self.assertFalse(metadata["consistency"]["atomic"])
-            self.assertEqual(metadata["consistency"]["status"], "verified")
+            self.assertEqual(metadata["consistency"]["status"], "observed")
             self.assertEqual(metadata["coverage"]["status"], "verified")
             self.assertEqual(metadata["z_order_source"], "WindowManagerService.ZOrd")
             self.assertTrue(metadata["device_cleanup"]["success"])
@@ -91,9 +91,9 @@ class CollectorTests(unittest.TestCase):
     def test_reused_connection_keeps_only_current_capture_commands(self):
         hdc = fake_hdc()
         hdc.records.append({"name": "previous"})
-        first = capture(hdc, self.output)
+        first = capture(hdc, self.output)["path"]
         first_commands = json.loads((first / "commands.json").read_text(encoding="utf-8"))
-        second = capture(hdc, self.output)
+        second = capture(hdc, self.output)["path"]
         second_commands = json.loads((second / "commands.json").read_text(encoding="utf-8"))
         required = {"screenshot", "layout", "windows", "accessibility", "receive_accessibility",
                     "dump_arkui_92", "dump_arkui_80", "receive_arkui_response_92", "receive_arkui_response_80",
@@ -114,7 +114,7 @@ class CollectorTests(unittest.TestCase):
         )
         for hdc in connections:
             with self.subTest(system_window=hdc is connections[1]):
-                directory = capture(hdc, self.output)
+                directory = capture(hdc, self.output)["path"]
                 metadata = self.read_metadata(directory)
                 identities = {window["window_id"]: window["ui_node_id"] for window in metadata["windows"]}
                 self.assertEqual(identities, {80: 800, 92: 920})
@@ -137,7 +137,7 @@ class CollectorTests(unittest.TestCase):
 
                 hdc.run.side_effect = run
                 with self.assertLogs("har_capture.hdc", level="ERROR"):
-                    directory = capture(hdc, self.output)
+                    directory = capture(hdc, self.output)["path"]
                 metadata = self.read_metadata(directory)
                 self.assertEqual(metadata["status"], "complete")
                 self.assertFalse(metadata["device_cleanup"]["success"])
@@ -149,13 +149,13 @@ class CollectorTests(unittest.TestCase):
 
     def test_only_one_screenshot_is_saved_and_closing_pixels_are_checked_in_memory(self):
         hdc = fake_hdc()
-        directory = capture(hdc, self.output)
+        directory = capture(hdc, self.output)["path"]
         metadata = self.read_metadata(directory)
         self.assertEqual(metadata["status"], "complete")
         self.assertEqual(metadata["capture_id"], directory.name)
         self.assertFalse(metadata["consistency"]["atomic"])
-        self.assertEqual(metadata["consistency"]["status"], "verified")
-        self.assertEqual(metadata["consistency"]["pixels"]["status"], "verified")
+        self.assertEqual(metadata["consistency"]["status"], "observed")
+        self.assertEqual(metadata["consistency"]["pixels"]["status"], "observed")
         self.assertEqual(list(directory.rglob("*.png")), [directory / "screenshot.png"])
         commands = json.loads((directory / "commands.json").read_bytes())
         screenshots = [record for record in commands if "screenCap" in record.get("command", [])]
@@ -172,29 +172,30 @@ class CollectorTests(unittest.TestCase):
             self.assertTrue((directory / artifact["file"]).is_file())
         self.assertEqual((directory / "layout.json").read_bytes(), raw_layout())
 
-    def test_screen_content_change_rejects_frame_without_saving_a_second_image(self):
+    def test_screen_content_change_is_recorded_without_saving_a_second_image(self):
         hdc = fake_hdc({"closing_screen": png_bytes("black", size=(3120, 2080))})
-        with self.assertRaisesRegex(CaptureError, "Screen content changed"):
-            capture(hdc, self.output)
-        directory = self.assert_failed_only()
+        directory = capture(hdc, self.output)["path"]
+        self.assertEqual(self.read_metadata(directory)["status"], "complete")
         self.assertEqual(len(list(directory.rglob("*.png"))), 1)
         pixels = json.loads((directory / "pixel-consistency.json").read_bytes())
-        self.assertEqual(pixels["status"], "failed")
+        self.assertEqual(pixels["status"], "observed")
+        self.assertEqual(pixels["changed_pixel_count"], 3120 * 2080)
         self.assertTrue(hdc.run.call_args_list[-1].args[1] == "cleanup")
 
-    def test_tree_text_change_without_structure_change_rejects_frame(self):
+    def test_tree_text_change_without_structure_change_is_a_raw_diagnostic(self):
         layout = json.loads(raw_layout())
         layout["children"][0]["attributes"]["text"] = "New content on the same page"
         hdc = fake_hdc({"closing_layout": raw_layout(layout)})
-        with self.assertRaisesRegex(CaptureError, "state changed"):
-            capture(hdc, self.output)
-        self.assert_failed_only()
+        directory = capture(hdc, self.output)["path"]
+        metadata = self.read_metadata(directory)
+        self.assertTrue(metadata["consistency"]["checks"]["layout"]["changed"])
+        self.assertEqual((directory / "closing-layout.json").read_bytes(), raw_layout(layout))
 
     def test_unmatched_system_window_requires_explicit_nonvisibility_evidence(self):
         details = (FIXTURES / "session-details.txt").read_text(encoding="utf-8").replace("Visible: 0|3|", "Visible: 1|0|")
         hdc = fake_hdc(command_outputs={"session_details": details})
         with self.assertRaisesRegex(CaptureError, "Inspector"):
-            capture(hdc, self.output)
+            capture(hdc, self.output)["path"]
         directory = self.assert_failed_only()
         coverage = json.loads((directory / "coverage.json").read_bytes())
         self.assertEqual([window["window_id"] for window in coverage["unresolved_windows"]], [9])
@@ -205,7 +206,7 @@ class CollectorTests(unittest.TestCase):
         hdc = fake_hdc({"layout": raw_layout(layout), "accessibility": raw_accessibility(layout["children"]),
                         "inspector_window-92": application_inspector()}, command_outputs={
                             "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
-        directory = capture(hdc, self.output)
+        directory = capture(hdc, self.output)["path"]
         metadata = self.read_metadata(directory)
         self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
         self.assertEqual(metadata["foreground_window_ids_without_tree"], [9])
@@ -222,7 +223,7 @@ class CollectorTests(unittest.TestCase):
         hdc = fake_hdc({"accessibility": raw_accessibility([layout["children"][0]]),
                         "inspector_window-92": application_inspector(bundle="com.example.settings")},
                        command_outputs={"inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
-        directory = capture(hdc, self.output)
+        directory = capture(hdc, self.output)["path"]
         metadata = self.read_metadata(directory)
         self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
         window = next(window for window in metadata["windows"] if window["window_id"] == 92)
@@ -238,7 +239,7 @@ class CollectorTests(unittest.TestCase):
                         "inspector_window-80": application_inspector(80, 201, 0, "com.example.reader")},
                        command_outputs={"inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY",
                                         "inspector_window-80": "HAR_CAPTURE_INSPECTOR_READY"})
-        directory = capture(hdc, self.output)
+        directory = capture(hdc, self.output)["path"]
         metadata = self.read_metadata(directory)
         self.assertEqual(metadata["coverage"]["covered_window_ids"], [80, 92])
         self.assertEqual({window["bundle_name"] for window in metadata["windows"]},
@@ -254,7 +255,7 @@ class CollectorTests(unittest.TestCase):
                         "inspector_window-92": application_inspector(93)}, command_outputs={
                             "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
         with self.assertRaisesRegex(CaptureError, "does not match WinId"):
-            capture(hdc, self.output)
+            capture(hdc, self.output)["path"]
         self.assert_failed_only()
 
     def test_required_stage_failures_never_publish_complete_capture(self):
@@ -263,7 +264,7 @@ class CollectorTests(unittest.TestCase):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
                 self.output = Path(temporary) / "captures"
                 with self.assertRaises(CaptureError):
-                    capture(fake_hdc(failure=stage), self.output)
+                    capture(fake_hdc(failure=stage), self.output)["path"]
                 self.assert_failed_only()
 
     def test_invalid_payloads_never_publish_complete_capture(self):
@@ -274,15 +275,15 @@ class CollectorTests(unittest.TestCase):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
                 self.output = Path(temporary) / "captures"
                 with self.assertRaises(Exception):
-                    capture(fake_hdc(payload), self.output)
+                    capture(fake_hdc(payload), self.output)["path"]
                 self.assert_failed_only()
 
     def test_missing_transferred_file_does_not_reuse_old_capture(self):
-        previous = capture(fake_hdc(), self.output)
+        previous = capture(fake_hdc(), self.output)["path"]
         hdc = fake_hdc()
         hdc.receive.side_effect = None
         with self.assertRaises(FileNotFoundError):
-            capture(hdc, self.output)
+            capture(hdc, self.output)["path"]
         self.assertEqual(self.read_metadata(previous)["status"], "complete")
         failed = next(directory for directory in self.output.iterdir() if directory.name.endswith(".failed"))
         self.assertFalse((failed / "metadata.json").exists())
@@ -295,7 +296,7 @@ class CollectorTests(unittest.TestCase):
                 hdc.run.side_effect = result if isinstance(result, BaseException) else None
                 hdc.run.return_value = result
                 with self.assertRaises((CaptureError, KeyboardInterrupt)):
-                    capture(hdc, self.output)
+                    capture(hdc, self.output)["path"]
                 self.assert_failed_only()
 
     def test_failed_final_publication_removes_complete_metadata(self):
@@ -307,7 +308,7 @@ class CollectorTests(unittest.TestCase):
             return original(source, target)
 
         with patch.object(Path, "rename", reject_publication), self.assertRaises(OSError):
-            capture(fake_hdc(), self.output)
+            capture(fake_hdc(), self.output)["path"]
         self.assert_failed_only()
 
 

@@ -9,6 +9,7 @@ import { localBridge, type DeviceOptions } from './bridge.js';
 import { resolveModelConfig, type LoadedConfiguration } from './config.js';
 import { RunState } from './state.js';
 import { saveRunConfiguration } from './provenance.js';
+import { verifyPageStability } from './page-stability.js';
 import { UsageRecorder, estimateUsageCost } from './usage.js';
 
 /** @brief 已保存采集的独立验收参数，不包含设备动作或历史观察。 */
@@ -158,6 +159,8 @@ async function complete(
     state.event('publication_verified', { sample_id: existing.sample_id, path: existing.path });
     return existing;
   }
+  const pageStability = await verifyPageStability(state.candidate.path, metadata, state.candidate);
+  state.candidate.target_window_id = pageStability.target.window_id;
   const occlusions = verifyWindowChanges(metadata, state.candidate.window_changes);
   if (state.acceptedCount(state.task.name) >= state.task.target_count) {
     throw new Error('Task quota is already complete');

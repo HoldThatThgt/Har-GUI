@@ -9,6 +9,7 @@ import type { AgentProgressListener, UIContext } from '@midscene/core';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { CollectionAgent, CollectionDevice } from '../agent/device.js';
 import { RunState, type Observation } from '../agent/state.js';
+import { PAGE_PNG } from './agent-page-fixture.js';
 
 /** 创建隔离目录与无设备状态；临时截图只能生成在本测试目录内。 */
 function fixture(t: TestContext) {
@@ -66,6 +67,7 @@ function mockAgent(t: TestContext, device: CollectionDevice) {
   const agent = new CollectionAgent(device, { cache: false, generateReport: false,
     persistExecutionDump: false, autoPrintReportMsg: false, modelConfig: {
       MIDSCENE_MODEL_FAMILY: 'deepseek', MIDSCENE_MODEL_NAME: 'fixture', MIDSCENE_MODEL_API_KEY: 'unused',
+      MIDSCENE_MODEL_BASE_URL: 'https://model.fixture.invalid/v1',
     } });
   return { agent, emit: (phase: string, data: unknown = {}) => listener({
     scope: 'aiAct', phase, data, sequence: 1,
@@ -143,6 +145,29 @@ test('frozen acceptance screenshots respect an already aborted run', async (t) =
   f.state.controller.abort(new Error('Fixture cancelled'));
   await assert.rejects(f.device.screenshotBase64(), /Fixture cancelled/);
   assert.equal(f.device.latestObservation, undefined);
+});
+
+test('a frozen target crop reports its own dimensions without connecting to HDC', async (t) => {
+  const f = fixture(t);
+  const hdc = t.mock.method(f.device, 'getHdc', async () => { throw new Error('Unexpected device connection'); });
+  f.device.frozenScreenshot = `data:image/png;base64,${PAGE_PNG.toString('base64')}`;
+  assert.deepEqual(await f.device.size(), { width: 4, height: 3 });
+  assert.equal(hdc.mock.callCount(), 0);
+});
+
+test('the real SDK context parser uses only the frozen target crop without live window or HDC reads', async (t) => {
+  const f = fixture(t);
+  const hdc = t.mock.method(f.device, 'getHdc', async () => { throw new Error('Unexpected device connection'); });
+  const windows = t.mock.method(f.device, 'windows', async () => { throw new Error('Unexpected live window read'); });
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
+  f.device.frozenScreenshot = `data:image/png;base64,${PAGE_PNG.toString('base64')}`;
+  const { agent } = mockAgent(t, f.device);
+  const context = await agent.getUIContext('assert');
+  assert.deepEqual(context.shotSize, { width: 4, height: 3 });
+  assert.equal(hdc.mock.callCount(), 0);
+  assert.equal(windows.mock.callCount(), 0);
+  assert.equal(f.device.latestObservation, undefined);
+  assert.equal(f.state.observations.size, 0);
 });
 
 test('execution screenshots cannot replace the observation actually sent to the planning model', async (t) => {

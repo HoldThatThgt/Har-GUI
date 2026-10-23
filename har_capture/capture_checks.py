@@ -8,7 +8,6 @@ from PIL import Image, ImageChops
 
 from har_capture.hdc import fail
 from har_capture.sessions import SESSION_BLOCK, parse_sessions, pipe_values, section_value
-from har_capture.stability import comparison_layout
 
 
 def stable_digest(value: object) -> str:
@@ -17,9 +16,9 @@ def stable_digest(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def compare_screen_pixels(before: bytes, after: bytes, regions: tuple | list = ()) -> dict:
-    """@brief 比较内存中的首尾画面，禁止以容差吞掉真实内容变化。 @param before 首图。
-    @param after 末图。 @param regions 已核实的系统叶子。 @return 像素摘要和差异证据，不返回图片。
+def compare_screen_pixels(before: bytes, after: bytes) -> dict:
+    """@brief 记录全屏真实像素差异，不遮罩或按变化拒收。 @param before 首图。
+    @param after 末图。 @return 不含图片的差异事实。
     """
     with Image.open(io.BytesIO(before)) as source:
         first = source.convert("RGBA")
@@ -27,130 +26,52 @@ def compare_screen_pixels(before: bytes, after: bytes, regions: tuple | list = (
         second = source.convert("RGBA")
     if first.size != second.size:
         fail("Screen dimensions changed during collection")
-    difference = ImageChops.difference(first, second)
-    channels = difference.split()
+    channels = ImageChops.difference(first, second).split()
     combined = ImageChops.lighter(ImageChops.lighter(channels[0], channels[1]),
                                   ImageChops.lighter(channels[2], channels[3]))
-    raw_count, raw_bounds = sum(combined.histogram()[1:]), combined.getbbox()
-    raw_hashes = {"before_sha256": hashlib.sha256(first.tobytes()).hexdigest(),
-                  "after_sha256": hashlib.sha256(second.tobytes()).hexdigest()}
-    for region in regions:
-        bounds = tuple(region["bounds"])
-        combined.paste(0, bounds)
-        first.paste((0, 0, 0, 0), bounds)
-        second.paste((0, 0, 0, 0), bounds)
     bounds = combined.getbbox()
-    changed = bounds is not None
-    evidence = {"status": "failed" if changed else "verified", "method": "exact_rgba_pixels",
-                **raw_hashes, "compared_before_sha256": hashlib.sha256(first.tobytes()).hexdigest(),
-                "compared_after_sha256": hashlib.sha256(second.tobytes()).hexdigest(), "changed": changed,
-                "raw_changed_pixel_count": raw_count, "raw_changed_bounds": list(raw_bounds) if raw_bounds else None,
-                "declared_regions": [region["bounds"] for region in regions],
-                "changed_pixel_count": sum(combined.histogram()[1:]),
-                "changed_bounds": list(bounds) if bounds else None}
-    return evidence
+    return {"status": "observed", "method": "exact_rgba_pixels",
+            "before_sha256": hashlib.sha256(first.tobytes()).hexdigest(),
+            "after_sha256": hashlib.sha256(second.tobytes()).hexdigest(), "changed": bounds is not None,
+            "width": first.width, "height": first.height,
+            "changed_pixel_count": sum(combined.histogram()[1:]),
+            "changed_bounds": list(bounds) if bounds else None}
 
 
-def compare_capture_states(before: dict, after: dict, stability: dict | None = None) -> dict:
-    """@brief 验证采集前后窗口与可见页面一致。 @param before 前态。 @param after 后态。
-    @param stability 已验证的显式系统叶子范围。 @return 完整比较证据。
+def compare_capture_states(before: dict, after: dict) -> dict:
+    """@brief 记录完整窗口与控件树变化，不将相等性当作页面语义。 @param before 前态。
+    @param after 后态。 @return 可离线重算的原始结构差异。
     """
-    compared_before, compared_after = dict(before), dict(after)
-    if stability is not None:
-        compared_before["layout"] = comparison_layout(before["layout"], stability)
-        compared_after["layout"] = comparison_layout(after["layout"], stability)
-    checks = {name: {"before_sha256": stable_digest(canonical_state(compared_before[name])),
-                     "after_sha256": stable_digest(canonical_state(compared_after[name])),
-                     "raw_before_sha256": stable_digest(before[name]), "raw_after_sha256": stable_digest(after[name])}
+    checks = {name: {"before_sha256": stable_digest(before[name]),
+                     "after_sha256": stable_digest(after[name]), "changed": before[name] != after[name]}
               for name in ("windows", "layout")}
-    changed = [name for name, value in checks.items() if value["before_sha256"] != value["after_sha256"]]
-    if changed:
-        fail(f"Capture state changed during collection: {', '.join(changed)}")
-    return {"atomic": False, "stable": True, "status": "verified",
-            "method": "bracketed_wms_and_accessibility", "checks": checks,
-            "canonicalization": {"rule_version": "uitest-semantic-state-v2",
-                "rules": ["Only attributes.blur empty and 0.00px represent the same default zero radius.",
-                          "Within each verified Web or XComponent host, rename positive treeIds by first occurrence.",
-                          "Preserve host identity, low 40-bit elementId, and namespace partitions; retain all text."],
-                "source": "https://github.com/openharmony/arkui_ace_engine/blob/"
-                          "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
-                          "adapter/ohos/osal/js_accessibility_manager.cpp",
-                "identity_source": "https://github.com/openharmony/accessibility/blob/"
-                    "3ffbe3513f07cb1df2bd98d74089582dff5eb33a/"
-                    "interfaces/innerkits/asacfwk/include/accessibility_system_ability_client.h#L207-L243",
-                "provider_source": "https://github.com/openharmony/arkui_ace_engine/blob/"
-                    "21b150e7bb1d5308846f8e5be8ef0482fb433315/"
-                    "adapter/ohos/osal/js_third_provider_interaction_operation.cpp#L309-L348"}}
+    return {"atomic": False, "status": "observed", "method": "raw_wms_and_accessibility", "checks": checks}
 
 
-def verify_pixel_receipt(pixels: dict, stability: dict) -> None:
-    """@brief 核验内存比较收据与重新推导的声明边界一致。 @param pixels 比较收据。
-    @param stability 从原始树及会话重新验证的系统叶子。
+def verify_pixel_receipt(pixels: dict, display: dict) -> None:
+    """@brief 核验差异统计的格式与内部一致性，不要求零差异。 @param pixels 像素统计。
+    @param display 画布尺寸。
     """
-    bounds = [region["bounds"] for region in stability["regions"]]
-    if (pixels.get("status") != "verified" or pixels.get("method") != "exact_rgba_pixels"
-            or pixels.get("changed") is not False or pixels.get("changed_pixel_count") != 0
-            or pixels.get("changed_bounds") is not None or pixels.get("declared_regions") != bounds
-            or pixels.get("compared_before_sha256") != pixels.get("compared_after_sha256")):
-        fail("Capture pixel consistency has not passed exact comparison outside declared system leaves")
-    for key in ("before_sha256", "after_sha256", "compared_before_sha256", "compared_after_sha256"):
+    if (pixels.get("status") != "observed" or pixels.get("method") != "exact_rgba_pixels"
+            or any(pixels.get(key) != display[key] for key in ("width", "height"))):
+        fail("Capture pixel observation does not match its display")
+    for key in ("before_sha256", "after_sha256"):
         value = pixels.get(key)
         if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-            fail("Capture pixel consistency has an invalid image digest")
-    count = pixels.get("raw_changed_pixel_count")
-    area = sum((right - left) * (bottom - top) for left, top, right, bottom in bounds)
-    raw_equal = pixels["before_sha256"] == pixels["after_sha256"]
-    if (type(count) is not int or not 0 <= count <= area or raw_equal != (count == 0)
-            or (pixels.get("raw_changed_bounds") is None) != (count == 0)):
-        fail("Capture raw pixel differences conflict with the declared comparison evidence")
-    if not bounds and (pixels["before_sha256"] != pixels["compared_before_sha256"]
-                       or pixels["after_sha256"] != pixels["compared_after_sha256"]):
-        fail("Capture without stability regions must compare every raw pixel")
-
-
-def native_identity(attributes: dict) -> tuple | None:
-    """@brief 验证 UITest 的窗口与原生拼接身份格式。 @param attributes 原始节点属性。
-    @return 窗口、注册树和低位元素标识；格式不成立时不应用语义规范化。
-    """
-    identity, host = attributes.get("accessibilityId"), attributes.get("hostWindowId")
-    if not all(isinstance(value, str) and value.isascii() and value.isdecimal() for value in (identity, host)):
-        return None
-    if not 0 <= int(identity) < (1 << 53) or int(host) <= 0 or attributes.get("hashcode") != f"{host}:{identity}":
-        return None
-    return host, int(identity) >> 40, int(identity) & ((1 << 40) - 1)
-
-
-def canonical_state(value: object, scope: tuple | None = None) -> object:
-    """@brief 按宿主规范注册树身份，保留树分区、元素身份及全部页面属性。 @param value 原始状态。
-    @param scope 当前宿主窗口、宿主树标识及子树顺序映射。 @return 不改写原始内容、几何或顺序的比较副本。
-    """
-    if isinstance(value, list):
-        return [canonical_state(item, scope) for item in value]
-    if not isinstance(value, dict):
-        return value
-    result = {key: canonical_state(item) for key, item in value.items() if key != "children"}
-    attributes = result.get("attributes")
-    if isinstance(attributes, dict):
-        if attributes.get("blur") in ("", "0.00px"):
-            attributes["blur"] = "0.00px"
-        identity = native_identity(attributes)
-        for key in ("accessibilityId", "hashcode"):
-            if key in attributes:
-                attributes[key] = {"raw": attributes[key]}
-        boundary = attributes.get("type") in ("Web", "XComponent")
-        if scope is not None and attributes.get("hostWindowId") != scope[0]:
-            scope = None
-        if (not boundary and scope is not None and identity is not None
-                and identity[0] == scope[0] and identity[1] > 0 and identity[1] != scope[1]):
-            host, tree_id, element_id = identity
-            ordinal = scope[2].setdefault(tree_id, len(scope[2]) + 1)
-            attributes["accessibilityId"] = {"tree_id": ordinal, "element_id": element_id}
-            attributes["hashcode"] = {"window_id": host, "tree_id": ordinal, "element_id": element_id}
-        if boundary:
-            scope = (identity[0], identity[1], {}) if identity is not None else None
-    if "children" in value:
-        result["children"] = canonical_state(value["children"], scope)
-    return result
+            fail("Capture pixel observation has an invalid image digest")
+    count, bounds = pixels.get("changed_pixel_count"), pixels.get("changed_bounds")
+    if (type(count) is not int or not 0 <= count <= display["width"] * display["height"]
+            or type(pixels.get("changed")) is not bool or pixels["changed"] != (count > 0)
+            or (pixels["before_sha256"] == pixels["after_sha256"]) != (count == 0)
+            or (bounds is None) != (count == 0)):
+        fail("Capture pixel differences conflict with their observation")
+    if bounds is not None:
+        if (not isinstance(bounds, list) or len(bounds) != 4 or any(type(value) is not int for value in bounds)):
+            fail("Capture pixel observation has invalid difference bounds")
+        left, top, right, bottom = bounds
+        if not (0 <= left < right <= display["width"] and 0 <= top < bottom <= display["height"]
+                and count <= (right - left) * (bottom - top)):
+            fail("Capture pixel difference bounds are outside its display")
 
 
 def session_visibility(text: str) -> dict[int, dict]:

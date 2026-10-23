@@ -25,29 +25,15 @@ bundle_names = ["com.huawei.hmos.email"]
 privacy = { enabled = true, reason = "等待在真实页面核实正文容器标识后独立打码" }
 ```
 
-`dataset.stability_regions` 可选，省略时为 `[]`：默认比较整屏像素，任何像素变化都会拒收。
-时钟、日期和 WiFi 图标等系统动态叶子若确实需要排除，必须在采集前用包名和资源标识明确声明。
-以下是当前设备观察到的标识示例，应先在目标设备核实；核心没有预置这些标识：
+内容稳定性按[目标页面稳定性](target-page-stability.md)判断。
+`Capture` 必须明确 `target_window_id` 和 `target_bundle_name`；同应用多窗口不猜测焦点或层级。
+像素、全量窗口和树差异仅作诊断；内容拒收只针对目标换页或主体空白。
+首尾目标裁图暂存于内存，模型结论写入 `page-stability.json`，并随 WMS 导出。
+`unobservable` 明确表示观察不足，本身不拒收，也不构成已证实稳定；最终图片验收仍然独立。
 
-```toml
-[dataset]
-root = "./output/my-task/dataset"
-canvas = { width = 3120, height = 2080 }
-stability_regions = [
-  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_time" },
-  { bundle_name = "com.ohos.sceneboard", resource_id = "ClockComponent-clockIcon_Text_date" },
-  { bundle_name = "com.ohos.sceneboard", resource_id = "plugin_image_plugin_wifi_icon" }
-]
-```
-
-每项只接受非空 `bundle_name` 和 `resource_id`。采集器按实际系统窗口与控件树定位，
-拒绝应用节点、非叶子容器和无法确认的选择器。规则只作用于稳定性比较：忽略指定叶子矩形内的像素，
-以及该叶子的 `text`、`originalText`；其他区域与属性继续严格检查。
-保存的截图、原始控件树和正式树不因此改写，规则也不替代截图打码。
-
-采集时的声明保存在 `metadata.stability.rules`，在线验收和离线 `finalize` 都传入项目的同一声明。
-准备五件套时发现规则不一致会直接拒绝，不能在采集后扩大排除范围使旧样本过关。
-规则变更需要重新采集，已有数据集还须遵守配置身份约束；不迁移或改写旧交付。
+`dataset.stability_regions` 省略时为 `[]`，只接受 `bundle_name` 和 `resource_id` 声明，
+随原项目及 `metadata.stability.rules` 保存以核对来源。它不再屏蔽像素，不授予变化豁免，
+也不要求系统叶子的匹配数量、路径、边界或文字相等。原始截图和树保持不变。
 
 `privacy.enabled` 是必填布尔开关，`reason` 是必填原因：
 
@@ -96,9 +82,10 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 ```
 
 `finalize` 无需设备连接，只使用保存的原始证据与最终 PNG。它先恢复未完成的文件移动，
-重新核验全部原始文件摘要、双树与几何文件引用、窗口覆盖和首尾一致性，再准备五件套。
-视觉模型只验收按开关处理后的保存图片，关闭时就是原图；验收通过后原子发布，配额才增加。直接由 `capture.py`
-生成的采集没有 `candidate.json`，需要额外传 `--target-bundle` 明确主任务应用。
+重新核验全部原始文件摘要、双树与几何文件引用、窗口覆盖和观测收据，再准备五件套。
+未发布候选必须已有绑定本次目标和观测摘要的页面判断收据；没有末图时不能补造结论。
+最终图片的视觉验收只使用按开关处理后的保存图片，关闭时就是原图；验收通过后原子发布，配额才增加。
+直接由 `capture.py` 生成的原始采集没有自动页面判断收据，不能仅增加 `--target-bundle` 追认为正式样本。
 已有 agent 候选则继续使用其中的任务、目标应用与窗口变化证据，不重做导航。
 
 ```mermaid

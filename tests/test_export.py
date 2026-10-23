@@ -10,13 +10,16 @@ from unittest.mock import patch
 from har_capture.export import classify_window_mode, delivery_payloads, sample_prefix, write_delivery
 from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
-from tests.support import png_bytes
+from har_capture.page_observation import observe_page
+from har_capture.stability import observe_stability
+from har_capture.privacy import atomic_json
+from tests.support import png_bytes, save_page_stability
 
 
 def window(window_id=1, bundle="app.test", x=0, width=4, window_type=1, system=False):
     """构造可自解释的匿名窗口记录。"""
     return {"window_id": window_id, "bundle_name": bundle, "is_system": system, "window_type": window_type,
-            "window_mode": 102, "z_order": window_id, "display_id": 0,
+            "window_mode": 102, "z_order": window_id, "display_id": 0, "process_id": 100 + window_id,
             "bounding_box": {"x": x, "y": 0, "width": width, "height": 6},
             "screen_bounds": {"x": x, "y": 0, "width": width, "height": 6},
             "transform": {"offset_x": 0, "offset_y": 0, "scale_x": 1, "scale_y": 1},
@@ -41,8 +44,9 @@ class ExportTests(unittest.TestCase):
                          "window_inventory": copy.deepcopy(self.windows), "device": {"model": "anonymous"},
                          "started_at": "2026-10-22T10:00:00Z", "finished_at": "2026-10-22T10:00:01Z",
                          "coverage": {"status": "verified", "covered_window_ids": [1, 2, 3]},
-                         "consistency": {"status": "verified", "atomic": False},
-                         "stability": {"status": "verified", "rules": [], "regions": []},
+                         "consistency": {"status": "observed", "atomic": False},
+                         "stability": observe_stability([]),
+                         "display": {"id": 0, "width": 8, "height": 6},
                          "privacy": {"status": "disabled", "enabled": False, "regions": [],
                                      "before_sha256": file_info(self.directory / "screenshot.png")["sha256"],
                                      "after_sha256": file_info(self.directory / "screenshot.png")["sha256"]},
@@ -50,6 +54,17 @@ class ExportTests(unittest.TestCase):
                              ("screenshot", "screenshot.png"), ("accessibility", "accessibility.json"))}}
         self.options = {"app": "示例", "page_id": "page", "scene": "文档页面", "state_id": "state",
                         "canvas": {"width": 8, "height": 6}}
+        for filename in ("windows.txt", "layout.json", "closing-windows.txt", "closing-layout.json"):
+            (self.directory / filename).write_text("{}", encoding="utf-8")
+        for key, filename in (("windows", "windows.txt"), ("layout", "layout.json"),
+                              ("closing_windows", "closing-windows.txt"), ("closing_layout", "closing-layout.json")):
+            self.metadata["files"][key] = file_info(self.directory / filename)
+        page = observe_page(self.directory, (png_bytes(), png_bytes()), (self.windows[0], self.windows[0]),
+                            self.metadata["display"])
+        atomic_json(self.directory / "page-observation.json", page["receipt"])
+        self.metadata["files"]["page_observation"] = file_info(self.directory / "page-observation.json")
+        self.metadata["page_stability"] = save_page_stability(self.directory, self.metadata)
+        atomic_json(self.directory / "privacy.json", self.metadata["privacy"])
 
     def normalized(self, evidence, current, canvas, scenes):
         return {"window_id": current["window_id"], "bundle_name": current["bundle_name"],

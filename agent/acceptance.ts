@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { CollectionAgent, CollectionDevice } from './device.js';
 import { sameScreenBounds, type RunState, type WindowInfo } from './state.js';
 import { bridge } from './bridge.js';
+import { assessPageStability } from './page-stability.js';
 
 /** @brief 窗口变更验收需要的身份、屏幕矩形和层级事实。 */
 type WindowGeometry = Pick<WindowInfo, 'window_id' | 'process_id' | 'bundle_name' | 'ui_node_id'
@@ -93,7 +94,7 @@ export function verifyWindowChanges(
   return [...relationships.values()].map((occlusion) => verifyOcclusion(metadata.windows, occlusion));
 }
 
-/** @brief 核清全部窗口的双树覆盖及首尾页面一致性，不把同批 ID 当成原子快照。 */
+/** @brief 核清全部窗口的双树覆盖及首尾观察记录，不把像素变化当成页面跳转。 */
 function verifyCoverage(metadata: any): void {
   const coverage = metadata.coverage;
   if (coverage?.status !== 'verified' || coverage.unresolved_windows?.length !== 0) {
@@ -107,10 +108,7 @@ function verifyCoverage(metadata: any): void {
     || metadata.foreground_window_ids_without_tree.some((id: number) => !excluded.has(id))) {
     throw new Error('Window inventory contains unaccounted or conflicting tree coverage');
   }
-  if (metadata.consistency?.status !== 'verified' || metadata.consistency.stable !== true
-    || metadata.consistency.pixels?.status !== 'verified') {
-    throw new Error('Capture window, page, and pixel stability are not verified');
-  }
+  if (metadata.consistency?.status !== 'observed') throw new Error('Capture closing observation is missing');
 }
 
 /** @brief 验证原始证据摘要、单张截图和全窗口覆盖，为独立打码与导出提供输入。 */
@@ -177,28 +175,34 @@ export async function verifySavedScreenshot(
 export async function acceptCandidate(
   state: RunState, device: CollectionDevice, agent: CollectionAgent, modelUsage: () => object,
 ) {
-  const candidate = state.candidate;
-  if (!candidate) throw new Error('Agent finished without calling Capture');
-  const metadata = await verifyCapture(candidate.path);
-  const windowOcclusions = verifyWindowChanges(metadata, candidate.window_changes);
-  const prepared = await bridge(device.connection, { operation: 'prepare_delivery', directory: candidate.path,
-    options: { app: state.task.app, page_id: candidate.page_name, scene: state.task.scene,
-      state_id: candidate.capture_id, canvas: state.config.project.dataset.canvas,
-      stability_regions: state.config.project.dataset.stability_regions }, privacy: state.task.privacy,
-  }, state.signal);
-  const accepted = await verifySavedScreenshot(state, device, agent, prepared.manifest);
-  const acceptance = { task_name: state.task.name, target_bundle_name: candidate.target_bundle_name,
-    pass: true, export: prepared.manifest, accepted_screenshot_sha256: accepted.accepted_screenshot_sha256,
-    model_usage: modelUsage() };
-  const evidence = { ...candidate, acceptance: accepted.verdict, window_occlusions: windowOcclusions,
-    accepted_screenshot_sha256: accepted.accepted_screenshot_sha256, model_usage: acceptance.model_usage };
-  await writeFile(path.join(candidate.path, 'sample.json'), JSON.stringify(evidence, null, 2) + '\n');
-  const published = await bridge(device.connection, { operation: 'publish_sample', root: state.config.datasetPath,
-    identity: state.datasetIdentity, directory: prepared.manifest.path, acceptance,
-    evidence_directory: candidate.path,
-  }, state.signal);
-  state.accepted.push(published);
-  state.event('sample_published', { sample_id: published.sample_id, path: published.path });
-  state.save('running');
-  return published;
+  try {
+    const candidate = state.candidate;
+    if (!candidate) throw new Error('Agent finished without calling Capture');
+    const metadata = await verifyCapture(candidate.path);
+    const windowOcclusions = verifyWindowChanges(metadata, candidate.window_changes);
+    await assessPageStability(state, device, agent, metadata);
+    const prepared = await bridge(device.connection, { operation: 'prepare_delivery', directory: candidate.path,
+      options: { app: state.task.app, page_id: candidate.page_name, scene: state.task.scene,
+        state_id: candidate.capture_id, canvas: state.config.project.dataset.canvas,
+        stability_regions: state.config.project.dataset.stability_regions }, privacy: state.task.privacy,
+    }, state.signal);
+    const accepted = await verifySavedScreenshot(state, device, agent, prepared.manifest);
+    const acceptance = { task_name: state.task.name, target_bundle_name: candidate.target_bundle_name,
+      pass: true, export: prepared.manifest, accepted_screenshot_sha256: accepted.accepted_screenshot_sha256,
+      model_usage: modelUsage() };
+    const evidence = { ...candidate, acceptance: accepted.verdict, window_occlusions: windowOcclusions,
+      accepted_screenshot_sha256: accepted.accepted_screenshot_sha256, model_usage: acceptance.model_usage };
+    await writeFile(path.join(candidate.path, 'sample.json'), JSON.stringify(evidence, null, 2) + '\n');
+    const published = await bridge(device.connection, { operation: 'publish_sample', root: state.config.datasetPath,
+      identity: state.datasetIdentity, directory: prepared.manifest.path, acceptance,
+      evidence_directory: candidate.path,
+    }, state.signal);
+    state.accepted.push(published);
+    state.event('sample_published', { sample_id: published.sample_id, path: published.path });
+    state.save('running');
+    return published;
+  } finally {
+    device.pageObservation = undefined;
+    device.frozenScreenshot = undefined;
+  }
 }

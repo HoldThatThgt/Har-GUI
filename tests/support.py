@@ -21,6 +21,22 @@ def synthetic_screen_geometry(_directory, metadata):
         window["screen_bounds_source"] = {"method": "SyntheticUnitFixture"}
 
 
+def synthetic_closing_geometry(_hdc, windows):
+    """隔离独立几何实现的测试使用已声明的同批屏幕外框。"""
+    return windows
+
+
+def save_page_stability(directory, metadata, decision="same_page", evidence="Synthetic target comparison"):
+    """以真实观测摘要生成模型替身收据，不触发任何模型或设备。"""
+    from har_capture.privacy import atomic_json
+    observation = json.loads((directory / "page-observation.json").read_bytes())
+    receipt = {"rule_version": 1, "capture_id": metadata["capture_id"], "target": observation["target"],
+               "observation_sha256": metadata["files"]["page_observation"]["sha256"],
+               "decision": decision, "evidence": evidence}
+    atomic_json(directory / "page-stability.json", receipt)
+    return receipt
+
+
 def window_node(window_id="92", bundle="com.example.settings", z_index="9999"):
     """返回保留窗口归属字段的最小控件树。"""
     return {

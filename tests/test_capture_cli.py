@@ -1,4 +1,4 @@
-"""验证独立采集命令读取项目声明，默认仍进行整屏严格比较。"""
+"""验证独立采集命令读取来源声明，并只打印正式目录。"""
 
 import contextlib
 import io
@@ -21,9 +21,20 @@ class CaptureCliTests(unittest.TestCase):
                 with patch("sys.argv", ["capture.py", "--device", "device", *arguments]), \
                         patch.object(cli, "Hdc") as connection, patch.object(cli, "capture") as collector, \
                         contextlib.redirect_stdout(io.StringIO()):
-                    collector.return_value = Path(directory)
+                    collector.return_value = {"path": Path(directory), "page_observation": None}
                     self.assertEqual(cli.main(), 0)
-                collector.assert_called_once_with(connection.return_value, Path("captures"), 0, rules)
+                collector.assert_called_once_with(connection.return_value, Path("captures"), 0, rules, None)
+
+    def test_explicit_target_is_paired_and_transient_images_never_reach_stdout(self):
+        output = io.StringIO()
+        with patch("sys.argv", ["capture.py", "--target-window-id", "92", "--target-bundle-name", "app.test"]), \
+                patch.object(cli, "Hdc") as connection, patch.object(cli, "capture") as collector, \
+                contextlib.redirect_stdout(output):
+            collector.return_value = {"path": Path("saved"), "page_observation": {"before_image": "secret-image"}}
+            self.assertEqual(cli.main(), 0)
+        collector.assert_called_once_with(connection.return_value, Path("captures"), 0, [],
+                                          {"window_id": 92, "bundle_name": "app.test"})
+        self.assertEqual(output.getvalue().strip(), "saved")
 
     def test_project_does_not_accept_arbitrary_pixel_rectangles(self):
         with tempfile.TemporaryDirectory() as directory:

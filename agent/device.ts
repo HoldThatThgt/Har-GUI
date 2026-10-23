@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { HarmonyAgent, HarmonyDevice, type HarmonyAgentOpt } from '@midscene/harmony';
 import type { AgentProgressEvent, AiActProgressData, DeviceAction, ServiceAction } from '@midscene/core';
+import { imageInfoOfBase64 } from '@midscene/shared/img';
 import { bridge, type DeviceOptions } from './bridge.js';
+import type { PageObservation } from './page-stability.js';
 import { windowSchema, type Observation, type RunState } from './state.js';
 
 /** @brief 独立清理设备文件、主机文件和目录，收集错误而不跳过后续清理。 */
@@ -33,6 +35,8 @@ export class CollectionDevice extends HarmonyDevice {
   /** 当前规划轮真正发送给模型的截图对应观察，后续执行截图不能覆盖它。 */
   planningObservation?: Observation;
   frozenScreenshot?: string;
+  /** 当前候选的成对目标裁图，仅保留到语义检查结束。 */
+  pageObservation?: PageObservation;
 
   /** @brief 绑定明确的设备和运行状态。 */
   constructor(readonly connection: DeviceOptions, readonly state: RunState) {
@@ -70,6 +74,12 @@ export class CollectionDevice extends HarmonyDevice {
   async windows() {
     const result = await bridge(this.connection, { operation: 'read_windows' }, this.state.signal);
     return windowSchema.array().parse(result.windows);
+  }
+
+  /** @brief 静态裁图检查使用图片自身尺寸，不读取设备画布或放大目标窗口。 */
+  override async size() {
+    if (this.frozenScreenshot) return imageInfoOfBase64(this.frozenScreenshot);
+    return super.size();
   }
 
   /** @brief 临时观察不进入数据集；无论成功失败都清理设备和主机临时文件。 */

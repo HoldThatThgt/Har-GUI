@@ -10,6 +10,7 @@ from har_capture.privacy import atomic_json, verify_privacy_receipt
 from har_capture.system_accessibility import read_window_accessibility
 from har_capture.stability import verify_project_rules
 from har_capture.scene_evidence import load_scene_evidence
+from har_capture.page_observation import verify_page_stability
 
 
 def write_json(path: Path, value: object) -> None:
@@ -55,9 +56,12 @@ def verify_export_inputs(evidence: Path, metadata: dict, options: dict) -> dict:
     if metadata.get("status") != "complete":
         fail("Cannot export an incomplete capture")
     verify_project_rules(metadata, options)
-    for key in ("coverage", "consistency"):
-        if metadata.get(key, {}).get("status") != "verified":
-            fail(f"Cannot export without verified {key}")
+    if metadata.get("coverage", {}).get("status") != "verified":
+        fail("Cannot export without verified coverage")
+    if metadata.get("consistency", {}).get("status") != "observed":
+        fail("Cannot export without raw capture observations")
+    if verify_page_stability(evidence, metadata) != metadata.get("page_stability"):
+        fail("Cannot export without the bound target page receipt")
     verify_privacy_receipt(metadata.get("privacy", {}))
     canvas = options.get("canvas")
     if (not isinstance(canvas, dict) or set(canvas) != {"width", "height"}
@@ -143,6 +147,7 @@ def delivery_payloads(evidence: Path, metadata: dict, options: dict) -> dict:
            "started_at": metadata["started_at"], "finished_at": metadata["finished_at"],
            "sample": {key: options[key] for key in ("app", "page_id", "scene", "state_id")},
            "consistency": metadata["consistency"], "coverage": metadata["coverage"], "stability": metadata["stability"],
+           "page_stability": metadata["page_stability"],
            "privacy": metadata["privacy"], "checks": dict.fromkeys(
                ("coverage", "coordinates", "privacy", "consistency"), "pass")}
     return {"tree": {**common, "windows": all_accessibility},

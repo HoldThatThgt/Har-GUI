@@ -72,7 +72,7 @@ class VisualizationTests(unittest.TestCase):
         self.addCleanup(self.template_patch.stop)
 
     def new_capture(self, payloads=None, command_outputs=None):
-        return capture(fake_hdc(payloads, command_outputs=command_outputs), self.output)
+        return capture(fake_hdc(payloads, command_outputs=command_outputs), self.output)["path"]
 
     def new_system_capture(self):
         return self.new_capture({"arkui_response_92": raw_system_arkui()},

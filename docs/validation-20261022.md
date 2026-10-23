@@ -12,7 +12,7 @@
 | Overlay 结构节点 | 非布局 `IfElse` 不输出布局节点的 `LastParentId`；按官方 `Children` 父边证据核验，布局节点继续核验父身份、渲染投影和裁剪 | `48b9d8a` |
 
 比较规则版本为 `uitest-semantic-state-v2`，不转换旧收据。
-身份协议、离线样本和海泰标签文字的剩余歧义见[无障碍树稳定性比较](accessibility-stability.md)。
+本文记录当时版本的历史验证，不代表当前内容稳定性规则；现行行为见[目标页面稳定性](target-page-stability.md)。
 
 备忘录本次新导出的原文位于 `el5/base/haps/NotepadPhone/files/arkui.dump`，
 首次诊断取得 873 个 ArkUI 节点和独立原生几何树；最大化后的整帧取得该窗口 971 个 ArkUI 节点。
