@@ -284,6 +284,7 @@ class CoordinateTests(unittest.TestCase):
         for node_id in (3, 4):
             raw = {"attributes": {"ID": str(node_id), "type": "IfElse"}, "raw": "", "children": [
                 {"attributes": {"ID": "-1", "type": "__Recycle__"}, "raw": "", "children": []}]}
+            raw["children"][0]["attributes"]["Parent"] = raw["attributes"]["type"]
             native = {"$ID": node_id, "$type": "IfElse", "$children": [{"$ID": -1, "$type": "__Recycle__"}]}
             args[0]["children"].append(raw)
             args[3]["arkui_geometry"]["$children"].append(native)

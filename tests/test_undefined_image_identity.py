@@ -324,7 +324,8 @@ class UndefinedImageIdentityTests(unittest.TestCase):
         overlay = column["children"][0]
         overlay["attributes"]["LastParentId"] = "-1"
         overlay["source_attributes"] = dict(overlay["attributes"])
-        wrapper = {"attributes": {"ID": "-1", "type": "__Recycle__", "Description": "Children"},
+        wrapper = {"attributes": {"ID": "-1", "type": "__Recycle__", "Description": "Children",
+                                  "Parent": column["attributes"]["type"]},
                    "raw": "", "children": [overlay], "source_line": 5}
         column["children"] = [wrapper]
         args[3]["arkui_geometry"]["$children"][0]["$children"] = [
