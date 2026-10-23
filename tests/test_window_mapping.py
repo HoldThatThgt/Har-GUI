@@ -171,6 +171,51 @@ def no_draw_leaf_fixture():
     return args
 
 
+def mixed_leaf_fixture(width=-1, height=11, structural_children=False):
+    """@brief 构造符号一致、原生端点闭合且 RS 明确无绘制的混合尺寸叶节点。"""
+    args = mapping_fixture()
+    leaf = args[0]["children"][0]["children"][0]
+    local = f"RectT (10.00, 20.00) - [{width:.2f} x {height:.2f}]"
+    leaf["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
+    native = args[3]["arkui_geometry"]["$children"][0]["$children"][0]
+    left, right = min(10, 10 + width), max(10, 10 + width)
+    top, bottom = min(20, 20 + height), max(20, 20 + height)
+    native["$rect"] = f"[{left:.2f},{top:.2f}],[{right:.2f},{bottom:.2f}]"
+    bounds = f"10 20 {width:g} {height:g}"
+    args[3]["render_tree"] = args[3]["render_tree"].replace(
+        "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
+        f"Bounds[{bounds}] Frame[{bounds}], hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]")
+    if structural_children:
+        for node_id in (5, 6, 7):
+            attrs = {"ID": str(node_id), "type": "IfElse"}
+            leaf["children"].append({"attributes": attrs, "source_attributes": dict(attrs),
+                                     "children": [], "source_line": node_id + 1, "raw": ""})
+        native["$children"] = [{"$ID": node_id, "$type": "IfElse"} for node_id in (5, 6, 7)]
+    return args
+
+
+def transformed_mixed_leaf_fixture():
+    """@brief 将带符号端点依次经过父缩放和叶缩放、中心点、平移，提供独立原生矩形。"""
+    args = mixed_leaf_fixture()
+    parent = args[0]["children"][0]
+    parent_rect = "RectT (20.00, 30.00) - [200.00 x 100.00]"
+    parent["attributes"].update({"FrameRect": parent_rect, "PaintRect without transform": parent_rect,
+                                 "scale(x,y)": "2,0.5", "Center": "x:0.5 y:0.5"})
+    parent["children"][0]["attributes"].update({"scale(x,y)": "2,0.5", "Center": "x:0.25 y:0.75",
+                                              "translate(x,y)": "3,-2"})
+    native = args[3]["arkui_geometry"]["$children"][0]
+    native["$rect"] = "[-80.00,55.00],[320.00,105.00]"
+    native["$children"][0]["$rect"] = "[-57.50,66.06],[-53.50,68.81]"
+    args[3]["render_tree"] = args[3]["render_tree"].replace(
+        "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
+        "CANVAS_NODE[103], Properties: Bounds[20 30 200 100] Frame[20 30 200 100], "
+        "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
+    args[3]["render_tree"] = args[3]["render_tree"].replace(
+        "hasChildrenDrawContent: 0, OtherModifiers:[]", "hasChildrenDrawContent: 0, "
+        "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2]]")
+    return args
+
+
 class WindowMappingTests(unittest.TestCase):
     def assert_failed(self, args, code=None):
         with self.assertLogs(level="ERROR"):
@@ -357,17 +402,127 @@ class WindowMappingTests(unittest.TestCase):
             "hasChildrenDrawContent: 0, OtherModifiers:[]")
         self.assert_failed(args)
 
-    def test_mixed_negative_and_positive_dimensions_do_not_qualify_as_no_draw_unlaid_geometry(self):
-        args = mapping_fixture()
+    def test_noncanonical_mixed_negative_dimensions_still_require_refusal(self):
+        for width, height in ((-2, 11), (-0.5, 11), (11, -2), (11, -0.5)):
+            with self.subTest(width=width, height=height):
+                self.assert_failed(mixed_leaf_fixture(width, height))
+
+    def test_mixed_sentinel_dimensions_preserve_signed_endpoints_and_empty_syntax_children(self):
+        cases = [(-1, 11, False, (211.190138, 17.53364, 0.876682, 9.643502)),
+                 (-1, 38, True, (211.190138, 17.53364, 0.876682, 33.313916)),
+                 (11, -1, False, (212.06682, 16.656958, 9.643502, 0.876682)),
+                 (38, -1, True, (212.06682, 16.656958, 33.313916, 0.876682))]
+        for width, height, syntax, expected in cases:
+            with self.subTest(width=width, height=height, syntax=syntax):
+                args = mixed_leaf_fixture(width, height, syntax)
+                before = copy.deepcopy(args)
+                result = normalize_arkui(*args)
+                self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                                 result["coordinate_validation"]["issues"])
+                node = result["children"][0]["children"][0]
+                geometry = node["geometry"]
+                self.assertEqual(geometry["render_state"], "not_rendered")
+                self.assertFalse(geometry["rendered"])
+                for key, value in zip(("x", "y", "width", "height"), expected):
+                    self.assertAlmostEqual(geometry["screen_bounds"][key], value, places=5)
+                self.assertEqual(len(node["children"]), 3 if syntax else 0)
+                if syntax:
+                    self.assertTrue(all(child["geometry"]["status"] == "not_applicable"
+                                        for child in node["children"]))
+                self.assertEqual(args, before)
+
+    def test_mixed_geometry_uses_paint_rect_without_rewriting_different_frame_rect(self):
+        args = mixed_leaf_fixture(-1, 38, True)
         leaf = args[0]["children"][0]["children"][0]
-        local = "RectT (10.00, 20.00) - [-1.00 x 100.00]"
-        leaf["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
-        args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[9.00,20.00],[10.00,120.00]"
-        args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
-            "Bounds[10 20 -1 100] Frame[10 20 -1 100], hasDrawContent: 0, "
-            "hasChildrenDrawContent: 0, OtherModifiers:[]")
+        leaf["attributes"]["FrameRect"] = "RectT (10.40, 20.00) - [-1.00 x 38.00]"
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                         result["coordinate_validation"]["issues"])
+        node = result["children"][0]["children"][0]
+        self.assertEqual(node["attributes"]["FrameRect"], leaf["attributes"]["FrameRect"])
+        self.assertAlmostEqual(node["geometry"]["screen_bounds"]["x"], 211.190138, places=5)
+
+    def test_mixed_no_draw_requires_real_rs_leaf_flags_and_matching_bounds_and_frame(self):
+        changes = [("hasDrawContent: 0, ", ""), ("hasChildrenDrawContent: 0, ", ""),
+                   ("hasDrawContent: 0", "hasDrawContent: 1"),
+                   ("hasChildrenDrawContent: 0", "hasChildrenDrawContent: 1"),
+                   ("hasDrawContent: 0,", "hasDrawContent: 0, hasDrawContent: 1,"),
+                   ("hasChildrenDrawContent: 0,", "hasChildrenDrawContent: 0, hasChildrenDrawContent: 0,"),
+                   ("Bounds[10 20 -1 11]", "Bounds[10 20 1 11]"),
+                   ("Frame[10 20 -1 11]", "Frame[10 20 1 11]"),
+                   ("Frame[10 20 -1 11]", "Frame[10 20 -1 11.2]"),
+                   ("Bounds[10 20 -1 11]", "Bounds[10 20 -1 11.2]")]
+        for original, replacement in changes:
+            with self.subTest(replacement=replacement):
+                args = mixed_leaf_fixture(structural_children=True)
+                args[3]["render_tree"] = args[3]["render_tree"].replace(original, replacement, 1)
+                self.assert_failed(args)
+        args = mixed_leaf_fixture(structural_children=True)
+        args[3]["render_tree"] += render_line(6, "CANVAS_NODE", 105, "0 0 1 1", "OtherModifiers:[]")
         self.assert_failed(args)
+
+    def test_mixed_dimensions_keep_native_endpoint_order_and_independent_projection_checks(self):
+        for bounds in ("[10.00,20.00],[9.00,31.00]", "[10.00,20.00],[11.00,31.00]"):
+            with self.subTest(bounds=bounds):
+                args = mixed_leaf_fixture()
+                args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = bounds
+                self.assert_failed(args)
+
+    def test_mixed_dimensions_keep_signed_ancestor_scale_pivot_and_translation(self):
+        args = transformed_mixed_leaf_fixture()
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                         result["coordinate_validation"]["issues"])
+        geometry = result["children"][0]["children"][0]["geometry"]
+        expected = {"x": 152.890785, "y": 57.915804625, "width": 3.506728, "height": 2.4108755}
+        for key, value in expected.items():
+            self.assertAlmostEqual(geometry["screen_bounds"][key], value, places=5)
+        for original, replacement in (("Scale:[x:2 y:0.5], Pivot:[x:0.25", "Scale:[x:-2 y:0.5], Pivot:[x:0.25"),
+                                      ("Pivot:[x:0.25 y:0.75]", "Pivot:[x:0.5 y:0.75]"),
+                                      ("Translate:[x:3 y:-2]", "Translate:[x:4 y:-2]")):
+            changed = copy.deepcopy(args)
+            changed[3]["render_tree"] = changed[3]["render_tree"].replace(original, replacement)
+            self.assert_failed(changed)
+
+    def test_mixed_no_draw_does_not_bypass_unsupported_local_or_ancestor_modifiers(self):
+        for modifier in ("Skew:[x:1 y:0]", "Rotation:[1]", "CustomClipPath:[path]"):
+            with self.subTest(modifier=modifier):
+                args = mixed_leaf_fixture()
+                args[3]["render_tree"] = args[3]["render_tree"].replace(
+                    "hasChildrenDrawContent: 0, OtherModifiers:[]",
+                    f"hasChildrenDrawContent: 0, OtherModifiers:[{modifier}]")
+                self.assert_failed(args)
+                args = mixed_leaf_fixture()
+                args[3]["render_tree"] = args[3]["render_tree"].replace(
+                    "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
+                    "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], "
+                    f"OtherModifiers:[{modifier}]")
+                self.assert_failed(args)
+
+    def test_mixed_dimensions_reject_own_negative_clip_but_preserve_a_proven_positive_parent_clip(self):
+        for clip in ("ClipToBounds[True], OtherModifiers:[ClipToBounds:[true]]",
+                     "ClipToFrame[True], OtherModifiers:[ClipToFrame:[true]]",
+                     "OtherModifiers:[CustomClipToFrame:[x:0 y:0 z:1 w:11]]"):
+            with self.subTest(clip=clip):
+                args = mixed_leaf_fixture()
+                args[3]["render_tree"] = args[3]["render_tree"].replace(
+                    "hasChildrenDrawContent: 0, OtherModifiers:[]", "hasChildrenDrawContent: 0, " + clip)
+                self.assert_failed(args)
+        args = mixed_leaf_fixture()
+        parent = args[0]["children"][0]
+        local = "RectT (0.00, 0.00) - [20.00 x 25.00]"
+        parent["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
+        args[3]["arkui_geometry"]["$children"][0]["$rect"] = "[0.00,0.00],[20.00,25.00]"
+        args[3]["render_tree"] = args[3]["render_tree"].replace(
+            "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
+            "CANVAS_NODE[103], Properties: Bounds[0 0 20 25] Frame[0 0 20 25], "
+            "ClipToBounds[True], OtherModifiers:[ClipToBounds:[true]]")
+        result = normalize_arkui(*args)
+        self.assertEqual(result["coordinate_validation"]["status"], "verified",
+                         result["coordinate_validation"]["issues"])
+        geometry = result["children"][0]["children"][0]["geometry"]
+        self.assertAlmostEqual(geometry["rectangular_clip_bounds"]["height"], 4.38341, places=5)
+        self.assertTrue(any(item.get("render_node_id") == "103" for item in geometry["clip_chain"]))
 
     def test_scene_evidence_is_required_without_wms_mapping_substitution(self):
         args = mapping_fixture()

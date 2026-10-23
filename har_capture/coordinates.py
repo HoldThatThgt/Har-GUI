@@ -295,15 +295,39 @@ def printed_number_radius(value: str) -> float:
     return 0.5 * 10 ** (int(exponent or "0") - len(mantissa.split(".", 1)[1]))
 
 
+def verify_negative_render_clip(render: dict) -> None:
+    """@brief 拒绝负尺寸节点自身的生效或未知裁剪，保留正尺寸祖先裁剪。 @param render 当前渲染节点。"""
+    values = verify_modifiers(render)
+    if "ClipToBounds[True]" in render["line"] or "ClipToFrame[True]" in render["line"]:
+        raise ValueError("unsupported_negative_render_clip")
+    for name, entries in values.items():
+        if "clip" in name.lower() and (name not in {"ClipToBounds", "ClipToFrame"}
+                                       or any(entry.lower() != "false" for entry in entries)):
+            raise ValueError("unsupported_negative_render_clip")
+
+
+def verify_mixed_render_bounds(local: list, boxes: tuple) -> None:
+    """@brief 单轴负尺寸仅接受明确的 -1 及另一正轴，并核对 RS 两个局部框的有符号值。
+    @param local 原始局部绘制框。 @param boxes 当前 RS Bounds 和 Frame。
+    """
+    if not ((local[2] == -1 and local[3] > 0) or (local[3] == -1 and local[2] > 0)):
+        raise ValueError("invalid_render_bounds")
+    for box in boxes:
+        if (len(box) != 4 or any(first * second <= 0 for first, second in zip(box[2:], local[2:]))
+                or any(abs(first - second) > 0.11 for first, second in zip(box, local, strict=True))):
+            raise ValueError("invalid_render_bounds")
+
+
 def component_render_bounds(render: dict, local: list) -> tuple[list | None, bool]:
-    """@brief 区分真实局部矩形和明确无绘制的空叶节点，不把未生效 Bounds 用作屏幕坐标。
+    """@brief 区分真实局部矩形和明确无绘制的叶节点，不把未生效 Bounds 用作屏幕坐标。
     @param render 已挂载节点。 @param local 原始局部框。 @return 可比较矩形及无绘制状态。
     """
     match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
     if match is None:
         raise ValueError("render_modifier_evidence_missing")
-    no_draw = (render["children_count"] == 0 and "hasDrawContent: 0," in render["line"]
-               and "hasChildrenDrawContent: 0," in render["line"])
+    no_draw = (render["children_count"] == 0
+               and re.findall(r"\bhasDrawContent:\s*(\d+),", render["line"]) == ["0"]
+               and re.findall(r"\bhasChildrenDrawContent:\s*(\d+),", render["line"]) == ["0"])
     if match[1].split() == ["-inf"] * 4 and match[2].split() == ["-inf"] * 4:
         if local[2:] != [0, 0] or not no_draw:
             raise ValueError("non_finite_geometry")
@@ -312,15 +336,20 @@ def component_render_bounds(render: dict, local: list) -> tuple[list | None, boo
     if len(bounds) != 4:
         raise ValueError("invalid_render_bounds")
     if min(bounds[2:] + local[2:]) < 0:
+        verify_negative_render_clip(render)
         same_signs = all((first < 0) == (second < 0) for first, second in zip(bounds[2:], local[2:]))
-        if not no_draw or max(bounds[2:] + local[2:]) > 0 or not same_signs:
+        if not no_draw or not same_signs:
             raise ValueError("invalid_render_bounds")
+        if max(bounds[2:] + local[2:]) > 0:
+            frame = list(map(number, match[2].split()))
+            verify_mixed_render_bounds(local, (bounds, frame))
+            return bounds, True
     return bounds, no_draw and max(local[2:]) <= 0
 
 
 def verify_render_geometry(render: dict, node: dict) -> bool:
     """@brief 校验真实 RS 节点与同一原始组件的局部框及变换打印区间。 @param render 渲染节点。
-    @param node 原始组件。 @return 是否为明确无绘制的空叶节点。
+    @param node 原始组件。 @return 是否为明确无绘制的叶节点。
     """
     attrs = node["attributes"]
     match = LOCAL_RECT.fullmatch(attrs["PaintRect without transform"])

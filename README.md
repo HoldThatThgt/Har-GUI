@@ -435,6 +435,9 @@ flowchart LR
 窗口工具的整数目标按每个字段 `Math.round` 后验收；输入命中保留浮点边界并使用左闭右开区间。
 原始 WMS 字段与控件树矩形照常保存，详见[屏幕坐标与输入范围](docs/screen-coordinate-scope.md)。
 
+ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘制叶节点和完整父链证据一致时支持。
+原始负尺寸与结构照常保留，输出几何标记不绘制；自身未证明裁剪仍拒收，见[坐标验证边界](docs/mixed-dimension-nodes.md)。
+
 ## 无障碍与 ArkUI 的区别
 
 | 数据 | 官方命令与含义 | 关联方式 |
