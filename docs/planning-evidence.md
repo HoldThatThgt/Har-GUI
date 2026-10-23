@@ -57,27 +57,31 @@ flowchart LR
 
 ## 规划与独立定位
 
-当前采集使用 Midscene 1.16.5 的默认 `aiAct` 模式。标准规划器和定位器均使用默认角色时，
-规划可直接输出坐标；后续 `Locate` 记录的 `source=plan` 表示采用该点，不表示又调用了定位模型。
+当前采集从每次 `aiAct` 开始固定使用 Midscene 1.16.5 的 `effort="deepThink"`。
+标准规划器只提供目标描述，独立 `Locate` 请求在截图中定位，再经过原有窗口与任务范围检查后派发动作。
+即使规划回复附带粗坐标，SDK 也只保留描述，不将它作为直接点击位置。
+规划和定位仍可使用同一个默认模型，不要求新增模型配置或账号。
 
 ```mermaid
 flowchart LR
-    Default[默认规划同时给目标描述和点] --> Direct[直接采用规划定位]
-    Separate[独立定位模式只取规划目标描述] --> Locate[Locate 模型定位]
-    Deep[deepLocate 取得规划粗定位] --> Crop[截取邻域并放大]
-    Crop --> Locate
-    Direct --> Scope[核对当前窗口与输入范围]
+    Plan[deepThink 标准规划只取目标描述] --> Locate[独立 Locate 模型请求]
     Locate --> Scope
-    Scope --> Native[调用原生动作]
+    Scope{核对当前窗口与输入范围} -->|通过| Native[调用原生动作]
+    Scope -->|拒绝| Stop[终止并保留失败证据]
 ```
 
-SDK 的 `effort="deepThink"` 会分开标准规划与定位；显式配置独立的 `planning` 或 `locate` 角色
-也会使标准规划省略内嵌定位。单独配置 `insight` 角色没有这个作用。
-在支持该能力的规划器中，`deepLocate=true` 会避免直接采用规划点；已有粗定位时用它确定裁图，再在裁图内定位，
-没有粗定位时先查找目标区域。它会增加模型调用，不能保证修正落在错误区域的粗定位。
-这些是 SDK 的公开能力；采集器没有自动切换模式或在范围失败后重复尝试。
-依据为[官方定位说明](https://www.midscenejs.com/reference/#shared-types)和
+该选项也启用 SDK 的子目标规划，并将规划保留的历史图片上限从一张改为两张。
+标准规划请求不再要求定位用的原始图像细节；实际请求图片仍按 SDK 处理结果留存诊断证据。
+每个需要定位的动作会增加独立定位请求，通常增加用量与延迟；实际费用仍以运行的请求用量记录为准。
+这是固定执行策略，没有失败后切换、自动重试或新增配置开关；`deepLocate` 裁图能力没有启用。
+`effort` 不改变 provider 的 `thinking`、`reasoning_effort` 或其他模型账号参数，
+这些参数仍由既有模型配置决定。依据为[官方规划模式说明](https://midscenejs.com/reference/#deepthink-planning-mode)、
 [固定版本的规划条件](https://github.com/web-infra-dev/midscene/blob/v1.16.5/packages/core/src/agent/tasks.ts#L557-L562)。
+
+该行为适用于 SDK 的标准规划器，包括当前使用的 DeepSeek。SDK 对自定义规划适配器会警告并忽略
+`effort="deepThink"`，例如 UI-TARS；不能据此声称自定义规划器也实现独立定位。
+旧运行中的 `Locate source=plan` 表示直接采用规划点，没有额外定位请求；新标准规划运行应记录
+`Plan → Locate → Plan` 请求链，定位的 `source=ai` 与请求角色由实际 SDK 任务确定。
 
 项目中的路径停止条件交给规划阶段处理；独立定位只解决当次目标在哪里，不决定是否继续任务。
 SDK 支持未完成目标时报告失败并退出，采集器随后保留失败状态；成功采集仍必须取得候选并通过验收。
