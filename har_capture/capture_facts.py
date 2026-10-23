@@ -228,7 +228,9 @@ def normalized_arkui(evidence: Path, window: dict, canvas: dict, scenes: dict) -
         sources[kind] = (evidence / geometry[kind]["file"]).read_text(encoding="utf-8")
     tree = normalize_arkui(root, window, canvas, sources)
     if tree.get("coordinate_validation", {}).get("status") != "verified":
-        fail(f"ArkUI screen coordinates are not verified for window {window['window_id']}")
+        issues = tree.get("coordinate_validation", {}).get("issues", [])
+        reasons = "; ".join(f"node {issue['node_id']}: {issue['code']}" for issue in issues)
+        fail(f"ArkUI screen coordinates are not verified for window {window['window_id']}: {reasons}")
     return {"window_id": window["window_id"], "bundle_name": window["bundle_name"], "tree": tree}
 
 

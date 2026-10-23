@@ -296,8 +296,9 @@ class ExportTests(unittest.TestCase):
         current = self.facts["metadata"]["windows"][0]
         before = snapshot_files([self.evidence])
         with patch("har_capture.coordinates.normalize_arkui", return_value={
-                "coordinate_validation": {"status": "failed", "issues": ["Synthetic proof failure"]}}):
-            with self.assertRaisesRegex(CaptureError, "coordinates are not verified"):
+                "coordinate_validation": {"status": "failed", "issues": [
+                    {"code": "synthetic_proof_failure", "node_id": "183", "source_line": 4}]}}):
+            with self.assertRaisesRegex(CaptureError, "node 183: synthetic_proof_failure"):
                 normalized_arkui(self.evidence, current, self.facts["canvas"], {current["window_id"]: {}})
         self.assertEqual(before, snapshot_files([self.evidence]))
 

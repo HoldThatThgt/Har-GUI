@@ -4,7 +4,7 @@ import copy
 import unittest
 
 from har_capture.coordinates import normalize_arkui
-from tests.test_window_mapping import component, render_line
+from tests.test_window_mapping import component, render_line, replace_render_text
 
 
 def raw_rectangle(x, y, width, height):
@@ -266,10 +266,10 @@ class ApplicationViewportTests(unittest.TestCase):
         native = args[3]["arkui_geometry"]["$children"][0]
         native.update({"$type": "Column", "$rect": native_rectangle(2080, 10, 0, 0), "$children": [
             {"$ID": 3, "$type": "Text", "$rect": native_rectangle(2080, 10, 1, 1)}]})
-        args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Bounds[2080 10 20 20] Frame[2080 10 20 20], OtherModifiers:[]",
-            "Bounds[-inf -inf -inf -inf] Frame[-inf -inf -inf -inf], hasDrawContent: 0, "
-            "hasChildrenDrawContent: 0, OtherModifiers:[]")
+        args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+            render_line(5, "CANVAS_NODE", 101, "2080 10 20 20", "OtherModifiers:[]"),
+            render_line(5, "CANVAS_NODE", 101, "-inf -inf -inf -inf",
+                        "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]"))
         args[3]["render_tree"] += render_line(6, "CANVAS_NODE", 102, "0 0 1 1", "OtherModifiers:[]")
         self.assert_failed(args, "empty_render_subtree_nonzero_geometry:102")
 
@@ -297,8 +297,7 @@ class ApplicationViewportTests(unittest.TestCase):
 
     def test_empty_no_draw_subtree_does_not_require_an_optional_modifiers_dump_field(self):
         args = empty_subtree_fixture()
-        args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "hasChildrenDrawContent: 0, OtherModifiers:[]", "hasChildrenDrawContent: 0,")
+        args[3]["render_tree"] = replace_render_text(args[3]["render_tree"], "OtherModifiers:[]", "")
         self.verified(args)
 
     def test_positive_native_or_raw_area_cannot_claim_an_empty_nonfinite_subtree(self):

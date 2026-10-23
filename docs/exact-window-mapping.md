@@ -155,6 +155,42 @@ flowchart LR
 单轴负尺寸仅支持明确的 `-1`、另一轴为正，并同时核验 RS Bounds/Frame、真正叶节点及唯一的双零绘制标记。
 完整带符号端点投影必须匹配原生框，自身未证明裁剪仍拒收；详见[单轴负尺寸节点](mixed-dimension-nodes.md)。
 
+## 透明祖先与未准备后代
+
+正面积节点也可能保留未初始化的 RS Bounds/Frame。官方
+[UpdateShouldPaint](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L3839-L3846)
+和 [IsSubTreeNeedPrepare](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L1714-L1727)
+会在透明祖先无需绘制时跳过子树准备，后代的修饰器因而可能尚未应用。
+共享转场会影响绘制判断，所以不能只看 Alpha 或 `PrepareSeq=0`。
+
+```mermaid
+flowchart LR
+    Alpha[同一祖先的 ArkUI 原生 RS 透明度均为零] --> Parent[已准备 已跳过子树 真实父链通过]
+    Parent --> Child[后代未准备 当前双框均未初始化]
+    Child --> Verify[原文与原生投影 同进程待应用双框 变换裁剪核验]
+    Verify --> Result[保留逻辑边界 标记透明祖先导致未绘制]
+```
+
+透明祖先必须同时具有原生数值 `opacity=0`、唯一 ArkUI `Alpha=0`、
+当前 RS Properties 的唯一 Alpha 零值，以及显式属于当前进程的唯一 Alpha 修饰器零值。
+祖先的 PrepareSeq、PostPrepareSeq 和 VsyncId 必须为正，子树跳过标记必须为一，
+并有唯一双零绘制标记。当前几何、原生身份和实际父链照常验证；
+共享转场、活动动画、Alpha 差异告警或不完整证据不能构成该证明。
+准备状态与绘制标记只从官方节点头读取；当前 Properties 的 Bounds 和 Frame 各自必须唯一，
+绘制内容或待应用修饰器中的同名文字不能补齐缺少的状态证据。
+
+未准备后代的 PrepareSeq、PostPrepareSeq 和 VsyncId 必须均为零，当前 Bounds 和 Frame
+均为全 `-inf`，并有唯一双零绘制标记。其非负逻辑框仍由完整原文、原生投影及已核验的父变换确定；
+同进程待应用 Bounds/Frame 各自必须唯一且与原始局部框匹配，但不会被写成当前 RS 边界。
+未准备节点自身已生效或未知的裁剪仍拒收，有限祖先的已证裁剪保留。
+不具备原生节点证据的 Overlay 不使用该证明，继续执行其原有独立几何检查。
+
+输出保留所有节点与原始字段，标记 `rendered=false`，来源为 `RenderService.zero_alpha_ancestor`。
+`geometry.source.zero_alpha_ancestor` 记录原生及 RS 祖先标识；`render_geometry_state` 区分 `unprepared`
+与已生效且完成原检查的 `applied`。保留绘制命令不代表本帧实际绘制，也不会被标为零尺寸空子树。
+已生效的有限框冲突、有限与无穷框混用均不会被透明性豁免。
+坐标拒收错误直接包含窗口、节点 ID 和具体校验原因，便于从运行错误定位原始证据。
+
 ## 接口与现有采集
 
 `scene_sources` 是新采集必须提供的证据。缺失、摘要不符、跨进程或跨显示器、重复目标、
@@ -168,6 +204,14 @@ flowchart LR
 关闭时保留原图，开启时按声明区域处理；原始双树保留，开关不改变坐标和全窗覆盖门槛。
 
 ## 当前离线验证
+
+2026-10-23 华为邮箱完整冻结样本 `20261023T132740.322039Z-85c48eaa` 的 338/338 个 Frame 通过，
+524 个原始节点全部保留。`SymbolGlyph 183` 的逻辑框保留为 `(933,1811,46,46)`，由透明父按钮
+`182` 的完整证据标记未绘制及未准备。原 337 个已通过 Frame 的屏幕框、原生框和裁剪链均不变；
+其中八个节点的绘制状态按已证透明祖先更正为未绘制。
+完整事实核验与按原项目声明写出五份文件的生产函数均已实跑通过。
+53 份输入的字节、SHA-256 和修改时间与原始基线一致。该验证没有连接设备或模型，
+未新增视觉通过收据、样本登记或采集计数；原失败保持原样。
 
 2026-10-23 对完整冻结成功样本 `20261023T100640.360348Z-1b1dd376` 使用当前生产坐标接口重放，
 4 个应用窗口的 764/764 个 Frame 全部通过，重建 ArkUI 与原成功交付逐对象一致。

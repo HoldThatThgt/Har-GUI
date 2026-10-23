@@ -332,8 +332,9 @@ def render_has_no_draw_content(render: dict) -> bool:
     """@brief 只接受唯一且明确的自身及子树无绘制标记，不使用缓存跳过状态。 @param render 渲染节点。
     @return 两个官方绘制内容标记是否均为零。
     """
-    return (re.findall(r"\bhasDrawContent:\s*(\d+),", render["line"]) == ["0"]
-            and re.findall(r"\bhasChildrenDrawContent:\s*(\d+),", render["line"]) == ["0"])
+    header = render["line"].partition("Properties:")[0]
+    return (re.findall(r"\bhasDrawContent:\s*(\d+),", header) == ["0"]
+            and re.findall(r"\bhasChildrenDrawContent:\s*(\d+),", header) == ["0"])
 
 
 def component_render_bounds(render: dict, local: list, empty_subtree: bool) -> tuple[list | None, bool]:
@@ -341,16 +342,15 @@ def component_render_bounds(render: dict, local: list, empty_subtree: bool) -> t
     @param render 已挂载节点。 @param local 原始局部框。 @param empty_subtree 已核验完整空子树。
     @return 可比较矩形及无绘制状态。
     """
-    match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
-    if match is None:
-        raise ValueError("render_modifier_evidence_missing")
+    current_bounds, current_frame = current_render_boxes(render)
     no_draw = render_has_no_draw_content(render) and (render["children_count"] == 0 or empty_subtree)
-    if match[1].split() == ["-inf"] * 4 and match[2].split() == ["-inf"] * 4:
+    if current_bounds.split() == ["-inf"] * 4 and current_frame.split() == ["-inf"] * 4:
         if local[2:] != [0, 0] or not no_draw:
             raise ValueError("non_finite_geometry")
         return None, True
-    bounds = list(map(number, match[1].split()))
-    if len(bounds) != 4:
+    bounds = list(map(number, current_bounds.split()))
+    frame = list(map(number, current_frame.split()))
+    if len(bounds) != 4 or len(frame) != 4:
         raise ValueError("invalid_render_bounds")
     if min(bounds[2:] + local[2:]) < 0:
         verify_negative_render_clip(render)
@@ -358,7 +358,6 @@ def component_render_bounds(render: dict, local: list, empty_subtree: bool) -> t
         if not no_draw or not same_signs:
             raise ValueError("invalid_render_bounds")
         if max(bounds[2:] + local[2:]) > 0:
-            frame = list(map(number, match[2].split()))
             verify_mixed_render_bounds(local, (bounds, frame))
             return bounds, True
     return bounds, no_draw and max(local[2:]) <= 0
@@ -374,6 +373,15 @@ def verify_render_geometry(render: dict, node: dict, empty_subtree: bool) -> boo
     bounds, no_draw = component_render_bounds(render, expected, empty_subtree)
     if bounds is not None and any(abs(a - b) > 0.11 for a, b in zip(bounds, expected, strict=True)):
         raise ValueError("scene_render_bounds_mismatch:" + render["id"])
+    verify_render_vectors(render, node)
+    return no_draw
+
+
+def verify_render_vectors(render: dict, node: dict) -> None:
+    """@brief 独立核对原始与 RS 变换，不因当前局部框尚未准备而略过。 @param render 实际渲染记录。
+    @param node 已关联的原始组件。
+    """
+    attrs = node["attributes"]
     values = verify_modifiers(render)
     vectors = (("Scale", attrs.get("scale(x,y)", "1,1")),
                ("Translate", attrs.get("translate(x,y)", "0,0")),
@@ -398,7 +406,133 @@ def verify_render_geometry(render: dict, node: dict, empty_subtree: bool) -> boo
             radius = printed_number_radius(first) + printed_number_radius(second)
             if abs(number(first) - number(second)) > radius + 1e-12:
                 raise ValueError("scene_render_vector_mismatch:" + name)
-    return no_draw
+
+
+def render_current_properties(render: dict) -> str:
+    """@brief 只读取已经生效的 Properties 段，排除绘制命令与待应用修饰器。 @param render 渲染记录。
+    @return 当前属性原文。
+    """
+    current = re.split(r"RSUIContextToken:|DrawCmdModifiers|OtherModifiers:", render["line"], maxsplit=1)[0]
+    if current.count("Properties:") != 1:
+        raise ValueError("render_modifier_evidence_missing")
+    return current.split("Properties:", 1)[1]
+
+
+def render_sequence(render: dict, field: str) -> int | None:
+    """@brief 读取唯一的官方准备状态字段，缺失或重复不构成证明。 @param render 渲染记录。
+    @param field 明确字段名。 @return 唯一整数或空。
+    """
+    header = render["line"].partition("Properties:")[0]
+    values = re.findall(r"\b" + re.escape(field) + r":\s*(\d+)(?=,|\s|$)", header)
+    return int(values[0]) if len(values) == 1 else None
+
+
+def current_render_boxes(render: dict) -> tuple[str, str]:
+    """@brief 当前 Properties 必须各有唯一 Bounds 与 Frame，不从后续段落补齐或忽略冲突。
+    @param render 实际渲染记录。 @return 当前两个框的原文。
+    """
+    properties = render_current_properties(render)
+    bounds = re.findall(r"\bBounds\[([^\]]+)\]", properties)
+    frame = re.findall(r"\bFrame\[([^\]]+)\]", properties)
+    if len(bounds) != 1 or len(frame) != 1:
+        raise ValueError("missing_or_ambiguous_current_render_bounds")
+    return bounds[0], frame[0]
+
+
+def owned_render_modifier(render: dict, name: str, process_id: int) -> str | None:
+    """@brief 待应用属性必须唯一且显式属于当前应用进程，不能借用其他进程的同名属性。
+    @param render 渲染记录。 @param name 属性名。 @param process_id 已核验进程。 @return 唯一原值或空。
+    """
+    content = render["line"].partition("OtherModifiers:[")[2]
+    matches = re.findall(r"(?:pid:(\d+)->)?\b" + re.escape(name) + r":\[([^\]]*)\]", content)
+    return matches[0][1] if len(matches) == 1 and matches[0][0] == str(process_id) else None
+
+
+def zero_alpha_source(node_id: str, context: dict) -> dict | None:
+    """@brief 仅用同一节点的原文、原生数值及当前 RS 属性证明已准备的透明祖先。
+    @param node_id 原生身份。 @param context 完整同批来源。 @return 透明祖先身份或空。
+    """
+    node = context["raw_frames"].get(node_id)
+    native = context["native"][node_id]
+    if node is None or type(native.get("opacity")) not in (int, float) or native["opacity"] != 0:
+        return None
+    alpha = node["attributes"].get("Alpha")
+    if not isinstance(alpha, str) or not re.fullmatch(NUMBER, alpha) or number(alpha) != 0:
+        return None
+    render = context["render"].get(context["links"][node_id]["id"])
+    if render is None or "Alpha has difference" in node["raw"]:
+        return None
+    current = re.findall(r"\bAlpha\[([^\]]+)\]", render_current_properties(render))
+    owned = owned_render_modifier(render, "Alpha", context["process_id"])
+    pending = [owned] if owned is not None else []
+    if (len(current) != 1 or len(pending) != 1
+            or any(not re.fullmatch(NUMBER, value) or number(value) != 0 for value in current + pending)):
+        return None
+    if (render_sequence(render, "IsSubTreeSkipped") != 1 or not render_has_no_draw_content(render)
+            or any((render_sequence(render, key) or 0) <= 0 for key in ("PrepareSeq", "PostPrepareSeq", "VsyncId"))):
+        return None
+    if native["$type"] != node["attributes"]["type"].split(",", 1)[0]:
+        raise ValueError("transparent_ancestor_identity_mismatch")
+    verify_render_geometry(render, node, False)
+    return {"node_id": node_id, "render_node_id": render["id"]}
+
+
+def zero_alpha_ancestor(node: dict, context: dict) -> dict | None:
+    """@brief 沿真实原生和 RS 父链查证透明祖先，拒绝共享转场、动画及身份绕行。
+    @param node 当前原始组件。 @param context 完整同批来源。 @return 已证明祖先或空。
+    """
+    node_id = str(node["attributes"]["ID"])
+    if node_id in context["overlays"]:
+        return None
+    traversed = []
+    while node_id is not None:
+        raw = context["raw_frames"].get(node_id)
+        if raw is not None:
+            render = context["render"].get(context["links"][node_id]["id"])
+            if render is not None:
+                traversed.append((raw, render))
+            proof = zero_alpha_source(node_id, context)
+            if proof is not None:
+                for original, record in traversed:
+                    if "SharedTransitionParam:" in record["line"] or "RSAnimationManager:" in record["line"]:
+                        raise ValueError("transparent_subtree_transition_or_animation")
+                    verify_modifiers(record)
+                    if record["id"] != context["root_render_id"]:
+                        verify_component_render_parent(original, record, context)
+                return proof
+        node_id = context["parents"][node_id]
+    return None
+
+
+def verify_unprepared_transparent_render(render: dict, node: dict, process_id: int) -> bool:
+    """@brief 已证透明祖先下仍校验未准备节点的逻辑框及待应用属性，绝不替换当前无穷框。
+    @param render 实际渲染记录。 @param node 原始组件。 @param process_id 已核验进程。
+    @return 是否为本次证明的未准备节点。
+    """
+    boxes = current_render_boxes(render)
+    if any(value.split() != ["-inf"] * 4 for value in boxes):
+        return False
+    local = list(map(number, LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"]).groups()))
+    if min(local[2:]) < 0 or max(local[2:]) == 0:
+        return False
+    if (any(render_sequence(render, key) != 0 for key in ("PrepareSeq", "PostPrepareSeq", "VsyncId"))
+            or not render_has_no_draw_content(render)):
+        raise ValueError("transparent_render_preparation_unverified")
+    values = verify_modifiers(render)
+    for field in ("Bounds", "Frame"):
+        entry = owned_render_modifier(render, field, process_id)
+        match = re.fullmatch(rf"x:({NUMBER}) y:({NUMBER}) z:({NUMBER}) w:({NUMBER})", entry) if entry else None
+        if match is None or any(abs(number(a) - b) > 0.11 for a, b in zip(match.groups(), local, strict=True)):
+            raise ValueError("transparent_render_pending_bounds_mismatch:" + field)
+    flags = re.findall(r"ClipTo(?:Bounds|Frame)\[([^\]]+)\]", render_current_properties(render))
+    if any(value.lower() != "false" for value in flags):
+        raise ValueError("unsupported_unprepared_render_clip")
+    for name, entries in values.items():
+        if "clip" in name.lower() and (name not in {"ClipToBounds", "ClipToFrame"}
+                                       or any(entry.lower() != "false" for entry in entries)):
+            raise ValueError("unsupported_unprepared_render_clip")
+    verify_render_vectors(render, node)
+    return True
 
 
 def float32(value: float) -> float:
@@ -902,7 +1036,7 @@ def actual_render_subtree(root_id: str, nodes: dict) -> list[dict]:
     return result
 
 
-def verify_empty_render_parent(node: dict, render: dict, context: dict) -> None:
+def verify_component_render_parent(node: dict, render: dict, context: dict) -> None:
     """@brief 穿过非布局节点及已证明省略的恒等帧，核对实际 RS 父节点。 @param node 原始帧。
     @param render 已挂载帧。 @param context 原生父链和唯一渲染关联。
     """
@@ -924,14 +1058,12 @@ def verify_empty_render_bounds(render: dict, node: dict) -> None:
     """@brief 空帧只接受一致的未生效双框或有限零尺寸双框，不忽略独立 Frame 冲突。 @param render 渲染帧。
     @param node 已核验原始零尺寸帧。
     """
-    match = re.search(r"Properties: Bounds\[([^\]]+)\] Frame\[([^\]]+)\]", render["line"])
-    if match is None:
-        raise ValueError("render_modifier_evidence_missing")
-    if all(value.split() == ["-inf"] * 4 for value in match.groups()):
+    boxes = current_render_boxes(render)
+    if all(value.split() == ["-inf"] * 4 for value in boxes):
         return
     local = LOCAL_RECT.fullmatch(node["attributes"]["PaintRect without transform"])
     expected = list(map(number, local.groups()))
-    for value in match.groups():
+    for value in boxes:
         bounds = list(map(number, value.split()))
         if len(bounds) != 4 or bounds[2:] != [0, 0]:
             raise ValueError("empty_render_subtree_nonzero_render_geometry:" + render["id"])
@@ -1023,7 +1155,7 @@ def empty_render_subtree(node: dict, context: dict) -> tuple[list[str], list[str
     for item in actual:
         if not render_has_no_draw_content(item):
             raise ValueError("empty_render_subtree_draw_content_unverified:" + item["id"])
-        verify_empty_render_parent(frames[item["id"]], item, context)
+        verify_component_render_parent(frames[item["id"]], item, context)
         verify_empty_render_modifiers(item, frames[item["id"]])
     for item in detached.values():
         if not render_has_no_draw_content(item):
@@ -1046,11 +1178,14 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
         verify_overlay_render(node_id, context)
     hidden = native.get("visible") == "false" or native.get("active") == "false"
     detached = link["id"] in context["detached_render"]
+    render = context["render"].get(link["id"])
+    transparent = zero_alpha_ancestor(node, context) if render is not None else None
+    unprepared = bool(transparent) and verify_unprepared_transparent_render(render, node, context["process_id"])
     if detached:
         clips = []
     else:
         clips = inherited if hidden and link["id"] not in context["render"] else frame_clips(link, context, inherited)
-    if link["id"] in context["render"]:
+    if render is not None and not unprepared:
         no_draw_nodes, no_draw_detached = empty_render_subtree(node, context)
         no_draw = verify_render_geometry(context["render"][link["id"]], node, bool(no_draw_nodes))
     clipped = None if detached else bounds
@@ -1058,11 +1193,14 @@ def frame_geometry(node: dict, context: dict, inherited: list) -> dict:
         clipped = intersection(clipped, clip["bounds"])
     return {"status": "verified", "screen_bounds": bounds, "rectangular_clip_bounds": clipped,
             "clip_chain": clips, "clipping_status": "not_applicable" if detached else "verified",
-            "rendered": not (hidden or detached or no_draw), "native_window_rect": native.get("$rect"),
-            "render_state": "not_rendered" if hidden or detached or no_draw else "rendered",
-            "render_state_source": ("RenderService.allNodeNotOnTree" if detached else
+            "rendered": not (hidden or detached or no_draw or transparent), "native_window_rect": native.get("$rect"),
+            "render_state": "not_rendered" if hidden or detached or no_draw or transparent else "rendered",
+            "render_state_source": ("RenderService.zero_alpha_ancestor" if transparent else
+                                    "RenderService.allNodeNotOnTree" if detached else
                                     "RenderService.no_draw_content" if no_draw else "ArkUI_and_RenderService"),
-            "source": {"method": "ArkUI.PaintRectAncestorComposition",
+            "source": {**({"zero_alpha_ancestor": transparent,
+                           "render_geometry_state": "unprepared" if unprepared else "applied"} if transparent else {}),
+                       "method": "ArkUI.PaintRectAncestorComposition",
                        "commands": ["WindowManagerService.-element", "WindowManagerService.-allInfo",
                                     "RenderService.RSTree", "RenderService.allNodeNotOnTree"], "node_id": node_id,
                        "native_rect_cross_checked": node_id not in context["overlays"],
@@ -1105,7 +1243,7 @@ def prepare_context(root: dict, window: dict, canvas: dict, evidence: dict) -> d
     if linked_ids.intersection(render).intersection(detached):
         raise ValueError("render_attachment_state_changed")
     window_bounds = scene["rectangles"][scene["source"]["session_render_node_id"]]
-    return {"native": native, "parents": parents, "mapping": mapping,
+    return {"native": native, "parents": parents, "mapping": mapping, "process_id": window["process_id"],
             **node_evidence, "render": render, "detached_render": detached,
             "rectangles": {**scene["rectangles"], **node_evidence["rectangles"]},
             "directions": {**scene["directions"], **node_evidence["directions"]},

@@ -69,7 +69,10 @@ def rewrite_render(args, state, render_id, mutate):
     matches = [index for index, row in enumerate(rows) if f"CANVAS_NODE[{render_id}]," in row]
     if len(matches) != 1:
         raise AssertionError("Synthetic render mutation requires one exact source node")
-    rows[matches[0]] = mutate(rows[matches[0]])
+    original = rows[matches[0]]
+    rows[matches[0]] = mutate(original)
+    if rows[matches[0]] == original:
+        raise AssertionError("Synthetic render mutation did not change its target")
     args[3][key] = "".join(rows)
 
 

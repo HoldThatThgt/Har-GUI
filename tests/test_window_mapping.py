@@ -1,6 +1,7 @@
 """@brief 验证分数原点下的 SCB 精确窗口映射及跨来源拒收。"""
 
 import copy
+import re
 import unittest
 
 from har_capture.coordinates import float32, float32_interval_near_equal, normalize_arkui, wms_scale_interval
@@ -17,8 +18,22 @@ def component(node_id, tag, local, properties=None):
 
 def render_line(depth, kind, node_id, bounds, suffix=""):
     """@brief 构造包含完整修饰器字段的渲染节点行。"""
-    return ("  " * depth + f"| {kind}[{node_id}], Properties: Bounds[{bounds}] Frame[{bounds}], "
-            + suffix + "\n")
+    markers = (suffix.find(name) for name in ("DrawCmdModifiers", "OtherModifiers:") if name in suffix)
+    boundary = min(markers, default=len(suffix))
+    pattern = (r"\b(?:PrepareSeq|PostPrepareSeq|VsyncId|IsSubTreeSkipped|ReverseChildren|"
+               r"hasDrawContent|hasChildrenDrawContent):\s*(?:\d+|true|false)\s*,?\s*")
+    prefix = re.findall(pattern, suffix[:boundary])
+    properties = re.sub(pattern, "", suffix[:boundary]) + suffix[boundary:]
+    header = "".join(value.strip().rstrip(",") + ", " for value in prefix)
+    return ("  " * depth + f"| {kind}[{node_id}], " + header
+            + f"Properties: Bounds[{bounds}] Frame[{bounds}], " + properties + "\n")
+
+
+def replace_render_text(text, original, replacement):
+    """@brief 确认匿名渲染证据实际被修改，防止格式调整后反例空转。"""
+    if original not in text:
+        raise AssertionError("Synthetic render mutation source is missing")
+    return text.replace(original, replacement)
 
 
 def mapping_fixture(system=False):
@@ -164,10 +179,10 @@ def no_draw_leaf_fixture():
     local = "RectT (10.00, 20.00) - [0.00 x 0.00]"
     leaf["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
     args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[10.00,20.00],[10.00,20.00]"
-    args[3]["render_tree"] = args[3]["render_tree"].replace(
-        "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
-        "Bounds[-inf -inf -inf -inf] Frame[-inf -inf -inf -inf], PrepareSeq: 130, PostPrepareSeq: 129, "
-        "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]")
+    args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+        render_line(5, "CANVAS_NODE", 104, "10 20 100 30", "OtherModifiers:[]"),
+        render_line(5, "CANVAS_NODE", 104, "-inf -inf -inf -inf", "PrepareSeq: 130, PostPrepareSeq: 129, "
+                    "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]"))
     return args
 
 
@@ -182,9 +197,10 @@ def mixed_leaf_fixture(width=-1, height=11, structural_children=False):
     top, bottom = min(20, 20 + height), max(20, 20 + height)
     native["$rect"] = f"[{left:.2f},{top:.2f}],[{right:.2f},{bottom:.2f}]"
     bounds = f"10 20 {width:g} {height:g}"
-    args[3]["render_tree"] = args[3]["render_tree"].replace(
-        "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
-        f"Bounds[{bounds}] Frame[{bounds}], hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]")
+    args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+        render_line(5, "CANVAS_NODE", 104, "10 20 100 30", "OtherModifiers:[]"),
+        render_line(5, "CANVAS_NODE", 104, bounds,
+                    "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]"))
     if structural_children:
         for node_id in (5, 6, 7):
             attrs = {"ID": str(node_id), "type": "IfElse"}
@@ -210,8 +226,8 @@ def transformed_mixed_leaf_fixture():
         "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
         "CANVAS_NODE[103], Properties: Bounds[20 30 200 100] Frame[20 30 200 100], "
         "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
-    args[3]["render_tree"] = args[3]["render_tree"].replace(
-        "hasChildrenDrawContent: 0, OtherModifiers:[]", "hasChildrenDrawContent: 0, "
+    args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+        "Frame[10 20 -1 11], OtherModifiers:[]", "Frame[10 20 -1 11], "
         "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2]]")
     return args
 
@@ -366,10 +382,10 @@ class WindowMappingTests(unittest.TestCase):
         local = "RectT (10.00, 20.00) - [-1.00 x -1.00]"
         leaf["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[9.00,19.00],[10.00,20.00]"
-        args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
-            "Bounds[10 20 -1 -1] Frame[10 20 -1 -1], hasDrawContent: 0, hasChildrenDrawContent: 0, "
-            "OtherModifiers:[]")
+        args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+            render_line(5, "CANVAS_NODE", 104, "10 20 100 30", "OtherModifiers:[]"),
+            render_line(5, "CANVAS_NODE", 104, "10 20 -1 -1",
+                        "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]"))
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified",
                          result["coordinate_validation"]["issues"])
@@ -396,10 +412,10 @@ class WindowMappingTests(unittest.TestCase):
         local = "RectT (10.00, 20.00) - [0.05 x 0.05]"
         leaf["attributes"].update({"FrameRect": local, "PaintRect without transform": local})
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[10.00,20.00],[10.05,20.05]"
-        args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Bounds[10 20 100 30] Frame[10 20 100 30], OtherModifiers:[]",
-            "Bounds[10 20 -0.05 -0.05] Frame[10 20 -0.05 -0.05], hasDrawContent: 0, "
-            "hasChildrenDrawContent: 0, OtherModifiers:[]")
+        args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+            render_line(5, "CANVAS_NODE", 104, "10 20 100 30", "OtherModifiers:[]"),
+            render_line(5, "CANVAS_NODE", 104, "10 20 -0.05 -0.05",
+                        "hasDrawContent: 0, hasChildrenDrawContent: 0, OtherModifiers:[]"))
         self.assert_failed(args)
 
     def test_noncanonical_mixed_negative_dimensions_still_require_refusal(self):
@@ -488,9 +504,8 @@ class WindowMappingTests(unittest.TestCase):
         for modifier in ("Skew:[x:1 y:0]", "Rotation:[1]", "CustomClipPath:[path]"):
             with self.subTest(modifier=modifier):
                 args = mixed_leaf_fixture()
-                args[3]["render_tree"] = args[3]["render_tree"].replace(
-                    "hasChildrenDrawContent: 0, OtherModifiers:[]",
-                    f"hasChildrenDrawContent: 0, OtherModifiers:[{modifier}]")
+                args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+                    "Frame[10 20 -1 11], OtherModifiers:[]", f"Frame[10 20 -1 11], OtherModifiers:[{modifier}]")
                 self.assert_failed(args)
                 args = mixed_leaf_fixture()
                 args[3]["render_tree"] = args[3]["render_tree"].replace(
@@ -505,8 +520,8 @@ class WindowMappingTests(unittest.TestCase):
                      "OtherModifiers:[CustomClipToFrame:[x:0 y:0 z:1 w:11]]"):
             with self.subTest(clip=clip):
                 args = mixed_leaf_fixture()
-                args[3]["render_tree"] = args[3]["render_tree"].replace(
-                    "hasChildrenDrawContent: 0, OtherModifiers:[]", "hasChildrenDrawContent: 0, " + clip)
+                args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+                    "Frame[10 20 -1 11], OtherModifiers:[]", "Frame[10 20 -1 11], " + clip)
                 self.assert_failed(args)
         args = mixed_leaf_fixture()
         parent = args[0]["children"][0]
