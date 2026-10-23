@@ -7,7 +7,7 @@ import re
 import shlex
 from pathlib import Path
 
-from har_capture.arkui import parse_arkui
+from har_capture.arkui import parse_forest
 from har_capture.arkui_selection import select_system_tree
 from har_capture.capture_checks import window_exclusion
 from har_capture.hdc import Hdc, fail
@@ -42,16 +42,26 @@ def read_window_accessibility(evidence: Path, window: dict) -> dict:
     return root
 
 
-def select_inspector_window(root: dict, window: dict) -> dict:
-    """@brief 按系统会话 ID 唯一选择真实无障碍窗口。 @param root Inspector 全树。
+def select_inspector_window(roots: list[dict], window: dict) -> dict:
+    """@brief 在全部系统根中按双重身份唯一选择窗口，普通逐窗响应必须保持单根。
+    @param roots Inspector 完整森林。
     @param window 会话关联窗口。 @return 未改写的窗口子树。
     """
-    pending, matches = [root], []
+    if not window["is_system"]:
+        if len(roots) != 1:
+            fail(f"Inspector cannot assign multiple roots to application window {window['window_id']}")
+        return roots[0]
+    pending, matches = list(roots), []
+    expected_id = str(window["session"]["ui_node_id"])
+    expected_component = f"session{window['window_id']}"
     while pending:
         node = pending.pop()
         attrs = node["attributes"]
-        if (attrs.get("type") == "WindowScene" and attrs.get("compid") == f"session{window['window_id']}"
-                and attrs.get("ID") == str(window["session"]["ui_node_id"])):
+        ids = attrs.get("ID") if isinstance(attrs.get("ID"), list) else [attrs.get("ID")]
+        components = attrs.get("compid") if isinstance(attrs.get("compid"), list) else [attrs.get("compid")]
+        if attrs.get("type") == "WindowScene" and expected_id in ids and expected_component in components:
+            if ids != [expected_id] or components != [expected_component]:
+                fail(f"Inspector has ambiguous identity properties for system window {window['window_id']}")
             matches.append(node)
         pending.extend(node["children"])
     if len(matches) != 1:
@@ -84,8 +94,8 @@ def normalize_inspector_tree(root: dict, window: dict) -> dict:
 
 
 def collect_inspector(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
-    """@brief 普通应用逐窗口采集，系统进程保存一份共享全树。 @param hdc 连接。 @param stage 目录。
-    @param remote 临时文件。 @param window 请求关联窗口。 @return 全树、来源及官方包名。
+    """@brief 普通应用逐窗口采集，系统进程保存一份共享完整森林原文。 @param hdc 连接。 @param stage 目录。
+    @param remote 临时文件。 @param window 请求关联窗口。 @return 全部根、来源及官方包名。
     """
     key = f"process-{window['process_id']}" if window["is_system"] else f"window-{window['window_id']}"
     path = remote["layout"] + f"-accessibility-inspector-{key}.txt"
@@ -96,20 +106,20 @@ def collect_inspector(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict
         fail("WindowManagerService did not produce an accessibility Inspector dump")
     destination = stage / "accessibility-inspector" / f"{key}-inspector.txt"
     hdc.receive(path, destination, f"receive_inspector_{key}")
-    text = destination.read_text(encoding="utf-8")
+    text = destination.read_bytes().decode("utf-8")
     verify_window_response(text, window)
     bundles = re.findall(r"(?m)^bundleName:([A-Za-z_][A-Za-z0-9_.]*)\s*$", text)
     if len(bundles) != 1:
         fail("Inspector response requires one verified bundle name")
     # 两种官方 dump 共用缩进文本语法；此处内容来源始终是 AccessibilityManager。
-    return {"root": parse_arkui(text), "raw": artifact_info(stage, destination), "bundle_name": bundles[0]}
+    return {"roots": parse_forest(text), "raw": artifact_info(stage, destination), "bundle_name": bundles[0]}
 
 
 def save_window_accessibility(stage: Path, window: dict, inspector: dict) -> dict:
     """@brief 保存逐窗口响应或系统会话子树，明确记录来源选择。 @param stage 证据目录。
     @param window 关联窗口。 @param inspector 官方无障碍全树。 @return 无障碍索引。
     """
-    selected = select_inspector_window(inspector["root"], window) if window["is_system"] else inspector["root"]
+    selected = select_inspector_window(inspector["roots"], window)
     selection = {"kind": "window_response", "window_id": window["window_id"],
                  "process_id": window["process_id"], "source_line": selected["source_line"]}
     if window["is_system"]:

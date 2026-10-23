@@ -52,6 +52,15 @@ path = "{capture_id}.png"
 不能证明的变换、裁剪、树归属或窗口覆盖明确拒收。
 具体几何边界见[精确窗口映射](exact-window-mapping.md)。
 
+Inspector 无障碍响应可以包含多个同级根。官方
+[DumpTree](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/adapter/ohos/osal/accessibility/accessibility_hidumper_osal.cpp#L579-L605)
+会依次输出主渲染管线及子管线的根，使用相同深度。采集器完整解析这些根，
+保留全部原文、属性和行号；系统窗口在全部根中按 `WindowScene` 的
+`compid=session<window_id>` 与 WMS 会话的无障碍节点 ID 共同唯一选择。
+跨根重复匹配、重复身份属性或任一根的格式错误均拒收，不取第一个根，不合成虚构父节点。
+普通应用的逐窗 Inspector 响应如有多根，在缺少明确归属证据时拒收。
+ArkUI 窗口树仍必须单根；所有子节点继续严格按两个空格递进，不放宽缩进规则。
+
 像素、全量窗口和树的首尾差异只作诊断；内容拒收针对目标换页或主体空白。
 首尾目标裁图仅在内存中比较，`page-stability.json` 绑定原观测摘要。
 `unobservable` 表示观察不足，不宣称稳定已经证实；最终图片验收仍然独立。

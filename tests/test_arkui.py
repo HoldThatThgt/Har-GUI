@@ -2,7 +2,7 @@
 
 import unittest
 
-from har_capture.arkui import count_arkui_nodes, parse_arkui
+from har_capture.arkui import count_arkui_nodes, parse_arkui, parse_forest
 from har_capture.hdc import CaptureError
 
 
@@ -72,6 +72,44 @@ class ArkuiParsingTests(unittest.TestCase):
         self.assertEqual(root["source_line"], 3)
         self.assertEqual(count_arkui_nodes(root), 2)
         self.assertEqual(root["children"][0]["raw"], "")
+
+    def test_forest_preserves_both_official_root_styles_and_global_source_lines(self):
+        text = ("WinId: 5\r\nPid: 200\r\nbundleName:com.example.system\r\n"
+                "  |-> root childSize:1\r\n    | ID: 0\r\n"
+                "    |-> WindowScene childSize:0\r\n        ID: 90\r\n        compid: session9\r\n"
+                "  |-> root childSize:0\r\n      ID: 10602\r\n      compid: \r\n"
+                "      Payload: {\r\n        nested value\r\n      }\r\n")
+        roots = parse_forest(text)
+        self.assertEqual(len(roots), 2)
+        self.assertEqual([root["attributes"]["ID"] for root in roots], ["0", "10602"])
+        self.assertEqual([root["source_line"] for root in roots], [4, 9])
+        self.assertEqual([root["declared_child_count"] for root in roots], [1, 0])
+        self.assertEqual(sum(count_arkui_nodes(root) for root in roots), 3)
+        self.assertEqual(roots[0]["children"][0]["source_line"], 6)
+        self.assertEqual(roots[0]["children"][0]["raw"], "        ID: 90\r\n        compid: session9\r\n")
+        self.assertEqual(roots[1]["raw"], "      ID: 10602\r\n      compid: \r\n"
+                         "      Payload: {\r\n        nested value\r\n      }\r\n")
+        self.assertEqual(roots[1]["children"], [])
+
+    def test_single_window_parser_still_rejects_a_valid_forest(self):
+        text = "  |-> root childSize:0\n      ID: 0\n  |-> root childSize:0\n      ID: 10\n"
+        self.assertEqual(len(parse_forest(text)), 2)
+        with self.assertLogs(level="ERROR"), self.assertRaisesRegex(CaptureError, "exactly one component tree"):
+            parse_arkui(text)
+
+    def test_forest_rejects_malformed_later_roots_and_descendants_without_returning_a_prefix(self):
+        prefix = "  |-> root childSize:0\n      ID: 0\n"
+        tails = {
+            "lower root indent": " |-> root childSize:0\n",
+            "broken node count": "  |-> root childSize:no\n",
+            "tab root indent": "\t|-> root childSize:0\n",
+            "skipped later child": "  |-> root childSize:1\n      |-> Text childSize:0\n",
+            "odd later child": "  |-> root childSize:1\n     |-> Text childSize:0\n",
+            "unmatched later dedent": "  |-> root childSize:1\n    |-> Row childSize:0\n   |-> Text childSize:0\n",
+        }
+        for label, tail in tails.items():
+            with self.subTest(label=label), self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                parse_forest(prefix + tail)
 
     def test_invalid_tree_shapes_are_rejected(self):
         cases = {

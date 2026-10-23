@@ -58,9 +58,12 @@ def attach_node(stack: list[tuple[int, dict]], node: dict, indent: int) -> None:
     stack.append((indent, node))
 
 
-def parse_arkui(text: str) -> dict:
-    """@brief 解析单根 ArkUI 文本树。 @param text 未经改写的原文。 @return 单根组件树。"""
-    root = None
+def parse_forest(text: str) -> list[dict]:
+    """@brief 完整解析同级根森林，所有根使用相同缩进且子节点严格增加两空格。
+    @param text 未经改写的原文。 @return 保留原始顺序、属性和行号的全部根。
+    """
+    roots = []
+    root_indent = None
     current = None
     property_lines = []
     stack = []
@@ -77,15 +80,28 @@ def parse_arkui(text: str) -> dict:
         current = create_node(match, line_number)
         property_lines = []
         indent = len(match["indent"])
-        if root is None:
-            root = current
+        if root_indent is None:
+            root_indent = indent
+        if indent == root_indent:
+            roots.append(current)
+            stack.clear()
             stack.append((indent, current))
         else:
             attach_node(stack, current, indent)
-    if root is None:
+    if not roots:
         fail("ArkUI dump contains no component tree")
     finish_node(current, property_lines)
-    return root
+    return roots
+
+
+def parse_arkui(text: str) -> dict:
+    """@brief 要求 ArkUI 窗口或已选择子树恰有一个根，不把其他根丢弃或合成父节点。
+    @param text 未经改写的原文。 @return 唯一组件树。
+    """
+    roots = parse_forest(text)
+    if len(roots) != 1:
+        fail(f"ArkUI dump must contain exactly one component tree; found {len(roots)}")
+    return roots[0]
 
 
 def count_arkui_nodes(root: dict) -> int:
