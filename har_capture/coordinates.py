@@ -10,12 +10,17 @@ from har_capture import affine
 from har_capture.arkui import node_property_text
 
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+RRECT_DUMP = re.compile(
+    rf"rect:\[x:({NUMBER}) y:({NUMBER}) width:({NUMBER}) height:({NUMBER})\] "
+    rf"radius:\[\[({NUMBER}) ({NUMBER})\] \[({NUMBER}) ({NUMBER})\] "
+    rf"\[({NUMBER}) ({NUMBER})\] \[({NUMBER}) ({NUMBER})\]\]")
+CLIP_TO_BOUNDS = 1 << 0
 RECT = re.compile(rf"^\[({NUMBER}),\s*({NUMBER})\],\[({NUMBER}),\s*({NUMBER})\]$")
 LOCAL_RECT = re.compile(rf"^RectT \(({NUMBER}),\s*({NUMBER})\) - \[({NUMBER}) x ({NUMBER})\]$")
 RENDER_NODE = re.compile(r"^( *)\| (\w+_NODE)\[(\d+)\]")
 CLIENT_NODE = re.compile(r"^\s*(?:\|\s*)?(\w+Node)\[(\d+)\].*$", re.MULTILINE)
 NON_LAYOUT = {"JsView", "IfElse", "ForEach", "LazyForEach", "Repeat", "SyntaxItem", "NodeSlot", "Span", "__Recycle__"}
-UNSUPPORTED = re.compile(r"Skew|Persp|Matrix|ClipBounds|CustomClip|ClipRRect|Mask|SDF|Attraction|Spherize")
+UNSUPPORTED = re.compile(r"Skew|Persp|Matrix|ClipBounds|CustomClip|ClipR[Rr]ect|Mask|SDF|Attraction|Spherize")
 ZERO_ONLY = {"TranslateZ", "PivotZ"}
 IDENTITY_PROJECTION = (affine.IDENTITY, 0.0)
 SOURCES = {
@@ -205,6 +210,15 @@ def modifier_items(content: str, owned: bool) -> list:
             raise ValueError("invalid_render_modifier_serialization")
         name = match[1]
         start = position + match.end()
+        if name == "ClipRrect":
+            # 官方 RRect 属性转储没有闭合最外层方括号，按明确结构读取，不补齐其他损坏字段。
+            value = RRECT_DUMP.match(content, start)
+            if value is None:
+                raise ValueError("invalid_render_modifier_serialization:ClipRrect")
+            list(map(number, value.groups()))
+            items.append((name, value[0]))
+            position = value.end()
+            continue
         if owned and name in {"MaterialNGFilter", "MaterialShader"}:
             items.append((name, content[start:]))
             break
@@ -231,6 +245,7 @@ def modifier_values(line: str) -> dict:
 def verify_modifiers(render: dict) -> dict:
     """@brief 验证当前与待应用变换并拒绝未知裁剪。 @param render 渲染节点。 @return 已验证修饰器。"""
     values = modifier_values(render["line"])
+    verify_inactive_render_rrect(render, values)
     for key, entries in values.items():
         if key in {"AttractionFraction", "AttractionDstpoint"}:
             fraction = values.get("AttractionFraction", ["0"])
@@ -238,7 +253,7 @@ def verify_modifiers(render: dict) -> dict:
                 continue
         allowed_masks = {"ShadowMask", "BackgroundBlurMaskColor", "BehindWindowFilterMaskColor",
                          "ForegroundBlurMaskColor"}
-        if UNSUPPORTED.search(key) and key not in allowed_masks and key != "CustomClipToFrame":
+        if UNSUPPORTED.search(key) and key not in allowed_masks and key not in {"CustomClipToFrame", "ClipRrect"}:
             raise ValueError("unsupported_render_modifier:" + key)
         if key in ZERO_ONLY and any(abs(number(value)) > 0.000001 for value in entries):
             raise ValueError("unsupported_render_transform:" + key)
@@ -246,6 +261,54 @@ def verify_modifiers(render: dict) -> dict:
     if "animationInfo:" in render["line"] or re.search(r"\banimation:[1-9]", render["line"]):
         raise ValueError("active_render_animation")
     return values
+
+
+def current_drawable_status(render: dict) -> int:
+    """@brief 只读取真实顶层绘制状态及后续缓存字段，拒绝名字和命令中的伪字段。
+    @param render 同一渲染节点原行。 @return 唯一当前绘制状态位。
+    """
+    pattern = (r"\[|\]|(?P<boundary>\b(?:DrawCmdModifiers|OtherModifiers):)"
+               r"|(?:^|,\s*)(?P<field>drawableVecStatus|opincRootCacheNull|layerPartCacheNull):"
+               r"\s*(?P<value>[^\s,\[\]]+)")
+    depth, fields = 0, []
+    for match in re.finditer(pattern, render["line"]):
+        if match[0] in {"[", "]"}:
+            depth += 1 if match[0] == "[" else -1
+            if depth < 0:
+                raise ValueError("invalid_current_render_clip_status")
+        elif match["boundary"]:
+            if depth == 0:
+                break
+        elif depth == 0:
+            fields.append((match["field"], match["value"], match.start(), match.end()))
+    if (depth or [item[0] for item in fields] != ["drawableVecStatus", "opincRootCacheNull", "layerPartCacheNull"]
+            or re.fullmatch(r"\d+", fields[0][1]) is None
+            or any(item[1] not in {"true", "false"} for item in fields[1:])
+            or any(render["line"][first[3]:second[2]].strip(" ,\t")
+                   for first, second in zip(fields, fields[1:]))):
+        raise ValueError("invalid_current_render_clip_status")
+    return int(fields[0][1])
+
+
+def verify_inactive_render_rrect(render: dict, values: dict) -> None:
+    """@brief 空形状候选必须另有当前裁剪关闭的状态位，打印零本身不证明裁剪未生效。
+    @param render 当前渲染记录。 @param values 已完整解析的待应用修饰器。
+    @see docs/render-modifiers.md 官方序列化与当前裁剪状态来源。
+    """
+    entries = values.get("ClipRrect")
+    if entries is None:
+        return
+    if len(set(entries)) != 1:
+        raise ValueError("ambiguous_render_clip:ClipRrect")
+    match = RRECT_DUMP.fullmatch(entries[0])
+    if match is None:
+        raise ValueError("invalid_render_modifier_serialization:ClipRrect")
+    numbers = list(map(number, match.groups()))
+    if numbers[2] > 0 and numbers[3] > 0:
+        raise ValueError("unsupported_render_modifier:ClipRrect")
+    # GetClipToRRect 是此状态位的或条件；当前关闭证据与待应用形状独立，不能用后者替代。
+    if current_drawable_status(render) & CLIP_TO_BOUNDS or current_clip_flags(render)["ClipToBounds"]:
+        raise ValueError("unverified_current_render_clip:ClipRrect")
 
 
 def scalar_modifier(values: dict, name: str, default: float) -> float:
