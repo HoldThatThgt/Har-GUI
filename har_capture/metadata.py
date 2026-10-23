@@ -10,6 +10,19 @@ from PIL import Image
 
 from har_capture.hdc import fail
 
+
+def artifact_info(stage: Path, path: Path) -> dict:
+    """@brief 保存相对采集目录的文件摘要。 @param stage 采集目录。 @param path 文件。 @return 摘要。"""
+    return {**file_info(path), "file": path.relative_to(stage).as_posix()}
+
+
+def verify_window_response(text: str, window: dict) -> None:
+    """@brief 核验唯一响应窗口与进程。 @param text 官方完整响应。 @param window 当前窗口。"""
+    for label, expected in (("WinId", window["window_id"]), ("Pid", window["process_id"])):
+        matches = re.findall(rf"(?m)^{label}:\s*(\d+)\s*$", text)
+        if matches != [str(expected)]:
+            fail(f"ArkUI response does not match {label} for window {window['window_id']}")
+
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 WINDOW_COLUMNS = (
     "WindowName DisplayId Pid WinId Type Mode Flag ZOrd Orientation "

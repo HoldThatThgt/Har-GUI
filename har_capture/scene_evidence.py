@@ -138,6 +138,9 @@ def parse_source_node(raw: bytes, source_line: int) -> dict:
         node = pending.pop()
         node["source_line"] += source_line - 1
         pending.extend(node["children"])
+        for block in node.get("embedded_trees", []):
+            block["source_line"] += source_line - 1
+            pending.extend(block["roots"])
     return result
 
 

@@ -214,6 +214,16 @@ class PrivacyTests(unittest.TestCase):
                                  "clipping_status": "not_applicable", "screen_bounds": None}
         self.assertEqual(viewer_tree(self.tree)["geometry"], self.tree["geometry"])
 
+    def test_embedded_trees_remain_inspectable_without_exposing_text_or_inventing_geometry(self):
+        remote = {"attributes": {"type": "Text", "ID": "0", "Content": "PRIVATE_BODY_SENTINEL"},
+                  "children": [], "raw": "PRIVATE_BODY_SENTINEL", "source_attributes": {}}
+        self.tree["embedded_trees"] = [{"source_line": 7, "raw": "PRIVATE_BODY_SENTINEL", "roots": [remote]}]
+        result = viewer_tree(self.tree)
+        self.assertNotIn("PRIVATE_BODY_SENTINEL", json.dumps(result))
+        inner = result["embedded_trees"][0]["roots"][0]
+        self.assertEqual(inner["attributes"], {"type": "Text", "ID": "0"})
+        self.assertNotIn("geometry", inner)
+
 
 if __name__ == "__main__":
     unittest.main()

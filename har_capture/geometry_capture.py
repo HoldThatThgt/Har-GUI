@@ -6,21 +6,36 @@ import shlex
 from pathlib import Path
 
 from har_capture.hdc import Hdc, fail
-from har_capture.tree_capture import artifact_info, verify_window_response
+from har_capture.metadata import artifact_info, verify_window_response
 
 
 def parse_geometry_response(text: str) -> dict:
     """@brief 提取唯一原生几何 JSON。 @param text 官方完整响应。 @return 原生树。"""
-    candidates = [line for line in text.splitlines() if line.startswith('{"$type"')]
+    candidates = [line for line in text.splitlines() if line.lstrip().startswith("{")]
     if len(candidates) != 1:
-        fail("ArkUI allInfo did not return exactly one native geometry tree")
+        fail("ArkUI complete geometry response did not return exactly one JSON object")
     try:
         root = json.loads(candidates[0])
     except json.JSONDecodeError:
-        fail("ArkUI allInfo returned invalid native geometry JSON")
-    if not isinstance(root, dict) or "$ID" not in root:
-        fail("ArkUI allInfo returned an invalid native geometry root")
+        fail("ArkUI complete geometry response returned invalid JSON")
+    if not isinstance(root, dict) or type(root.get("$ID")) is not int or not isinstance(root.get("$type"), str):
+        fail("ArkUI complete geometry response returned an invalid root identity")
     return root
+
+
+def verify_native_application(root: dict, window: dict) -> None:
+    """@brief 将完整原生应用信息绑定真实窗口，系统 UIContent 宿主与会话窗口分别保存。
+    @param root 原生完整树。 @param window 已核验窗口。
+    """
+    info = root.get("appInfo")
+    if (not isinstance(info, dict) or type(info.get("WindowID")) is not int
+            or not isinstance(info.get("BundleName"), str) or not info["BundleName"]):
+        fail("ArkUI complete geometry requires application identity metadata")
+    session = window.get("session", window.get("trees", {}).get("arkui", {}).get("session", {}))
+    if session.get("is_system") or window.get("is_system"):
+        return
+    if info["WindowID"] != window["window_id"] or info["BundleName"] != window["bundle_name"]:
+        fail(f"ArkUI application identity differs from window {window['window_id']}")
 
 
 def receive_geometry_response(hdc: Hdc, stage: Path, remote: dict, window: dict) -> Path:
@@ -30,7 +45,8 @@ def receive_geometry_response(hdc: Hdc, stage: Path, remote: dict, window: dict)
     window_id = window["window_id"]
     path = remote["layout"] + f"-geometry-{window_id}.txt"
     remote[f"geometry_{window_id}"] = path
-    command = f"hidumper -s WindowManagerService -a '-w {window_id} -allInfo' | cat > {shlex.quote(path)}"
+    command = f"hidumper -s WindowManagerService -a '-w {window_id} -allInfoWithParamConfig'"
+    command += f" | cat > {shlex.quote(path)}"
     command += f" && test -s {shlex.quote(path)} && echo HAR_CAPTURE_GEOMETRY_READY"
     output = hdc.run(["shell", command], f"geometry_{window_id}")
     if "HAR_CAPTURE_GEOMETRY_READY" not in output.splitlines():
@@ -48,6 +64,7 @@ def collect_window_geometry(hdc: Hdc, stage: Path, remote: dict, window: dict) -
     text = response.read_bytes().decode("utf-8")
     verify_window_response(text, window)
     geometry = parse_geometry_response(text)
+    verify_native_application(geometry, window)
     path = stage / "arkui" / f"window-{window['window_id']}-geometry.json"
     path.write_text(json.dumps(geometry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"arkui_geometry": artifact_info(stage, path), "response": artifact_info(stage, response),
@@ -123,7 +140,8 @@ def collect_geometry_evidence(hdc: Hdc, stage: Path, remote: dict, windows: list
         if session.get("is_system") and key in system_processes:
             results[window["window_id"]] = dict(system_processes[key])
             continue
-        results[window["window_id"]] = collect_window_geometry(hdc, stage, remote, window)
+        results[window["window_id"]] = (collect_window_geometry(hdc, stage, remote, window) if session["is_system"]
+                                        else dict(window["trees"]["arkui"]["coordinate_evidence"]))
         if session.get("is_system"):
             system_processes[key] = results[window["window_id"]]
     render_files = collect_render_evidence(hdc, stage, remote)

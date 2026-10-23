@@ -209,4 +209,8 @@ def viewer_tree(node: dict) -> dict:
         result["geometry"] = {key: value for key, value in node["geometry"].items()
                               if key in ("status", "screen_bounds", "rectangular_clip_bounds", "reason",
                                          "rendered", "render_state", "render_state_source", "clipping_status")}
+    if "embedded_trees" in node:
+        result["embedded_trees"] = [{"source_line": block["source_line"],
+                                     "roots": [viewer_tree(root) for root in block["roots"]]}
+                                    for block in node["embedded_trees"]]
     return result

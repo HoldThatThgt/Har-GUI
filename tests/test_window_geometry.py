@@ -12,7 +12,7 @@ from har_capture.coordinates import detached_render_index, render_index
 from har_capture.hdc import CaptureError, Hdc
 from har_capture.capture_facts import verify_screen_geometry
 from har_capture.scene_evidence import load_source, select_window_scene
-from har_capture.tree_capture import artifact_info
+from har_capture.metadata import artifact_info
 from har_capture.window_geometry import attach_captured_screen_geometry, read_window_geometry, window_screen_geometry
 from tests.test_window_mapping import ancestor_mapping_fixture, component, mapping_fixture, render_line
 
@@ -46,6 +46,7 @@ def source_fixture():
     screen = copy.deepcopy(scene["path"][0])
     screen["children"] = children + [scene["path"][-1]]
     native = copy.deepcopy(scene["native"])
+    native["appInfo"] = {"WindowID": 1, "BundleName": "com.ohos.sceneboard"}
     native["$children"] = native_children + native["$children"]
     render = evidence["render_tree"].splitlines(keepends=True)
     render = "".join(render[:2] + rows + render[2:])

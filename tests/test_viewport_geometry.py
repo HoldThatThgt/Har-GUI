@@ -65,7 +65,8 @@ def viewport_render_tree(surface_size, application_size, transform):
             render_line(2, "SURFACE_NODE", 901, f"546 204 {width} {height}",
                         "nodeName: [session126], ClipToFrame[True], OtherModifiers:[ClipToFrame:[true]]"),
             render_line(3, "SURFACE_NODE", 902, f"0 0 {surface_width} {surface_height}",
-                        f"ClipToFrame[True], OtherModifiers:[Scale:[x:{sx} y:{sy}], Pivot:[x:0 y:0], "
+                        f"Scale[{sx} {sy}] Pivot[0 0] Translate[{tx} {ty}], ClipToFrame[True], "
+                        f"OtherModifiers:[Scale:[x:{sx} y:{sy}], Pivot:[x:0 y:0], "
                         f"Translate:[x:{tx} y:{ty}], ClipToFrame:[true]]"),
             render_line(4, "ROOT_NODE", 100, f"0 0 {width} {height}", "OtherModifiers:[]"),
             render_line(5, "CANVAS_NODE", 101, f"{width - 11} 10 20 20", "OtherModifiers:[]")]
@@ -192,7 +193,8 @@ class ApplicationViewportTests(unittest.TestCase):
         self.assertEqual(child["screen_bounds"], {"x": 536, "y": 214, "width": 20, "height": 20})
         self.assertEqual(child["rectangular_clip_bounds"], {"x": 546, "y": 214, "width": 10, "height": 20})
         clip = next(item for item in root["clip_chain"] if item.get("render_node_id") == "902")
-        self.assertEqual(clip["local_axis_directions"], {"x": -1, "y": 1})
+        self.assertLess(clip["local_to_screen"][0], 0)
+        self.assertGreater(clip["local_to_screen"][3], 0)
 
     def test_session_identity_and_application_render_ownership_remain_strict(self):
         args = viewport_fixture()
@@ -232,7 +234,7 @@ class ApplicationViewportTests(unittest.TestCase):
         self.assert_failed(args, "scene_render_vector_mismatch:Scale")
 
     def test_unknown_parent_transforms_and_clips_are_not_exempted_by_unequal_sizes(self):
-        for modifier, code in (("Rotation:[5]", "unsupported_render_transform:Rotation"),
+        for modifier, code in (("Rotation:[5]", "scene_render_scalar_mismatch:Rotation"),
                                ("CustomClip:[1 2 3 4]", "unsupported_render_modifier:CustomClip")):
             with self.subTest(modifier=modifier):
                 args = viewport_fixture()

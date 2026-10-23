@@ -678,7 +678,9 @@ run.output/
 这是该项目的导出坐标约定，分辨率相同不能证明系统的逻辑单位或 vp 与像素天然相等。
 无障碍 bounds 已处于显示器坐标；WMS 矩形、变换、树边界分别保存。
 ArkUI `FrameRect` 是局部布局值，不能给所有节点简单加窗口左上角就当成屏幕边界。
-当前用 `-element`、`-allInfo` 的 `$rect` 及 RenderService 渲染树交叉验证应用节点。
+当前用 `-default -all` 完整原文、`-allInfoWithParamConfig` 的 `$rect` 及 RenderService 渲染树
+交叉验证应用节点。原始森林单独保留，窗口树依据同批原生父链和双方明确的缓存归属关联，
+不能取两棵树的交集或丢弃原生节点来满足覆盖要求。
 `geometry.screen_bounds` 表示裁剪前的轴对齐组件边界，矩形和圆角裁剪保存在 `clip_chain`，
 不冒充经过其他窗口遮挡后的像素轮廓。未挂载节点依据 `allNodeNotOnTree` 保留 `rendered=false`，
 非布局节点标记不适用；不能证明的变换或裁剪明确拒收。系统树的独立采集不代表其全部节点已转换坐标。

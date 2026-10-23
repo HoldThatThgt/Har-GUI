@@ -13,7 +13,7 @@ from har_capture.system_accessibility import (
     select_inspector_window,
     supplement_missing_windows,
 )
-from har_capture.tree_capture import artifact_info
+from har_capture.metadata import artifact_info
 from tests.support import fake_hdc, raw_arkui
 
 
@@ -200,9 +200,12 @@ class SystemAccessibilityTests(unittest.TestCase):
                    for window_id, left in ((92, 10), (93, 200))]
         metadata = {"windows": [], "window_inventory": windows, "files": {},
                     "display": {"id": 0, "width": 3120, "height": 2080}}
+        from tests.support import native_arkui
         hdc = fake_hdc({"inspector_window-92": application_inspector(),
                         "inspector_window-93": application_inspector(93, left=200),
-                        "arkui_response_93": raw_arkui(93)}, command_outputs={
+                        "arkui_response_93": raw_arkui(93),
+                        "geometry_92": native_arkui(92, 202, "com.example.app"),
+                        "geometry_93": native_arkui(93, 202, "com.example.app")}, command_outputs={
                             "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY",
                             "inspector_window-93": "HAR_CAPTURE_INSPECTOR_READY"})
         supplement_missing_windows(hdc, stage, {"layout": "/fixture"}, metadata)

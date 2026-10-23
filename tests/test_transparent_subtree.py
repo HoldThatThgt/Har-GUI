@@ -131,7 +131,7 @@ class TransparentSubtreeTests(unittest.TestCase):
     def test_finite_ancestor_rectangular_clip_is_not_confused_with_transparency(self):
         args = transparent_fixture()
         rewrite_render(args, 182, lambda row: row.replace("Alpha[0.000]", "ClipToFrame[True], Alpha[0.000]")
-                       .replace("pid:2000->Alpha:[0.0]", "ClipToFrame:[true], pid:2000->Alpha:[0.0]"))
+                       .replace("pid:2000->Alpha:[0.0]", "pid:2000->ClipToFrame:[true], pid:2000->Alpha:[0.0]"))
         child = self.verified(args)["children"][0]["children"][0]
         self.assert_transparent(child, "unprepared")
         clip = next(item for item in child["geometry"]["clip_chain"] if item.get("render_node_id") == "182")
@@ -284,18 +284,19 @@ class TransparentSubtreeTests(unittest.TestCase):
         args = transparent_fixture()
         rewrite_render(args, 183, lambda row: row.replace("OtherModifiers:[",
                        "ClipToBounds[False], ClipToFrame[False], OtherModifiers:["
-                       "ClipToBounds:[false], ClipToFrame:[false], "))
+                       "pid:2000->ClipToBounds:[false], pid:2000->ClipToFrame:[false], "))
         child = self.verified(args)["children"][0]["children"][0]
         self.assert_transparent(child, "unprepared")
         self.assertFalse(any(item.get("render_node_id") == "183" for item in child["geometry"]["clip_chain"]))
 
     def test_transparency_does_not_hide_conflicting_applied_child_or_parent_geometry(self):
-        for render_id, old, new in ((183, "23 23 46 46", "24 23 46 46"),
-                                   (182, "453 561 91 91", "454 561 91 91")):
+        for render_id, old, new, code in ((183, "Bounds[23 23 46 46]", "Bounds[24 23 46 46]",
+                                          "transparent_render_current_bounds_conflict"),
+                                         (182, "453 561 91 91", "454 561 91 91", "scene_render_bounds_mismatch")):
             args = transparent_fixture(applied=True)
             rewrite_render(args, render_id, lambda row: row.replace(old, new))
             with self.subTest(render_id=render_id):
-                self.assert_failed(args, "scene_render_bounds_mismatch")
+                self.assert_failed(args, code)
 
     def test_partial_nonfinite_or_mixed_applied_and_unprepared_boxes_remain_invalid(self):
         for bounds, frame in (("-inf 23 46 46", "-inf -inf -inf -inf"),

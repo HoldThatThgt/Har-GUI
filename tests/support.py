@@ -81,9 +81,10 @@ def raw_arkui(window_id=92, process_id=202, include_tree=True):
     """保留窗口响应头、组件原文和原始换行。"""
     text = f"WindowName: Example\r\nWinId: {window_id}\r\nPid: {process_id}\r\n"
     if include_tree:
-        text += ("|-> root childSize:1\r\n"
+        text += ("|-> root,0,0 childSize:1\r\n"
                  "    | ID: 0\r\n"
-                 "  |-> Text childSize:0\r\n"
+                 "  |-> Text,1,7001 childSize:0\r\n"
+                 "        ID: 1\r\n"
                  "        Content: 原始组件数据\r\n"
                  "        AccessibilityId: 7001\r\n"
                  "        Hint: 第一项\r\n"
@@ -91,6 +92,15 @@ def raw_arkui(window_id=92, process_id=202, include_tree=True):
     else:
         text += "ArkUI dump was written to the application file.\r\n"
     return text.encode("utf-8")
+
+
+def native_arkui(window_id=92, process_id=202, bundle="com.example.settings", root=None):
+    """构造完整原生响应，应用身份位于首键且每个原始节点都有对应身份。"""
+    tree = {"appInfo": {"WindowID": window_id, "BundleName": bundle}}
+    tree.update(copy.deepcopy(root if root is not None else {
+        "$type": "root", "$ID": 0, "$rect": "[0.00, 0.00],[1596.00,1468.00]",
+        "$children": [{"$type": "Text", "$ID": 1}]}))
+    return (f"WindowName: Example\nWinId: {window_id}\nPid: {process_id}\n" + json.dumps(tree)).encode()
 
 
 def raw_system_arkui(component_id="session92"):
@@ -122,6 +132,17 @@ def raw_system_arkui(component_id="session92"):
     return text.encode("utf-8")
 
 
+def native_system_arkui():
+    """系统完整原生树对应全部本地主根节点，UIContent 宿主与所请求会话身份分开。"""
+    root = {"appInfo": {"WindowID": 1, "BundleName": "com.example.system"}, "$ID": 0, "$type": "root",
+            "$rect": "[0,0],[3120,2080]", "$children": [
+                {"$ID": 101, "$type": "Text"},
+                {"$ID": 192, "$type": "WindowScene", "compid": "session92",
+                 "$rect": "[1034,153],[2630,1621]", "$children": [{"$ID": 193, "$type": "Text"}]},
+                {"$ID": 194, "$type": "WindowScene", "compid": "session80"}]}
+    return native_arkui(root=root)
+
+
 def system_session_details():
     """将已知窗口标记为系统会话，不依赖包名或窗口名推断。"""
     details = (FIXTURES / "session-details.txt").read_text(encoding="utf-8")
@@ -142,11 +163,10 @@ def fake_hdc(payloads=None, failure=None, command_outputs=None):
     hdc.device_info.return_value = {"serial": "test-device", "model": "test-model"}
     files = {"layout": raw_layout(), "screenshot": png_bytes(size=(3120, 2080)),
              "accessibility": raw_accessibility(), "arkui_response_92": raw_arkui(),
-             "arkui_response_80": raw_arkui(80, 201), "arkui_92": raw_arkui(), "arkui_80": raw_arkui(80, 201)}
+             "arkui_response_80": raw_arkui(80, 201)}
     for window_id, process_id in ((92, 202), (80, 201)):
-        geometry = {"$type": "root", "$ID": 0, "$rect": "[0.00, 0.00],[1596.00,1468.00]"}
-        files[f"geometry_{window_id}"] = (f"WinId: {window_id}\nPid: {process_id}\n"
-                                           + json.dumps(geometry)).encode()
+        bundle = "com.example.settings" if window_id == 92 else "com.example.reader"
+        files[f"geometry_{window_id}"] = native_arkui(window_id, process_id, bundle)
     files["render_geometry"] = b"| ROOT_NODE[1], Properties: Bounds[0 0 1 1] Frame[0 0 1 1], OtherModifiers:[]\n"
     files["render_detached_geometry"] = b"-- Render Node Not On Tree\n"
     files.update(payloads or {})

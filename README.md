@@ -444,10 +444,11 @@ captures/<UTC时间>-<随机标识>/
   accessibility.json    UITest -i 的原始无障碍窗口数组
   accessibility-inspector/  UITest 未覆盖窗口的原生 Inspector 响应和逐窗口 JSON
   arkui/
-    window-<ID>.json          从原文解析的完整窗口 ArkUI 组件树
+    window-<ID>.json          具有原文位置与归属证据的完整窗口 ArkUI 组件树
     window-<ID>.txt           原始窗口树文本；系统窗口保存精确的原文字节片段
+    window-<ID>-forest.json   普通应用完整原文森林，包含独立根和重复引用
     window-<ID>-response.txt  窗口管理器响应；系统窗口保留完整 ArkUI 导出
-    window-<ID>-geometry.json 原生 -allInfo 的已变换布局矩形
+    window-<ID>-geometry.json 原生 -allInfoWithParamConfig 完整树及应用信息
   render-tree.txt       RenderService 已挂载渲染树
   render-detached-tree.txt  RenderService 未挂载渲染树
   windows.txt           WindowManagerService 的完整文本输出
@@ -478,9 +479,26 @@ flowchart LR
 保存在同一个采集目录中；`metadata.json` 记录窗口与对应树文件的关联。
 
 截图与各棵树以相同的 `capture_id` 配对。`layout.json`、`accessibility.json` 和 ArkUI 原文
-保留设备返回的字节内容；`arkui/window-<ID>.json` 是从对应原文解析得到的结构化文件。
-组件顺序保持原样，复杂属性仍可通过节点中的原始文本核对。
+保留设备返回的字节内容。普通应用的完整原文先解析为 `window-<ID>-forest.json`；
+窗口 JSON 再与相邻采集的完整原生树关联，普通子节点的顺序必须一致，独立缓存根须有双方一致的
+`CachedItems` 与原文父节点证据。无法关联的原生节点会使本次采集失败。
+不属于当前窗口的独立根和 `BrokenChildren` 引用保留在完整森林中，不冒充已经验证的当前窗口节点。
+每个窗口节点保留 `source_line`、`source_header` 和 `source_association`，可从原文重建并核验；
+`attributes.type` 使用稳定组件名称，运行时节点标识不会混入结构类型。
+原文和原生树仍是顺序快照，不能视为原子采集。
 每个文件的大小和 SHA-256 记录在 `metadata.json.files` 中。
+
+```mermaid
+flowchart LR
+    Raw[完整原文响应] --> Forest[完整森林 JSON]
+    Forest --> Preserved[保留独立根、重复引用和嵌入树]
+    Forest --> Match[核验节点身份、父链和缓存归属]
+    Native[相邻采集的完整原生树] --> Match
+    Match --> Window[带原文位置的窗口树]
+    Window --> Geometry[核验屏幕几何与真实渲染状态]
+    Render[已挂载及未挂载渲染树] --> Geometry
+    Geometry --> Export[导出窗口 ArkUI JSON]
+```
 
 ## 应用与窗口字段
 
@@ -501,6 +519,7 @@ flowchart LR
 | `trees.accessibility` | 无障碍原始文件、窗口数组 JSON Pointer、节点数和来源 |
 | `trees.arkui` | ArkUI JSON 文件、摘要、节点数、输出位置、范围和会话证据 |
 | `trees.arkui.raw` | 对应 ArkUI 原文文件、大小和 SHA-256 |
+| `trees.arkui.forest` | 普通应用完整森林 JSON 的大小和 SHA-256，保留所有原文根 |
 | `display_id` | 窗口所属显示器 |
 | `window_name`、`process_id` | 窗口名称与进程 ID |
 | `window_type`、`window_mode` | 窗口管理器返回的类型与模式数值 |
@@ -524,25 +543,24 @@ ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘�
 | 可见窗口树 | `uitest dumpLayout -d 0 -m false -p <path>`，保留可见边界过滤 | `hostWindowId` |
 | 无障碍控件树 | `uitest dumpLayout -d 0 -i -p <path>`，关闭可见边界过滤，输出窗口数组 | 原始数组中的 `hostWindowId` 和 `bundleName` |
 | 逐窗口无障碍树 | `hidumper -s WindowManagerService -a '-w <ID> -inspector'`，补齐 UITest 未返回的暴露窗口 | 普通应用独立响应的 `WinId`、`Pid`、包名；系统会话精确选取 `WindowScene` 子树 |
-| 普通窗口 ArkUI 组件树 | `hidumper -s WindowManagerService -a '-w <ID> -element'` | 响应的 `WinId`、`Pid`，加会话详情核定范围 |
+| 普通窗口 ArkUI 组件树 | `hidumper -s WindowManagerService -a '-w <ID> -default -all'` | 完整森林与相邻完整原生树逐节点关联，双方缓存声明与父链共同核定范围 |
 | 系统窗口 ArkUI 组件树 | `hidumper -s WindowManagerService -a '-w <ID> -default -all'` | `WindowScene` 的 `AccessibilityId` 对应会话 `uiNodeId`，且 `compid=session<窗口ID>` |
+| 完整原生 ArkUI 树 | `hidumper -s WindowManagerService -a '-w <ID> -allInfoWithParamConfig'` | 普通应用核对 `appInfo.WindowID`、包名和响应进程；系统 UIContent 宿主与会话窗口身份分别保留 |
 | 会话详情 | `hidumper -s WindowManagerService -a '-c'` | `PersistentId`、`callingPid`、`isSystem`、`uiNodeId`、`displayId` |
 
 无障碍导出用于查看系统对外暴露的可访问属性；`-i` 并不保证所有内部节点或全部原生无障碍字段都被序列化。
 当前设备不支持新版 `-e accessibility`，工具不使用该参数。`-inspector` 也走无障碍导出逻辑，
-不能替代 `-element` 的 ArkUI 内部组件树。
+不能替代 ArkUI 内部组件树。
 
-普通窗口 `-element` 的官方输出有两种位置：小树写入命令输出，大树写入应用的 `files/arkui.dump`。
-工具在每条 `-element` 命令前后记录目标进程命名空间下文件的修改时间和大小；
-搜索应用私有的 `el1` 至 `el5` 数据区 `base` 目录，不假定所有应用都使用 `el2`。
-这些加密数据区由[官方应用沙箱目录](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/file-management/app-sandbox-directory.md)定义；
-实机备忘录的导出位于 `el5/base/haps/NotepadPhone/files/arkui.dump`。
-只有唯一文件新建或发生变化才接收，并立即保存，避免不同窗口覆盖同一文件或复用旧结果。
-文件不变、多个文件变化、窗口或进程不匹配都会使本次采集失败。
+普通窗口完整导出直接保存命令响应，使用官方 `OutPutDefault` 路径。
+旧的 `-element` 与私有 `arkui.dump` 文件发现逻辑已经删除，不在同一进程多份输出中猜选文件。
+原生完整树随后立即采集；原文、原生响应的窗口和进程身份必须匹配，正文覆盖必须完整。
 
 系统会话的官方路由按显示器选择 SceneBoard 根 UIContent；仅读取最后一个 `arkui.dump` 不足以获取完整结果。
 官方 `OutPutBySize` 会重开同名文件，多根或嵌套导出可能覆盖先前输出。
-系统会话使用 `-default -all` 一次输出当前注册表的全部根，避免这个文件分流过程。
+完整原文使用 `-default -all`；完整原生树使用不带额外过滤参数的 `-allInfoWithParamConfig`。
+这两个范围来自[官方 ArkUI 导出实现](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/pipeline_ng/pipeline_context.cpp)。
+该源码用于解释格式，设备实际输出仍须通过完整覆盖和几何校验，不能假定设备与公开源码版本相同。
 
 工具在完整原文中寻找唯一的 `WindowScene`：其 `AccessibilityId` 必须等于会话详情的 `uiNodeId`，
 且 `compid` 必须是 `session<窗口ID>`。`uiNodeId` 对应无障碍标识，不能简单用 ArkUI 的内部 `ID` 替代。
@@ -553,6 +571,9 @@ ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘�
 ## ArkUI JSON 节点
 
 每个 `arkui/window-<ID>.json` 保存一个窗口根节点，通过 `children` 递归保存全部后代。
+UIExtension 内嵌远端导出通过 `embedded_trees` 保留原文块和独立根，不将远端属性混入宿主节点。
+查看页可独立展开这些树。坐标校验统计当前原生树中的本地 Frame；独立嵌入树保留原始属性和行号，
+没有对应原生几何的远端节点不生成屏幕矩形。
 它可独立用于数据处理。选择 `application_arkui` 来源时，在完整原树上附加经过验证的 `geometry`，
 不改写 `FrameRect`；文件名由项目声明。查看器只嵌入结构属性。
 尚未挂载的节点明确保留 `rendered=false`，不会在截图中画出假的可见边框。

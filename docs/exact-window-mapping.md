@@ -48,9 +48,16 @@ flowchart LR
 每个 Frame 的 `geometry.source.window_mapping` 保存来源文件及 session、viewport、显示器和屏幕标识。
 外层裁剪按实际 RS 节点身份使用同一精确矩形，保留圆角和内容裁剪的来源。
 
-普通已挂载 Frame 也交叉核验局部矩形、Scale、Translate 以及影响几何的 Pivot。
+普通已挂载 Frame 也交叉核验局部矩形、Scale、Translate、二维 Rotation 及影响几何的 Pivot。
+局部到屏幕的变换使用六系数二维仿射矩阵，逐层组合后投影四角，再与独立原生矩形交叉核验。
+旋转的父节点和后代使用同一条变换链，不限制为方形叶节点。
 打印数值以各自明确的小数精度区间交叉核验；原生投影和裁剪的既有误差阈值未扩大。
 Skew、Persp、未知裁剪和活动动画继续拒收。
+
+`clip_chain` 保存局部矩形、圆角、`local_to_screen` 和变换后的 `corners`。
+`rectangular_clip_bounds` 是各轴对齐包络的交集，不表示旋转、圆角或窗口遮挡后的精确可见像素轮廓。
+材质内部的 `Shape`、`SDFRRectShape` 等字段保留在其所属修饰器中，不被重新解释为节点的独立几何修饰器。
+当前属性与带进程归属的待应用属性分别核验，待应用 Bounds/Frame 不替代当前坐标。
 
 ## 父级视口和应用根尺寸不同
 
@@ -118,24 +125,34 @@ WMS 仍发布 `0.71875`，对应旧的 `1472/2048`；与当前 `1471/2048` 的�
 有结构子节点不等于存在绘制内容；正面积、后代绘制、身份冲突、缺少证明或未知变换裁剪仍拒收。
 
 原始组件父子关系不等于实际渲染挂载关系。已观察到的原始及原生零尺寸 Frame 必须完整划分为
-挂载子树和有明确 `allNodeNotOnTree` 来源的未挂载森林，两组不重叠，合集覆盖全部已观察 Frame。
+挂载子树、有明确 `allNodeNotOnTree` 来源的未挂载森林，以及有明确客户端懒加载状态的未物化节点。
+各组不重叠，合集覆盖全部已观察 Frame。未物化节点须同时声明 `lazyLoad[1]` 与 `LAZY_LOAD`，
+在两份 RS 树中均不存在，且其局部变换恒等；它不冒充未挂载森林成员。
 挂载组必须与实际 RS 子树完全一致；未挂载组逐项核验身份、原生投影、实际父关系、完整后代、
 双零绘制标记和局部变换裁剪。未挂载森林根保留独立根边界，非根仍须匹配原生帧父链。
 完整子树证明中的当前 Bounds/Frame 必须同时为全 `-inf`，或均为与原始绘制框一致的有限零尺寸框；
 混合无穷与有限框、正面积或原点冲突都不能作为空帧证明。
-未知、缺失、额外节点或挂载状态冲突均拒收，不能用隐藏或懒加载标记替代未挂载来源。
+未知缺失、额外节点或挂载状态冲突均拒收，不能仅凭隐藏标记忽略缺失来源。
+
+零面积节点自身启用矩形裁剪时，当前裁剪标记必须与同进程修饰器一致；唯一客户端自身行还须提供
+同进程且相同的两个 UIContext 标识，以及与原文一致的零 Bounds/Frame。完整无绘制子树证明仍须通过。
+此时保留独立客户端来源，裁剪边界标记 `ArkUI.native_zero_area`；无穷大的当前 RS 框不作为屏幕坐标，
+也不把客户端零框伪称为服务端当前或待应用的 Bounds 修饰器。
 
 ```mermaid
 flowchart LR
     Observed[全部已观察的原始及原生零尺寸 Frame] --> Mounted[挂载组与实际 RS 子树完全一致]
     Observed --> Detached[未挂载组逐项核验独立森林证据]
-    Mounted --> Coverage[两组不重叠且完整覆盖]
+    Observed --> Lazy[未物化组核验懒加载身份和恒等变换]
+    Mounted --> Coverage[各组不重叠且完整覆盖]
     Detached --> Coverage
-    Coverage --> Proof[分别保存挂载与未挂载证明]
+    Lazy --> Coverage
+    Coverage --> Proof[分别保存各组来源证明]
 ```
 
 `geometry.source.no_draw_render_node_ids` 只记录经核验的挂载节点，
 `geometry.source.no_draw_detached_render_node_ids` 单独记录该证明中明确未挂载的节点。
+`geometry.source.no_draw_unmaterialized_render_node_ids` 单独记录有完整未物化证明的节点。
 节点自身的挂载状态和原始树结构照常保留，不把未挂载后代伪装成挂载子树成员。
 
 官方 [DumpTree](https://github.com/openharmony/arkui_ace_engine/blob/21b150e7bb1d5308846f8e5be8ef0482fb433315/frameworks/core/components_ng/base/ui_node.cpp#L1419-L1447)
@@ -155,7 +172,7 @@ flowchart LR
 单轴负尺寸仅支持明确的 `-1`、另一轴为正，并同时核验 RS Bounds/Frame、真正叶节点及唯一的双零绘制标记。
 完整带符号端点投影必须匹配原生框，自身未证明裁剪仍拒收；详见[单轴负尺寸节点](mixed-dimension-nodes.md)。
 
-## 透明祖先与未准备后代
+## 透明祖先与未应用后代
 
 正面积节点也可能保留未初始化的 RS Bounds/Frame。官方
 [UpdateShouldPaint](https://github.com/openharmony/graphic_graphic_2d/blob/c19cedf62fefde6bf184aa815feeaf0346aa4d49/rosen/modules/render_service_base/src/pipeline/rs_render_node.cpp#L3839-L3846)
@@ -166,7 +183,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     Alpha[同一祖先的 ArkUI 原生 RS 透明度均为零] --> Parent[已准备 已跳过子树 真实父链通过]
-    Parent --> Child[后代未准备 当前双框均未初始化]
+    Parent --> Child[后代无绘制 当前双框未应用或保留旧值]
     Child --> Verify[原文与原生投影 同进程待应用双框 变换裁剪核验]
     Verify --> Result[保留逻辑边界 标记透明祖先导致未绘制]
 ```
@@ -179,16 +196,18 @@ flowchart LR
 准备状态与绘制标记只从官方节点头读取；当前 Properties 的 Bounds 和 Frame 各自必须唯一，
 绘制内容或待应用修饰器中的同名文字不能补齐缺少的状态证据。
 
-未准备后代的 PrepareSeq、PostPrepareSeq 和 VsyncId 必须均为零，当前 Bounds 和 Frame
-均为全 `-inf`，并有唯一双零绘制标记。其非负逻辑框仍由完整原文、原生投影及已核验的父变换确定；
+后代的 PrepareSeq、PostPrepareSeq 和 VsyncId 必须全部为零或全部为正，并有唯一双零绘制标记。
+当前 Bounds 和 Frame 必须同时为全 `-inf`，或均为相互一致的非负有限旧框；
+有限与无穷混用、双框冲突仍拒收。其非负逻辑框由完整原文、原生投影及已核验的父变换确定；
 同进程待应用 Bounds/Frame 各自必须唯一且与原始局部框匹配，但不会被写成当前 RS 边界。
 未准备节点自身已生效或未知的裁剪仍拒收，有限祖先的已证裁剪保留。
 不具备原生节点证据的 Overlay 不使用该证明，继续执行其原有独立几何检查。
 
 输出保留所有节点与原始字段，标记 `rendered=false`，来源为 `RenderService.zero_alpha_ancestor`。
-`geometry.source.zero_alpha_ancestor` 记录原生及 RS 祖先标识；`render_geometry_state` 区分 `unprepared`
-与已生效且完成原检查的 `applied`。保留绘制命令不代表本帧实际绘制，也不会被标为零尺寸空子树。
-已生效的有限框冲突、有限与无穷框混用均不会被透明性豁免。
+`geometry.source.zero_alpha_ancestor` 记录原生及 RS 祖先标识；`render_geometry_state` 区分准备序列全零的
+`unprepared`、准备序列全正但当前几何未应用的 `unapplied`，以及完成原检查的 `applied`。
+保留绘制命令不代表本帧实际绘制，也不会被标为零尺寸空子树。
+只有完整透明祖先与后代来源证明才可保留未应用的逻辑框，当前与待应用字段始终分开。
 坐标拒收错误直接包含窗口、节点 ID 和具体校验原因，便于从运行错误定位原始证据。
 
 ## 接口与现有采集

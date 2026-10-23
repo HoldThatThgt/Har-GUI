@@ -5,8 +5,7 @@ import json
 import re
 from pathlib import Path
 
-from har_capture.arkui import count_arkui_nodes, parse_arkui
-from har_capture.arkui_selection import select_system_tree
+from har_capture.arkui_selection import read_window_arkui
 from har_capture.hdc import fail
 from har_capture.metadata import count_nodes, file_info, image_info, load_layout
 from har_capture.sessions import parse_sessions
@@ -73,18 +72,7 @@ def read_trees(directory: Path, metadata: dict) -> dict:
         accessibility[str(window_id)] = read_window_accessibility(directory, window)
         evidence = window["trees"]["arkui"]
         verify_arkui_scope(window, evidence, sessions)
-        filename = f"arkui/window-{window_id}.json"
-        raw_filename = f"arkui/window-{window_id}.txt"
-        verify_file(directory, evidence, filename)
-        verify_file(directory, evidence["raw"], raw_filename)
-        if evidence["session"]["is_system"]:
-            verify_system_selection(directory, window, evidence)
-        root = json.loads((directory / filename).read_bytes())
-        if root != parse_arkui((directory / raw_filename).read_bytes().decode("utf-8")):
-            fail(f"ArkUI JSON does not match its raw tree for window {window_id}")
-        if count_arkui_nodes(root) != evidence["node_count"]:
-            fail(f"ArkUI node count does not match window {window_id}")
-        arkui[str(window_id)] = root
+        arkui[str(window_id)] = read_window_arkui(directory, window)
     if metadata.get("delivery"):
         manifest = metadata["delivery"]
         record = manifest["files"]["windows_akui"]
@@ -104,26 +92,12 @@ def verify_arkui_scope(window: dict, evidence: dict, sessions: dict) -> None:
     if window_id not in sessions:
         fail(f"Session details are missing window {window_id}")
     session = sessions[window_id]
-    source = "WindowManagerService.-default.-all" if session["is_system"] else "WindowManagerService.-element"
+    source = "WindowManagerService.-default.-all"
     identity_matches = all(evidence["session"].get(key) == value for key, value in session.items())
     if (not identity_matches or evidence["scope"] != "window" or evidence["source"] != source
             or evidence["display_id"] != window["display_id"]
             or any(session[key] != window[key] for key in ("process_id", "display_id"))):
         fail(f"ArkUI scope does not match session details for window {window_id}")
-
-
-def verify_system_selection(directory: Path, window: dict, evidence: dict) -> None:
-    """@brief 用完整原始输出重新验证系统窗口子树切片。 @param directory 采集目录。
-    @param window 窗口记录。 @param evidence 原文和切片元数据。
-    """
-    window_id = window["window_id"]
-    filename = evidence["response"]["file"]
-    verify_file(directory, evidence["response"], filename)
-    raw = (directory / filename).read_bytes()
-    subtree, selection = select_system_tree(raw, window, evidence["session"])
-    if (evidence["origin"] != {"kind": "source_slice", "selection": selection}
-            or (directory / evidence["raw"]["file"]).read_bytes() != subtree):
-        fail(f"ArkUI subtree does not match its complete source for window {window_id}")
 
 
 def encode_data(data: dict) -> str:

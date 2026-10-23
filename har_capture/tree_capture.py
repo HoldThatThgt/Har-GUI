@@ -1,23 +1,15 @@
 """@brief 分别采集系统无障碍树与 ArkUI 内部组件树。"""
 
 import json
-import re
 import shlex
-import shutil
 from pathlib import Path
 
-from har_capture.arkui import count_arkui_nodes, parse_arkui
-from har_capture.arkui_selection import select_system_tree
+from har_capture.arkui import count_arkui_nodes, parse_arkui, parse_forest
+from har_capture.arkui_selection import select_system_tree, select_native_tree
+from har_capture.geometry_capture import collect_window_geometry
 from har_capture.hdc import Hdc, fail
-from har_capture.metadata import count_nodes, file_info
+from har_capture.metadata import count_nodes, artifact_info, verify_window_response
 from har_capture.sessions import parse_sessions
-
-
-def artifact_info(stage: Path, path: Path) -> dict:
-    """@brief 保存相对采集目录的原始文件摘要。 @param stage 采集目录。
-    @param path 原始文件。 @return 可直接访问文件的摘要。
-    """
-    return {**file_info(path), "file": path.relative_to(stage).as_posix()}
 
 
 def save_arkui_tree(stage: Path, raw_path: Path) -> dict:
@@ -33,61 +25,20 @@ def save_arkui_tree(stage: Path, raw_path: Path) -> dict:
             "node_count": count_arkui_nodes(root)}
 
 
-def dump_files(hdc: Hdc, window: dict, phase: str) -> dict:
-    """@brief 读取目标进程命名空间内已有组件树文件状态。 @param hdc 连接。
-    @param window 窗口记录。 @param phase 采集阶段。 @return 文件路径到修改时间和大小的映射。
+def save_full_arkui_tree(stage: Path, raw_path: Path, geometry: dict) -> dict:
+    """@brief 同时保存未过滤森林与有明确来源的窗口树。 @param stage 采集目录。
+    @param raw_path 完整原文。 @param geometry 原生完整几何。 @return 原始森林及窗口树文件索引。
     """
-    root = f"/proc/{window['process_id']}/root/data/storage"
-    command = f'set -e; for base in {root}/el[1-5]/base; do if test -d "$base"; then '
-    command += 'find "$base" -maxdepth 5 -type f -name arkui.dump -exec stat -c \'%n|%y|%s\' {} \\; '
-    command += '; fi; done'
-    output = hdc.run(["shell", command], f"arkui_{phase}_{window['window_id']}")
-    files = {}
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        fields = line.split("|")
-        pattern = re.escape(root) + r"/el[1-5]/base/(?:[^/]+/)*arkui\.dump"
-        if len(fields) != 3 or re.fullmatch(pattern, fields[0]) is None:
-            fail(f"Cannot identify ArkUI dump files for window {window['window_id']}: {line}")
-        files[fields[0]] = {"modified_at": fields[1], "bytes": int(fields[2])}
-    return files
-
-
-def verify_window_response(text: str, window: dict) -> None:
-    """@brief 确认组件树命令仍指向当前窗口与进程。 @param text 窗口管理器响应。
-    @param window 已采集的窗口记录。
-    """
-    for label, expected in (("WinId", window["window_id"]), ("Pid", window["process_id"])):
-        match = re.search(rf"(?m)^{label}:\s*(\d+)\s*$", text)
-        if match is None or int(match[1]) != expected:
-            fail(f"ArkUI response does not match {label} for window {window['window_id']}")
-
-
-def receive_arkui(hdc: Hdc, stage: Path, window: dict, evidence: dict) -> dict:
-    """@brief 依据官方输出位置接收当前组件树并验证新鲜度。 @param hdc 连接。
-    @param stage 采集目录。 @param window 窗口记录。 @param evidence 输出与文件状态。 @return 树元数据。
-    """
-    response = evidence["response"]
-    text = response.read_text(encoding="utf-8")
-    verify_window_response(text, window)
-    destination = stage / "arkui" / f"window-{window['window_id']}.txt"
-    if re.search(r"(?m)^ *\|-> .+ childSize:\d+", text):
-        shutil.copyfile(response, destination)
-        origin = {"kind": "stdout"}
-    else:
-        before, after = evidence["before"], evidence["after"]
-        changed = [path for path in after if after[path] != before.get(path)]
-        if len(changed) != 1:
-            fail(f"Expected one freshly written ArkUI dump for window {window['window_id']}; found {len(changed)}")
-        source = changed[0]
-        hdc.receive(source, destination, f"receive_arkui_{window['window_id']}")
-        if destination.stat().st_size != after[source]["bytes"]:
-            fail(f"ArkUI dump changed during transfer for window {window['window_id']}")
-        origin = {"kind": "application_file", "path": source, "before": before.get(source), "after": after[source]}
-    return {**save_arkui_tree(stage, destination),
-            "source": "WindowManagerService.-element", "origin": origin,
-            "response": artifact_info(stage, response)}
+    roots = parse_forest(raw_path.read_bytes().decode("utf-8"))
+    native = json.loads((stage / geometry["arkui_geometry"]["file"]).read_bytes())
+    root = select_native_tree(roots, native)
+    forest = raw_path.with_name(raw_path.stem + "-forest.json")
+    destination = raw_path.with_suffix(".json")
+    for path, data in ((forest, roots), (destination, root)):
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return {**artifact_info(stage, destination), "raw": artifact_info(stage, raw_path),
+            "forest": artifact_info(stage, forest), "node_count": count_arkui_nodes(root),
+            "forest_node_count": sum(count_arkui_nodes(item) for item in roots), "coordinate_evidence": geometry}
 
 
 def collect_arkui(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
@@ -95,19 +46,24 @@ def collect_arkui(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
     @param stage 采集目录。 @param remote 本次设备临时文件。 @param window 窗口记录。 @return 树元数据。
     """
     window_id = window["window_id"]
-    before = dump_files(hdc, window, "before")
     path = remote["layout"] + f"-arkui-{window_id}.txt"
     remote[f"arkui_{window_id}"] = path
     quoted = shlex.quote(path)
-    command = f"hidumper -s WindowManagerService -a '-w {window_id} -element' | cat > {quoted}"
+    command = f"hidumper -s WindowManagerService -a '-w {window_id} -default -all' | cat > {quoted}"
     command += f" && test -s {quoted} && echo HAR_CAPTURE_DUMP_READY"
     output = hdc.run(["shell", command], f"dump_arkui_{window_id}")
     if "HAR_CAPTURE_DUMP_READY" not in output.splitlines():
         fail(f"ArkUI command did not produce a response for window {window_id}")
-    after = dump_files(hdc, window, "after")
     response = stage / "arkui" / f"window-{window_id}-response.txt"
     hdc.receive(path, response, f"receive_arkui_response_{window_id}")
-    return receive_arkui(hdc, stage, window, {"before": before, "after": after, "response": response})
+    raw = response.read_bytes()
+    verify_window_response(raw.decode("utf-8"), window)
+    destination = stage / "arkui" / f"window-{window_id}.txt"
+    destination.write_bytes(raw)
+    geometry = collect_window_geometry(hdc, stage, remote, window)
+    files = save_full_arkui_tree(stage, destination, geometry)
+    return {**files, "origin": {"kind": "stdout"}, "response": artifact_info(stage, response),
+            "source": "WindowManagerService.-default.-all"}
 
 
 def collect_accessibility(hdc: Hdc, stage: Path, remote: dict, display_id: int) -> dict:

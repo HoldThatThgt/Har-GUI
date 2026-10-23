@@ -96,7 +96,8 @@ class CoordinateTests(unittest.TestCase):
         native["$rect"] = "[-40.00, 40.00],[160.00,80.00]"
         native["$children"][0]["$rect"] = "[-30.00, 35.00],[10.00,50.00]"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "OtherModifiers:[ClipToBounds:[true]]", "OtherModifiers:[ClipToBounds:[true], Scale:[x:2.0 y:0.5]]")
+            "OtherModifiers:[ClipToBounds:[true]]",
+            "Scale[2.0 0.5], OtherModifiers:[ClipToBounds:[true], Scale:[x:2.0 y:0.5]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
@@ -111,6 +112,7 @@ class CoordinateTests(unittest.TestCase):
         args[1]["transform"].update(scale_x=1.5, scale_y=76 / 150)
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[ClipToFrame:[true]]",
+            "Scale[1.5 0.5] Translate[10 -5], "
             "OtherModifiers:[ClipToFrame:[true], Scale:[x:1.5 y:0.5], Translate:[x:10 y:-5]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
@@ -126,7 +128,8 @@ class CoordinateTests(unittest.TestCase):
         native["$rect"] = "[-7,26.75],[33,41.75]"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Frame[5 -10 20 30], OtherModifiers:[]",
-            "Frame[5 -10 20 30], ClipToBounds[True], OtherModifiers:[Scale:[x:-2 y:-0.5], "
+            "Frame[5 -10 20 30], Scale[-2 -0.5] Pivot[0.25 0.75] Translate[3 -2] CornerRadius[1 2 3 4], "
+            "ClipToBounds[True], OtherModifiers:[Scale:[x:-2 y:-0.5], "
             "Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2], CornerRadius:[x:1 y:2 z:3 w:4], "
             "CustomClipToFrame:[x:2 y:4 z:8 w:18]]")
         result = normalize_arkui(*args)
@@ -137,15 +140,16 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(clip["bounds"], {"x": 117, "y": 82.75, "width": 12, "height": 7})
         rounded = next(item for item in geometry["clip_chain"] if item["kind"] == "rounded_rectangle")
         self.assertEqual(rounded["corner_radius_local"], [1, 2, 3, 4])
-        self.assertEqual(rounded["local_axis_directions"], {"x": -1, "y": -1})
+        self.assertEqual(rounded["local_to_screen"][:4], [-2, 0, 0, -0.5])
         self.assertEqual(geometry["rectangular_clip_bounds"], clip["bounds"])
 
     def test_reflection_does_not_bypass_native_projection_or_render_direction_checks(self):
         args = fixture()
         args[0]["children"][0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
-        self.assert_failed(args, "render_axis_direction_mismatch")
+        self.assert_failed(args, "scene_render_vector_missing:Scale")
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Frame[5 -10 20 30], OtherModifiers:[]", "Frame[5 -10 20 30], OtherModifiers:[Scale:[x:-1 y:1]]")
+            "Frame[5 -10 20 30], OtherModifiers:[]",
+            "Frame[5 -10 20 30], Scale[-1 1], OtherModifiers:[Scale:[x:-1 y:1]]")
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[16,10],[36,40]"
         self.assert_failed(args, "native_geometry_local_projection_mismatch")
 
@@ -159,7 +163,8 @@ class CoordinateTests(unittest.TestCase):
         args = fixture()
         args[0]["children"][0]["attributes"]["scale(x,y)"] = "-1,1"
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "ClipToBounds:[true]", "ClipToBounds:[true], Scale:[x:-1 y:1]")
+            "OtherModifiers:[ClipToBounds:[true]]",
+            "Scale[-1 1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
         # 官方祖先包围框偏移计算保留负尺寸，ToBounds 不对端点排序，必须拒收。
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[5,10],[-15,40]"
         self.assert_failed(args, "negative_native_geometry_size")
@@ -171,9 +176,11 @@ class CoordinateTests(unittest.TestCase):
         leaf["attributes"].update({"Description": "OverlayNode", "LastParentId": "1", "scale(x,y)": "-1,1"})
         args[3]["arkui_geometry"]["$children"][0]["$children"] = []
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "ClipToBounds:[true]", "ClipToBounds:[true], Scale:[x:-1 y:1]")
+            "OtherModifiers:[ClipToBounds:[true]]",
+            "Scale[-1 1], OtherModifiers:[ClipToBounds:[true], Scale:[x:-1 y:1]]")
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "Frame[5 -10 20 30], OtherModifiers:[]", "Frame[5 -10 20 30], OtherModifiers:[Scale:[x:-1 y:1]]")
+            "Frame[5 -10 20 30], OtherModifiers:[]",
+            "Frame[5 -10 20 30], Scale[-1 1], OtherModifiers:[Scale:[x:-1 y:1]]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified")
         self.assertEqual(result["children"][0]["children"][0]["geometry"]["screen_bounds"],
@@ -304,7 +311,9 @@ class CoordinateTests(unittest.TestCase):
     def test_rounded_clip_preserves_corner_geometry_without_claiming_pixel_visibility(self):
         args = fixture()
         args[3]["render_tree"] = args[3]["render_tree"].replace(
-            "ClipToBounds:[true]", "ClipToBounds:[true], CornerRadius:[x:4.0 y:5.0 z:6.0 w:7.0]")
+            "OtherModifiers:[ClipToBounds:[true]]",
+            "CornerRadius[4.0 5.0 6.0 7.0], "
+            "OtherModifiers:[ClipToBounds:[true], CornerRadius:[x:4.0 y:5.0 z:6.0 w:7.0]]")
         result = normalize_arkui(*args)
         clip = next(item for item in result["children"][0]["geometry"]["clip_chain"]
                     if item["kind"] == "rounded_rectangle")
@@ -452,7 +461,8 @@ class CoordinateTests(unittest.TestCase):
             if name.startswith("receive_render_"):
                 destination.write_text("render evidence", encoding="utf-8")
             else:
-                tree = json.dumps({"$type": "root", "$ID": 0})
+                tree = json.dumps({"appInfo": {"WindowID": 1, "BundleName": "com.ohos.sceneboard"},
+                                   "$type": "root", "$ID": 0})
                 destination.write_text("WinId: 5\nPid: 100\n" + tree, encoding="utf-8")
 
         hdc.receive.side_effect = receive

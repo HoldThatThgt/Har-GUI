@@ -17,7 +17,8 @@ from har_capture.visualization import build_viewer, encode_data, latest_capture,
 from har_capture.sessions import parse_sessions
 from har_capture.privacy import viewer_tree
 from tests.support import (
-    FIXTURES, fake_hdc, layout_data, raw_accessibility, raw_arkui, raw_layout, raw_system_arkui,
+    FIXTURES, fake_hdc, layout_data, native_arkui, native_system_arkui, raw_accessibility, raw_arkui, raw_layout,
+    raw_system_arkui,
     system_session_details,
 )
 from tests.test_system_accessibility import application_inspector
@@ -75,7 +76,7 @@ class VisualizationTests(unittest.TestCase):
         return capture(fake_hdc(payloads, command_outputs=command_outputs), self.output)["path"]
 
     def new_system_capture(self):
-        return self.new_capture({"arkui_response_92": raw_system_arkui()},
+        return self.new_capture({"arkui_response_92": raw_system_arkui(), "geometry_92": native_system_arkui()},
                                 command_outputs={"session_details": system_session_details()})
 
     def embedded_data(self, page):
@@ -289,6 +290,33 @@ class VisualizationTests(unittest.TestCase):
             build_viewer(directory)
         self.assertFalse((directory / "viewer.html").exists())
 
+    def test_rehashed_full_forest_must_still_equal_the_complete_original_source(self):
+        directory = self.new_capture()
+        metadata = json.loads((directory / "metadata.json").read_bytes())
+        evidence = next(window for window in metadata["windows"] if window["window_id"] == 92)["trees"]["arkui"]
+        path = directory / evidence["forest"]["file"]
+        forest = json.loads(path.read_bytes())
+        forest[0]["children"][0]["attributes"]["Content"] = "Rehashed anonymous forest tamper"
+        changed = json.dumps(forest, ensure_ascii=False).encode("utf-8")
+        path.write_bytes(changed)
+        digest = {"sha256": hashlib.sha256(changed).hexdigest(), "bytes": len(changed)}
+        evidence["forest"].update(digest)
+        metadata["files"]["arkui_forest_92"].update(digest)
+        self.write_metadata(directory, metadata)
+        with self.assertLogs(level="ERROR"), self.assertRaisesRegex(CaptureError, "forest JSON differs"):
+            build_viewer(directory)
+        self.assertFalse((directory / "viewer.html").exists())
+
+    def test_missing_full_forest_cannot_be_replaced_by_an_existing_canonical_window_tree(self):
+        directory = self.new_capture()
+        metadata = json.loads((directory / "metadata.json").read_bytes())
+        evidence = next(window for window in metadata["windows"] if window["window_id"] == 92)["trees"]["arkui"]
+        self.assertTrue((directory / evidence["file"]).is_file())
+        (directory / evidence["forest"]["file"]).unlink()
+        with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+            build_viewer(directory)
+        self.assertFalse((directory / "viewer.html").exists())
+
     def test_missing_json_and_raw_metadata_do_not_reuse_the_older_text_format(self):
         for missing in ("json_file", "raw_metadata"):
             with self.subTest(missing=missing):
@@ -297,7 +325,7 @@ class VisualizationTests(unittest.TestCase):
                 evidence = metadata["windows"][0]["trees"]["arkui"]
                 if missing == "json_file":
                     (directory / evidence["file"]).unlink()
-                    error = FileNotFoundError
+                    error = CaptureError
                 else:
                     del evidence["raw"]
                     self.write_metadata(directory, metadata)
@@ -330,7 +358,8 @@ class VisualizationTests(unittest.TestCase):
         layout["children"] = layout["children"][:1]
         directory = self.new_capture({"layout": raw_layout(layout),
                                       "accessibility": raw_accessibility(layout["children"]),
-                                      "inspector_window-92": application_inspector()}, command_outputs={
+                                      "inspector_window-92": application_inspector(),
+                                      "geometry_92": native_arkui(bundle="com.example.app")}, command_outputs={
             "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY\n"})
         original = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
         payload = self.embedded_data(build_viewer(directory))

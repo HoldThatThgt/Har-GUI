@@ -14,6 +14,7 @@ from har_capture.privacy import verify_privacy_receipt
 from har_capture.scene_evidence import load_scene_evidence
 from har_capture.stability import observe_stability, verify_project_rules
 from har_capture.system_accessibility import read_window_accessibility
+from har_capture.arkui_selection import read_window_arkui
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ def verify_tree_references(window: dict, indexed: dict) -> None:
             fail("Captured window tree is empty")
         references = [tree["artifact"]] if kind == "accessibility" else [tree, tree["raw"], tree["response"]]
         if kind == "arkui":
+            if not tree["session"]["is_system"]:
+                references.append(tree["forest"])
             geometry_keys = ("arkui_geometry", "response", "render_tree", "render_detached_tree")
             geometry = tree["coordinate_evidence"]
             references.extend(geometry[key] for key in geometry_keys)
@@ -218,7 +221,7 @@ def normalized_arkui(evidence: Path, window: dict, canvas: dict, scenes: dict) -
     from har_capture.coordinates import normalize_arkui
 
     record = window["trees"]["arkui"]
-    root = json.loads((evidence / record["file"]).read_bytes())
+    root = read_window_arkui(evidence, window)
     geometry = record.get("coordinate_evidence")
     if not geometry:
         fail(f"Missing official ArkUI geometry evidence for window {window['window_id']}")

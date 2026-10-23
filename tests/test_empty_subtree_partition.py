@@ -204,12 +204,15 @@ class EmptySubtreePartitionTests(unittest.TestCase):
         args[3]["render_detached_tree"] = "-- Render Node Not On Tree\n"
         self.assert_failed(args, "empty_render_subtree_attachment_unverified")
 
-    def test_lazy_flag_does_not_supply_a_missing_detached_partition_record(self):
+    def test_explicit_lazy_identity_frame_is_separate_from_detached_partition(self):
         args = partition_fixture()
         child = args[0]["children"][0]["children"][0]["children"][0]
         child["raw"] = child["raw"].replace("lazyLoad[0] nodeState[ACTIVE]", "lazyLoad[1] nodeState[LAZY_LOAD]")
         args[3]["render_detached_tree"] = "-- Render Node Not On Tree\n"
-        self.assert_failed(args, "empty_render_subtree_attachment_unverified")
+        result = self.verified(args)
+        parent = result["children"][0]["children"][0]
+        self.assertEqual(parent["geometry"]["source"]["no_draw_detached_render_node_ids"], [])
+        self.assertEqual(parent["geometry"]["source"]["no_draw_unmaterialized_render_node_ids"], ["503"])
 
     def test_mount_and_detached_membership_conflict_is_rejected_before_any_partition_claim(self):
         args = partition_fixture()

@@ -4,7 +4,7 @@ const palette = ["#6574c7", "#258596", "#d48740", "#b26a99", "#5b936a", "#6685aa
 const sourceNames = { accessibility: "无障碍控件树", arkui: "ArkUI组件树" };
 const state = {
   data: null, windows: [], selected: null, node: null, entries: [], expanded: new Set(), zoom: 1,
-  source: "accessibility", rootPointer: "",
+  source: "accessibility", rootPointer: "", byPointer: new Map(),
 };
 
 /** @brief 取得页面中已经声明的元素。 */
@@ -21,10 +21,16 @@ function create(tag, className, text) {
 }
 
 /** @brief 将原始控件层级索引为带路径的节点列表。 */
-function indexTree(node, pointer, depth = 0) {
-  const entry = { node, pointer, depth };
+function indexTree(node, pointer, depth = 0, parentPointer = null, embedded = false) {
+  const blocks = node.embedded_trees || [];
+  const childCount = node.children.length + blocks.reduce((count, block) => count + block.roots.length, 0);
+  const entry = { node, pointer, depth, parentPointer, embedded, childCount };
   state.entries.push(entry);
-  node.children.forEach((child, index) => indexTree(child, `${pointer}/children/${index}`, depth + 1));
+  state.byPointer.set(pointer, entry);
+  node.children.forEach((child, index) => indexTree(child, `${pointer}/children/${index}`, depth + 1, pointer));
+  blocks.forEach((block, blockIndex) => block.roots.forEach((root, rootIndex) => {
+    indexTree(root, `${pointer}/embedded_trees/${blockIndex}/roots/${rootIndex}`, depth + 1, pointer, true);
+  }));
   return entry;
 }
 
@@ -73,7 +79,8 @@ function renderHeader() {
 function treeStatistics() {
   const trees = state.windows.map((window) => window.trees[state.source]);
   const count = trees.reduce((sum, tree) => sum + tree.node_count, 0);
-  return [[`${sourceNames[state.source]}节点`, `${count} 个`]];
+  const label = state.source === "arkui" ? "ArkUI 本地节点" : "无障碍控件树节点";
+  return [[label, `${count} 个`]];
 }
 
 /** @brief 显示独立窗口树的采集来源及坐标含义。 */
@@ -81,7 +88,7 @@ function renderSourceNotice() {
   const arkui = state.source === "arkui";
   const reference = state.selected.trees[state.source];
   const note = element("tree-source-note");
-  note.textContent = arkui ? "有已验证 geometry 的节点可高亮整屏坐标；FrameRect 保留局部值。正文不嵌入页面。"
+  note.textContent = arkui ? "本地节点计数不含独立嵌入树；仅已验证 geometry 可高亮，FrameRect 是局部值。正文不嵌入页面。"
     : "显示无障碍控件层级、类型和边界；正文仅保存在本地原始树文件中。";
   const scope = element("tree-source-scope");
   scope.hidden = false;
@@ -168,6 +175,7 @@ function loadSelectedTree() {
   const reference = state.selected.trees[state.source];
   renderSourceNotice();
   state.entries = [];
+  state.byPointer = new Map();
   state.rootPointer = "";
   const root = state.data.trees[state.source][String(state.selected.window_id)];
   indexTree(root, state.rootPointer);
@@ -219,16 +227,17 @@ function renderTreeRow(entry, search) {
   row.classList.toggle("selected", entry === state.node);
   const toggle = create("button", "tree-toggle");
   toggle.type = "button";
-  toggle.disabled = search || entry.node.children.length === 0;
+  toggle.disabled = search || entry.childCount === 0;
   toggle.textContent = toggle.disabled ? "·" : state.expanded.has(entry.pointer) ? "▾" : "▸";
   toggle.setAttribute("aria-label", state.expanded.has(entry.pointer) ? "收起子节点" : "展开子节点");
   toggle.addEventListener("click", () => toggleNode(entry));
   const button = create("button", "tree-select");
   button.type = "button";
   button.title = entry.pointer;
-  button.append(create("span", "node-kind", entry.node.attributes.type || "(空类型)"));
+  const kind = entry.node.attributes.type || "(空类型)";
+  button.append(create("span", "node-kind", entry.embedded ? `嵌入控件树 · ${kind}` : kind));
   button.append(create("span", "node-description", nodeDescription(entry.node.attributes)));
-  if (entry.node.children.length) button.append(create("span", "node-children", entry.node.children.length));
+  if (entry.childCount) button.append(create("span", "node-children", entry.childCount));
   button.addEventListener("click", () => selectNode(entry));
   row.append(toggle, button);
   return row;
@@ -246,10 +255,10 @@ function matchesSearch(entry, query) {
 
 /** @brief 判断树节点的所有祖先是否处于展开状态。 */
 function isVisibleEntry(entry) {
-  let pointer = entry.pointer;
-  while (pointer !== state.rootPointer) {
-    pointer = pointer.slice(0, pointer.lastIndexOf("/children/"));
+  let pointer = entry.parentPointer;
+  while (pointer !== null) {
     if (!state.expanded.has(pointer)) return false;
+    pointer = state.byPointer.get(pointer).parentPointer;
   }
   return true;
 }

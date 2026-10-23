@@ -12,8 +12,8 @@ from har_capture.arkui_selection import select_system_tree
 from har_capture.capture_checks import window_exclusion
 from har_capture.hdc import Hdc, fail
 from har_capture.metadata import count_nodes, file_info
-from har_capture.tree_capture import (artifact_info, collect_arkui, collect_system_arkui,
-                                      save_arkui_tree, verify_window_response)
+from har_capture.tree_capture import collect_arkui, collect_system_arkui, save_arkui_tree
+from har_capture.metadata import artifact_info, verify_window_response
 
 
 def read_window_accessibility(evidence: Path, window: dict) -> dict:
@@ -165,6 +165,8 @@ def attach_window_trees(stage: Path, metadata: dict, window: dict, trees: dict) 
     for key in ("raw", "response"):
         metadata["files"][f"arkui_{key}_{window['window_id']}"] = arkui[key]
     metadata["files"][f"arkui_{window['window_id']}"] = {key: arkui[key] for key in ("file", "bytes", "sha256")}
+    if not window["is_system"]:
+        metadata["files"][f"arkui_forest_{window['window_id']}"] = arkui["forest"]
 
 
 def supplement_missing_windows(hdc: Hdc, stage: Path, remote: dict, metadata: dict) -> None:

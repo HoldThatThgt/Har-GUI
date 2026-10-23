@@ -113,7 +113,8 @@ def mapping_render_tree(system=False):
             render_line(1, "LOGICAL_DISPLAY_NODE", 6962141986818, "0 0 3120 2080",
                         "OtherModifiers:[Pivot:[x:0 y:0]]"),
             render_line(2, "SURFACE_NODE", 19649475381948, "203.3 0 2048 2230",
-                        "nodeName: [session106], ClipToFrame[True], OtherModifiers:[Scale:[x:0.876682 y:0.876682], "
+                        "nodeName: [session106], Scale[0.876682 0.876682] Pivot[0 0], ClipToFrame[True], "
+                        "OtherModifiers:[Scale:[x:0.876682 y:0.876682], "
                         "Pivot:[x:0 y:0], ClipToFrame:[true]]")]
     if system:
         rows.append(render_line(3, "CANVAS_NODE", 701, "10 20 100 30", "OtherModifiers:[]"))
@@ -140,7 +141,7 @@ def ancestor_mapping_fixture(reversed_render_order=False):
     args[1]["transform"].update(scale_x=899 / 2048, scale_y=978 / 2230)
     rows = args[3]["render_tree"].splitlines(keepends=True)
     group_row = render_line(2 if not reversed_render_order else 3, "CANVAS_NODE", 111, "0 0 3120 2080",
-                            "OtherModifiers:[Scale:[x:0.5 y:0.5], Pivot:[x:0 y:0]]")
+                            "Scale[0.5 0.5] Pivot[0 0], OtherModifiers:[Scale:[x:0.5 y:0.5], Pivot:[x:0 y:0]]")
     if reversed_render_order:
         rows = rows[:3] + [group_row] + ["  " + row for row in rows[3:]]
     else:
@@ -164,6 +165,7 @@ def omitted_ancestor_fixture(state, transformed=False):
         args[1]["bounding_box"]["x"] = 203
         args[1]["transform"].update(scale_x=0.876953, scale_y=0.876682)
         detached_row = detached_row.replace("Scale:[x:0.5 y:0.5]", "Scale:[x:1 y:1]")
+        detached_row = detached_row.replace("Scale[0.5 0.5]", "Scale[1 1]")
     args[3]["render_tree"] = "".join(rows[:2]) + "".join(row[2:] for row in rows[3:])
     if state == "lazy":
         group["raw"] = group["raw"].replace("lazyLoad[0] nodeState[ACTIVE]", "lazyLoad[1] nodeState[LAZY_LOAD]")
@@ -225,9 +227,10 @@ def transformed_mixed_leaf_fixture():
     args[3]["render_tree"] = args[3]["render_tree"].replace(
         "CANVAS_NODE[103], Properties: Bounds[0 0 2048 2230] Frame[0 0 2048 2230], OtherModifiers:[]",
         "CANVAS_NODE[103], Properties: Bounds[20 30 200 100] Frame[20 30 200 100], "
-        "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
+        "Scale[2 0.5] Pivot[0.5 0.5], OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.5 y:0.5]]")
     args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
         "Frame[10 20 -1 11], OtherModifiers:[]", "Frame[10 20 -1 11], "
+        "Scale[2 0.5] Pivot[0.25 0.75] Translate[3 -2], "
         "OtherModifiers:[Scale:[x:2 y:0.5], Pivot:[x:0.25 y:0.75], Translate:[x:3 y:-2]]")
     return args
 
@@ -309,7 +312,8 @@ class WindowMappingTests(unittest.TestCase):
             {"$ID": 701, "$type": "WindowScene", "$rect": "[203.30,0.00],[1101.02,977.50]"}]
         rows = args[3]["render_tree"].splitlines(keepends=True)
         surface = render_line(3, "SURFACE_NODE", 110, "0 0 2048 2230",
-                              "ClipToFrame[True], OtherModifiers:[Scale:[x:0.5 y:0.5], "
+                              "Scale[0.5 0.5] Pivot[0 0], ClipToFrame[True], "
+                              "OtherModifiers:[Scale:[x:0.5 y:0.5], "
                               "Pivot:[x:0 y:0], ClipToFrame:[true]]")
         args[3]["render_tree"] = "".join(rows[:3]) + surface + "".join("  " + row for row in rows[3:])
         result = normalize_arkui(*args)
@@ -645,7 +649,7 @@ class WindowMappingTests(unittest.TestCase):
         args = mapping_fixture()
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "OtherModifiers:[Scale:", "OtherModifiers:[Rotation:[1], Scale:")
-        self.assert_failed(args, "unsupported_render_transform:Rotation")
+        self.assert_failed(args, "scene_render_scalar_mismatch:Rotation")
 
     def test_system_session_surface_still_requires_its_own_rs_projection(self):
         for old, new in (("Scale:[x:0.876682 y:0.876682]", "Scale:[x:0.5 y:0.5]"),
@@ -688,13 +692,16 @@ class WindowMappingTests(unittest.TestCase):
         args[1]["transform"]["scale_x"] = 1797 / 2048
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Scale:[x:0.876682 y:0.876682]", "Scale:[x:-0.876682 y:0.876682]")
+        args[3]["render_tree"] = replace_render_text(args[3]["render_tree"],
+            "Scale[0.876682 0.876682]", "Scale[-0.876682 0.876682]")
         result = normalize_arkui(*args)
         self.assertEqual(result["coordinate_validation"]["status"], "verified",
                          result["coordinate_validation"]["issues"])
         text = result["children"][0]["children"][0]["geometry"]
         self.assertAlmostEqual(text["screen_bounds"]["x"], 106.86498, places=5)
         clip = next(item for item in text["clip_chain"] if item.get("render_node_id") == "19649475381948")
-        self.assertEqual(clip["local_axis_directions"], {"x": -1, "y": 1})
+        self.assertLess(clip["local_to_screen"][0], 0)
+        self.assertGreater(clip["local_to_screen"][3], 0)
         args[3]["render_tree"] = args[3]["render_tree"].replace(
             "Scale:[x:-0.876682 y:0.876682]", "Scale:[x:0.876682 y:0.876682]")
         self.assert_failed(args, "scene_render_vector_mismatch:Scale")

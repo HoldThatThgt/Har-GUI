@@ -1,4 +1,4 @@
-"""验证两种控件树来源及 ArkUI 文件的新鲜度和窗口归属。"""
+"""验证完整标准输出、原生来源和窗口归属，禁止私有文件分流。"""
 
 import hashlib
 import json
@@ -8,9 +8,9 @@ from pathlib import Path
 
 from har_capture.hdc import CaptureError
 from har_capture.metadata import parse_windows
-from har_capture.tree_capture import collect_accessibility, collect_arkui, collect_trees, dump_files
+from har_capture.tree_capture import collect_accessibility, collect_arkui, collect_trees
 from tests.support import (
-    FIXTURES, fake_hdc, layout_data, raw_accessibility, raw_arkui, raw_system_arkui,
+    FIXTURES, fake_hdc, layout_data, native_arkui, native_system_arkui, raw_accessibility, raw_arkui, raw_system_arkui,
     system_session_details, window_node,
 )
 
@@ -25,11 +25,7 @@ class TreeCaptureTests(unittest.TestCase):
         self.remote = {"layout": "/data/local/tmp/test-capture.json"}
         self.window = parse_windows((FIXTURES / "windows.txt").read_text(encoding="utf-8"))[92]
         self.window["bundle_name"] = "com.example.settings"
-        self.app_dump = "/proc/202/root/data/storage/el2/base/files/arkui.dump"
 
-    def file_state(self, paths, modified="2026-10-22 12:00:01.000000000 +0000", size=None):
-        size = len(raw_arkui()) if size is None else size
-        return "".join(f"{path}|{modified}|{size}\n" for path in paths)
 
     def collect_component_tree(self, hdc):
         (self.stage / "arkui").mkdir()
@@ -59,74 +55,9 @@ class TreeCaptureTests(unittest.TestCase):
         self.assertEqual(leaf["children"], [])
         self.assertIn("        Hint: 第一项\r\n        Hint: 第二项\r\n", leaf["raw"])
         receives = [call.args[2] for call in hdc.receive.call_args_list]
-        self.assertEqual(receives, ["receive_arkui_response_92"])
+        self.assertEqual(receives, ["receive_arkui_response_92", "receive_geometry_92"])
         self.assertEqual(self.remote["arkui_92"], self.remote["layout"] + "-arkui-92.txt")
 
-    def test_fresh_application_file_preserves_bytes_and_freshness_evidence(self):
-        payload = raw_arkui()
-        before = self.file_state([self.app_dump], modified="2026-10-22 11:59:59.000000000 +0000", size=7)
-        after = self.file_state([self.app_dump])
-        response = raw_arkui(include_tree=False)
-        hdc = fake_hdc({"arkui_response_92": response, "arkui_92": payload}, command_outputs={
-            "arkui_before_92": before, "arkui_after_92": after})
-        evidence = self.collect_component_tree(hdc)
-        self.assertEqual(evidence["origin"]["kind"], "application_file")
-        self.assertEqual(evidence["origin"]["path"], self.app_dump)
-        self.assertEqual(evidence["origin"]["before"]["bytes"], 7)
-        self.assertEqual(evidence["origin"]["after"]["bytes"], len(payload))
-        self.assertEqual(evidence["node_count"], 2)
-        self.assertEqual((self.stage / evidence["raw"]["file"]).read_bytes(), payload)
-        root = json.loads((self.stage / evidence["file"]).read_bytes())
-        self.assertEqual(root["children"][0]["attributes"]["Content"], "原始组件数据")
-        self.assertEqual((self.stage / evidence["response"]["file"]).read_bytes(), response)
-        hdc.receive.assert_any_call(self.app_dump, self.stage / "arkui/window-92.txt", "receive_arkui_92")
-
-    def test_unchanged_old_application_dump_is_not_accepted(self):
-        state = self.file_state([self.app_dump])
-        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
-            "arkui_before_92": state, "arkui_after_92": state})
-        with self.assertRaises(CaptureError):
-            self.collect_component_tree(hdc)
-        self.assertFalse((self.stage / "arkui/window-92.txt").exists())
-        self.assertEqual([call.args[2] for call in hdc.receive.call_args_list], ["receive_arkui_response_92"])
-
-    def test_fresh_dump_in_el5_is_selected_while_unchanged_el2_is_retained_as_evidence(self):
-        protected = "/proc/202/root/data/storage/el5/base/haps/NotepadPhone/files/arkui.dump"
-        stale = self.file_state([self.app_dump])
-        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
-            "arkui_before_92": stale, "arkui_after_92": stale + self.file_state([protected])})
-        result = self.collect_component_tree(hdc)
-        self.assertEqual(result["origin"]["path"], protected)
-        self.assertEqual(result["node_count"], 2)
-
-    def test_fresh_dumps_in_distinct_protection_areas_are_ambiguous(self):
-        protected = "/proc/202/root/data/storage/el5/base/files/arkui.dump"
-        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
-            "arkui_after_92": self.file_state([self.app_dump, protected])})
-        with self.assertRaises(CaptureError):
-            self.collect_component_tree(hdc)
-
-    def test_dump_paths_outside_process_private_protection_areas_are_rejected(self):
-        for path in ("/proc/203/root/data/storage/el5/base/files/arkui.dump",
-                     "/proc/202/root/data/storage/el2/auth_groups/other/arkui.dump",
-                     "/proc/202/root/data/storage/el6/base/files/arkui.dump"):
-            hdc = fake_hdc(command_outputs={"arkui_before_92": self.file_state([path])})
-            with self.subTest(path=path), self.assertRaises(CaptureError):
-                dump_files(hdc, self.window, "before")
-
-    def test_multiple_new_application_dumps_are_ambiguous(self):
-        other = "/proc/202/root/data/storage/el2/base/cache/arkui.dump"
-        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
-            "arkui_after_92": self.file_state([self.app_dump, other])})
-        with self.assertRaises(CaptureError):
-            self.collect_component_tree(hdc)
-        self.assertFalse((self.stage / "arkui/window-92.txt").exists())
-
-    def test_changed_size_during_application_file_transfer_is_rejected(self):
-        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)}, command_outputs={
-            "arkui_after_92": self.file_state([self.app_dump], size=len(raw_arkui()) + 1)})
-        with self.assertRaises(CaptureError):
-            self.collect_component_tree(hdc)
 
     def test_response_must_match_both_process_and_window(self):
         for response in (raw_arkui(window_id=80), raw_arkui(process_id=201), b"|-> root childSize:0\n"):
@@ -141,6 +72,68 @@ class TreeCaptureTests(unittest.TestCase):
         with self.assertRaises(CaptureError):
             self.collect_component_tree(hdc)
         hdc.receive.assert_not_called()
+
+    def test_complete_stdout_uses_native_coverage_without_stat_find_or_application_file_transfers(self):
+        hdc = fake_hdc()
+        evidence = self.collect_component_tree(hdc)
+        self.assertEqual([record["name"] for record in hdc.records],
+                         ["dump_arkui_92", "receive_arkui_response_92", "geometry_92", "receive_geometry_92"])
+        commands = "\n".join(str(record.get("command", [])) for record in hdc.records)
+        self.assertIn("-w 92 -default -all", commands)
+        self.assertIn("-w 92 -allInfoWithParamConfig", commands)
+        self.assertNotIn("find ", commands)
+        self.assertNotIn("stat ", commands)
+        self.assertNotIn("/proc/", commands)
+        self.assertNotIn("arkui.dump", commands)
+        self.assertEqual(evidence["source"], "WindowManagerService.-default.-all")
+        self.assertEqual(evidence["forest_node_count"], 2)
+        self.assertEqual(evidence["forest"]["file"], "arkui/window-92-forest.json")
+        native = json.loads((self.stage / evidence["coordinate_evidence"]["arkui_geometry"]["file"]).read_bytes())
+        self.assertEqual(native["appInfo"], {"WindowID": 92, "BundleName": "com.example.settings"})
+        self.assertEqual(native["$children"][0]["$ID"], 1)
+
+    def test_missing_complete_stdout_cannot_be_replaced_by_an_otherwise_valid_native_source(self):
+        hdc = fake_hdc({"arkui_response_92": raw_arkui(include_tree=False)})
+        with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+            self.collect_component_tree(hdc)
+        self.assertEqual([record["name"] for record in hdc.records],
+                         ["dump_arkui_92", "receive_arkui_response_92", "geometry_92", "receive_geometry_92"])
+        self.assertFalse((self.stage / "arkui/window-92.json").exists())
+
+    def test_native_source_missing_a_real_raw_child_cannot_publish_a_window_tree(self):
+        for children in ([], [{"$type": "Text", "$ID": 999}]):
+            native = {"$type": "root", "$ID": 0, "$children": children}
+            hdc = fake_hdc({"geometry_92": native_arkui(root=native)})
+            with self.subTest(children=children), tempfile.TemporaryDirectory() as temporary:
+                self.stage = Path(temporary)
+                with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                    self.collect_component_tree(hdc)
+                self.assertFalse((self.stage / "arkui/window-92.json").exists())
+                self.assertEqual((self.stage / "arkui/window-92.txt").read_bytes(), raw_arkui())
+
+    def test_complete_native_application_identity_must_match_the_requested_window(self):
+        for payload in (native_arkui(root={"$type": "root", "$ID": 0}, bundle="app.other"),
+                        native_arkui().replace(b'"WindowID": 92', b'"WindowID": 80')):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                self.stage = Path(temporary)
+                with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
+                    self.collect_component_tree(fake_hdc({"geometry_92": payload}))
+                self.assertFalse((self.stage / "arkui/window-92.json").exists())
+
+    def test_full_forest_is_independently_indexed_and_keeps_unselected_source_roots(self):
+        payload = raw_arkui() + b"|-> Detached,9000,1 childSize:0\r\n      ID: 9000\r\n"
+        evidence = self.collect_component_tree(fake_hdc({"arkui_response_92": payload}))
+        forest_file = self.stage / evidence["forest"]["file"]
+        forest = json.loads(forest_file.read_bytes())
+        window = json.loads((self.stage / evidence["file"]).read_bytes())
+        self.assertEqual([node["attributes"]["ID"] for node in forest], ["0", "9000"])
+        self.assertEqual(evidence["forest_node_count"], 3)
+        self.assertEqual(evidence["node_count"], 2)
+        self.assertEqual(evidence["forest"]["sha256"], hashlib.sha256(forest_file.read_bytes()).hexdigest())
+        self.assertEqual(window["source_header"], "root,0,0")
+        self.assertEqual(window["attributes"]["type"], "root")
+        self.assertEqual(window["children"][0]["source_association"]["native_parent_id"], "0")
+        self.assertEqual((self.stage / evidence["raw"]["file"]).read_bytes(), payload)
 
     def test_accessibility_array_is_saved_without_reformatting(self):
         original = raw_accessibility()
@@ -192,7 +185,7 @@ class TreeCaptureTests(unittest.TestCase):
             self.assertEqual(trees["arkui"]["file"], f"arkui/window-{window_id}.json")
             self.assertEqual(trees["arkui"]["raw"]["file"], f"arkui/window-{window_id}.txt")
             self.assertEqual(trees["accessibility"]["source"], "UITest.dumpLayout.-i")
-            self.assertEqual(trees["arkui"]["source"], "WindowManagerService.-element")
+            self.assertEqual(trees["arkui"]["source"], "WindowManagerService.-default.-all")
             self.assertEqual(trees["arkui"]["scope"], "window")
             self.assertEqual(trees["arkui"]["display_id"], 0)
             self.assertEqual(trees["arkui"]["session"]["window_id"], window_id)
@@ -201,7 +194,8 @@ class TreeCaptureTests(unittest.TestCase):
     def test_system_window_uses_complete_tree_and_keeps_only_its_original_slice(self):
         details = system_session_details()
         original = raw_system_arkui()
-        hdc = fake_hdc({"arkui_response_92": original}, command_outputs={"session_details": details})
+        hdc = fake_hdc({"arkui_response_92": original, "geometry_92": native_system_arkui()},
+                       command_outputs={"session_details": details})
         result = collect_trees(hdc, self.stage, self.remote, [self.window], 0)
         evidence = result[92]["arkui"]
         self.assertEqual(evidence["scope"], "window")

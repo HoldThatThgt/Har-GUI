@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from har_capture.collector import capture
 from har_capture.hdc import CaptureError
-from tests.support import (FIXTURES, fake_hdc, png_bytes, raw_accessibility, raw_arkui, raw_layout,
-                           raw_system_arkui, system_session_details)
+from tests.support import (FIXTURES, fake_hdc, native_arkui, native_system_arkui, png_bytes, raw_accessibility,
+                           raw_arkui, raw_layout, raw_system_arkui, system_session_details)
 from tests.support import synthetic_screen_geometry
 from tests.test_system_accessibility import application_inspector
 
@@ -82,6 +82,7 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(metadata["files"][f"arkui_{window_id}"]["file"],
                                  f"arkui/window-{window_id}.json")
                 self.assertEqual(metadata["files"][f"arkui_raw_{window_id}"], window["trees"]["arkui"]["raw"])
+                self.assertEqual(metadata["files"][f"arkui_forest_{window_id}"], window["trees"]["arkui"]["forest"])
                 self.assertEqual(window["trees"]["arkui"]["sha256"],
                                  hashlib.sha256(tree_file.read_bytes()).hexdigest())
         first_remote = first_hdc.receive.call_args_list[0].args[0]
@@ -109,7 +110,7 @@ class CollectorTests(unittest.TestCase):
     def test_published_window_identity_uses_the_same_capture_arkui_session(self):
         connections = (
             fake_hdc(),
-            fake_hdc({"arkui_response_92": raw_system_arkui()},
+            fake_hdc({"arkui_response_92": raw_system_arkui(), "geometry_92": native_system_arkui()},
                      command_outputs={"session_details": system_session_details()}),
         )
         for hdc in connections:
@@ -204,7 +205,8 @@ class CollectorTests(unittest.TestCase):
         layout = json.loads(raw_layout())
         layout["children"] = [layout["children"][0]]
         hdc = fake_hdc({"layout": raw_layout(layout), "accessibility": raw_accessibility(layout["children"]),
-                        "inspector_window-92": application_inspector()}, command_outputs={
+                        "inspector_window-92": application_inspector(),
+                        "geometry_92": native_arkui(bundle="com.example.app")}, command_outputs={
                             "inspector_window-92": "HAR_CAPTURE_INSPECTOR_READY"})
         directory = capture(hdc, self.output)["path"]
         metadata = self.read_metadata(directory)
@@ -260,7 +262,8 @@ class CollectorTests(unittest.TestCase):
 
     def test_required_stage_failures_never_publish_complete_capture(self):
         for stage in ("screenshot", "layout", "windows", "receive_layout", "accessibility",
-                      "receive_accessibility", "dump_arkui_92", "receive_arkui_response_92", "session_details"):
+                      "receive_accessibility", "dump_arkui_92", "receive_arkui_response_92", "session_details",
+                      "geometry_92", "receive_geometry_92"):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
                 self.output = Path(temporary) / "captures"
                 with self.assertRaises(CaptureError):

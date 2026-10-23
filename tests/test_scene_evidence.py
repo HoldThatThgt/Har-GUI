@@ -11,8 +11,9 @@ from har_capture.arkui_selection import index_nodes
 from har_capture.capture_facts import verify_tree_references
 from har_capture.geometry_capture import collect_geometry_evidence
 from har_capture.hdc import CaptureError
-from har_capture.scene_evidence import load_scene_evidence
-from har_capture.tree_capture import artifact_info
+from har_capture.scene_evidence import load_scene_evidence, parse_source_node
+from har_capture.arkui import node_property_text
+from har_capture.metadata import artifact_info
 
 
 def session_text(window_id, accessibility_id, children=False):
@@ -56,7 +57,8 @@ def window_record(window_id, accessibility_id, process_id, source):
         "display_id": 0, "is_system": system,
         "trees": {"arkui": {
             "session": {"is_system": system}, "response": source["raw"] if system else {},
-            "coordinate_evidence": {"arkui_geometry": source["arkui_geometry"] if system else {}}
+            "coordinate_evidence": {"arkui_geometry": source["arkui_geometry"] if system else {},
+                                     "source_window_id": window_id, "process_id": process_id, "response": {}}
         }}
     }
 
@@ -72,6 +74,25 @@ class SceneEvidenceTests(unittest.TestCase):
         self.windows = [window_record(23, 230, 100, self.source), window_record(106, 1060, 200, None),
                         window_record(9, 90, 100, self.source)]
         self.attach_sources([self.source])
+
+    def test_embedded_source_offsets_move_with_the_host_without_modifying_raw_text(self):
+        raw = ("  |-> UIExtension,104,104 childSize:0\n"
+               "      ID: 104\n"
+               "      UI Extension info:\n"
+               "      |-> root,0,0 childSize:0\n"
+               "            ID: 0\n"
+               "      ------------start print rsNode\n"
+               "      CanvasNode[123]\n").encode()
+        node = parse_source_node(raw, 1709)
+        self.assertEqual(node["source_line"], 1709)
+        block = node["embedded_trees"][0]
+        self.assertEqual(block["source_line"], 1711)
+        self.assertEqual(block["roots"][0]["source_line"], 1712)
+        self.assertEqual(node["raw"], raw.decode().split("\n", 1)[1])
+        own = node_property_text(node)
+        self.assertIn("ID: 104", own)
+        self.assertIn("CanvasNode[123]", own)
+        self.assertNotIn("ID: 0", own)
 
     def attach_sources(self, sources):
         for window in self.windows:
@@ -178,7 +199,7 @@ class SceneEvidenceTests(unittest.TestCase):
                             (records[name] for name in ("geometry", "geometry-response", "render", "detached"))))
         geometry["scene_sources"] = [self.source]
         tree = {**records["tree"], "node_count": 1, "raw": records["raw"], "response": records["response"],
-                "coordinate_evidence": geometry}
+                "coordinate_evidence": geometry, "session": {"is_system": True}}
         window = {"trees": {"arkui": tree, "accessibility": {"node_count": 1, "artifact": records["access"]}}}
         indexed = {record["file"]: record for record in (*records.values(), self.source["raw"],
                                                         self.source["arkui_geometry"])}
@@ -200,7 +221,8 @@ class SceneEvidenceTests(unittest.TestCase):
                 destination.write_text("render evidence", encoding="utf-8")
             else:
                 wid = int(name.rsplit("_", 1)[1])
-                tree = json.dumps({"$type": "root", "$ID": 0})
+                tree = json.dumps({"appInfo": {"WindowID": 1, "BundleName": "com.ohos.sceneboard"},
+                                   "$type": "root", "$ID": 0})
                 destination.write_text(f"WinId: {wid}\nPid: {index[wid]['process_id']}\n" + tree, encoding="utf-8")
 
         hdc.receive.side_effect = receive
@@ -211,7 +233,8 @@ class SceneEvidenceTests(unittest.TestCase):
         hdc = self.geometry_hdc(self.windows)
         result = collect_geometry_evidence(hdc, self.directory, {"layout": "/data/local/tmp/test"}, self.windows)
         self.assertEqual([call.args[1] for call in hdc.run.call_args_list],
-                         ["geometry_23", "geometry_106", "render_geometry", "render_detached_geometry"])
+                         ["geometry_23", "render_geometry", "render_detached_geometry"])
+        self.assertEqual(result[106]["source_window_id"], 106)
         self.assertEqual(result[9]["source_window_id"], 23)
         sources = result[106]["scene_sources"]
         self.assertEqual(len(sources), 1)

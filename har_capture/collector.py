@@ -138,6 +138,8 @@ def attach_uitest_trees(metadata: dict, trees: dict) -> None:
         metadata["files"][f"arkui_{window['window_id']}"] = {key: arkui[key] for key in ("file", "bytes", "sha256")}
         metadata["files"][f"arkui_raw_{window['window_id']}"] = arkui["raw"]
         metadata["files"][f"arkui_response_{window['window_id']}"] = arkui["response"]
+        if not arkui["session"]["is_system"]:
+            metadata["files"][f"arkui_forest_{window['window_id']}"] = arkui["forest"]
         window["is_system"] = arkui["session"]["is_system"]
 
 
