@@ -49,7 +49,7 @@ function fixture(t: TestContext, changes: object = {}, failure?: object) {
   const errors = t.mock.method(console, 'error', () => {});
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 100 },
     tools: { enabled: ['Input'] }, tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
-  const state = new RunState(config, 'unused');
+  const state = new RunState(config, 'unused', 'unused');
   const audit = t.mock.method(state, 'event', () => {});
   const device = new CollectionDevice({ serial: 'unused-test-device', hdc: 'unused-hdc',
     python: 'unused-python' }, state);

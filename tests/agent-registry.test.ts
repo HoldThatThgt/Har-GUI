@@ -9,6 +9,7 @@ import { z } from 'zod';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { ToolRegistry, type RegisteredTool } from '../agent/registry.js';
 import { RunState, sameWindow, windowSchema, type WindowInfo } from '../agent/state.js';
+import { FIXTURE_DELIVERY } from './agent-configuration.js';
 
 /** 构造不需要凭据、模型或设备的实际运行状态。 */
 function fixture(t: TestContext, enabled = ['Inspect'], maxActions = 5, duration = 60) {
@@ -26,6 +27,7 @@ function fixture(t: TestContext, enabled = ['Inspect'], maxActions = 5, duration
       run: { name: 'isolated-test', output: directory, max_actions: maxActions, max_duration_seconds: duration },
       agent: { llm: 'test' }, tools: { enabled },
       dataset: { root: directory, canvas: { width: 3120, height: 2080 }, stability_regions: [] },
+      delivery: structuredClone(FIXTURE_DELIVERY),
       tasks: [{ name: 'generic-task', instruction: 'Inspect the fixture', acceptance: 'Fixture is returned',
         target_count: 1, app: 'Fixture', scene: 'Fixture', privacy: { enabled: false, reason: 'Synthetic fixture' } }],
     },
@@ -34,7 +36,7 @@ function fixture(t: TestContext, enabled = ['Inspect'], maxActions = 5, duration
     projectPath: join(directory, 'project.toml'), configPath: join(directory, 'config.toml'),
     outputPath: directory, datasetPath: directory, digests: { project: 'fixture-project', config: 'fixture-config' },
   };
-  return { state: new RunState(config, directory), directory };
+  return { state: new RunState(config, directory, directory), directory };
 }
 
 /** 创建只供测试使用的最小动作上下文。 */

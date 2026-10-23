@@ -1,52 +1,71 @@
-# 运行结果与固定证据目录
+# 运行交付与内部证据
 
-`project.toml` 的 `run.output` 继续指定输出根。每次 `run` 和 `finalize` 都在同一个根内取得下一个序号，
-至少三位，依次使用 `001`、`002`，超过三位自然增长。不同输出根独立编号。
-既有目录及其收据保持原样，工具不会为了重跑清空输出。
+`run.output` 保存用户本轮实际取得的交付文件。`run`、`finalize` 和 `export` 在同一输出根内
+共同递增编号，至少三位，超过三位自然增长；不同输出根独立编号。
+已有目录、文件和收据保持原样，不为重跑清空、搬移或重命名历史输出。
+
+内部数据继续使用原 `dataset.root`。新运行证据集中在 `runs/<UUID>/`，
+不再在交付根新建并列的 `.001` 目录，也不把详细 `run.json` 复制到用户结果目录。
 
 ```text
-output/
-  001-success/run.json  正常结束的运行结果
-  002-failed/run.json   失败运行的结果与错误
-  003-running/run.json  尚未正常结束的运行入口
-  .001/                运行的固定证据目录
+run.output/
+  001-success/
+    manifest.json        本轮实际文件的来源、相对路径、大小和 SHA-256
+    <声明的实际文件或样本子目录>
+  002-failed/
+    manifest.json        真实失败状态、错误及已完成的交付项
+    <失败前已写出的文件，如有>
+  003-running/
+    manifest.json        尚未正常结束的运行及当前交付项
+
+dataset.root/
+  dataset.sqlite3        继续使用原采集登记和计数
+  samples/<capture_id>/  已验收事实，保持稳定身份
+  runs/<UUID>/
     project.toml
     configuration.json
+    run.json             详细状态、run_index、artifacts_directory、进度和错误
     events.jsonl
-    model-usage.jsonl
-    run.json
+    model-usage.jsonl    有模型调用的运行才产生相应用量记录
     captures/<capture_id>/
-  .002/                失败时也保留全部已取得的证据
-  .003/
+    exports/<capture_id>.json
 ```
 
-CLI 返回 `001-success` 这样的结果目录。其 `run.json` 包含最终运行汇总，
-`artifacts_directory` 指向 `.001` 这样的固定证据目录，`run_index` 保存序号。
-运行期间的入口指向同一证据目录，最新进度以固定目录内的 `run.json` 为准。
-点前缀用于区别证据与结果入口，不依赖操作系统将其隐藏。
+具体文件由必填 `[delivery]` 声明，规则见[项目声明的交付文件](declarative-delivery.md)。
+`directory="."` 平铺本轮文件；也可按应用、采集标识等固定替换项组织样本子目录。
+文件数量不是成功条件，实际文件必须与 `manifest.json` 的明确清单对应。
 
 ```mermaid
 flowchart LR
-    Reserve[独占预留下一个序号] --> Fixed[固定证据目录 .001]
-    Reserve --> Running[结果入口 001-running]
-    Fixed --> References[候选 原始证据 收据 SQLite 始终引用固定路径]
-    Running --> Success[正常返回 001-success]
-    Running --> Failed[异常结束 001-failed]
-    Success --> Index[run.json 指向同一固定证据目录]
-    Failed --> Index
+    Reserve[独占预留 index-running] --> Internal[dataset.root/runs/UUID 保存稳定证据]
+    Internal --> Accepted[完整验收与采集登记]
+    Accepted --> Export[向 index-running 写实际声明文件]
+    Existing[已成功登记的样本] --> Export
+    Export --> Success[正常结束 index-success]
+    Reserve --> Failure[执行或清理异常 index-failed]
+    Export --> Failure
 ```
 
-成功表示本次命令正常结束。`run.json.status` 保留原来的 `complete` 或 `failed`，
-`new_samples` 仍只计算本轮新增样本，`stop_reason=run_sample_limit` 不表示项目总配额完成。
-发布过样本后发生异常的运行仍显示 `failed`；已发布样本按原收据恢复核验，不丢弃成功进度。
+CLI 返回 `001-success` 这样的实际交付目录。外部 `manifest.json` 初始包含
+`status="running"`、`run_index` 和空 `samples`；每个交付项记录来源、相对路径、大小和摘要。
+正常闭合写入 `status="complete"`，异常写入 `status="failed"` 和真实错误，再改变整个结果目录的状态后缀。
+产物引用均相对结果目录，改名不要求改写这些引用。
 
-结果目录只保存入口，不保存配置副本或另一份采集数据。运行结束时只改变结果入口的名字，
-所有证据实体、候选路径、发布清单、准备收据、数据库记录及独立验收来源都不随状态改名。
-`finalize` 可以继续使用失败运行固定目录中的采集路径，重复验收与续采仍使用原发布事务。
-这沿用成熟的[运行身份与证据位置分离](https://mlflow.org/docs/latest/api_reference/rest-api.html)方式，
-没有引入运行时依赖。
+配置、原始采集、候选、验收收据、SQLite 和内部详细状态始终引用稳定的内部位置。
+内部 `run.json` 的 `run_index` 对应本轮序号，`artifacts_directory` 指向自身稳定目录；
+它记录完整进度，不是用户交付文件。`finalize` 的来源也保留内部稳定路径。
 
-编号通过固定证据目录的独占创建预留，同根并发运行不能取得相同序号。
-已经预留的序号不复用，旧时间戳目录不参与新编号，也不改名。
-强制杀进程可能留下 `running`，表示未记录正常终止；工具不据此伪造成功或自动改判失败。
-关闭操作也属于本次运行，关闭失败必须记录真实错误。
+成功只表示本次命令正常结束。达到 `run_sample_limit` 时，总配额可能尚未完成。
+采集已经登记、随后导出失败的运行仍显示 `failed`，已采计数不回退；
+可使用 `export --sample-id` 在新编号目录重新交付，不重新调用模型或计数。
+关闭设备锁、日志等清理步骤也属于本次命令，清理异常必须使内部记录和外部清单都标记失败，
+同时保留已验收计数、已写出的文件和真实错误。
+
+编号通过结果目录的独占创建预留，同根并发命令不能复用序号。
+已有数字状态目录和旧数字证据目录参与延续序号，但不会创建新的并列点目录；
+旧时间戳目录保持原名，不参与数字序列。
+强制杀进程可能留下 `running`，它表示尚未记录正常终止，工具不会据此伪造成功或自动改判失败。
+
+输出规则和存储位置不决定采集身份，但本接口不搬移旧数据，也不提供复制布局的自动路径映射。
+保留原 `dataset.root` 和所有被引用的旧路径；来源、完整性及恢复边界见
+[采集事实、交付与恢复](delivery-contract.md)。

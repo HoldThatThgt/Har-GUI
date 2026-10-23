@@ -49,7 +49,7 @@ async function fixture(t: TestContext, variation = 'cursor blink') {
     { before: beforeCrop, after: afterCrop, afterScreen });
   const config = { project: { run: { max_duration_seconds: 60 }, tasks: [{ name: 'fixture',
     instruction: 'Inspect the requested page', acceptance: 'The requested page remains visible' }] } } as LoadedConfiguration;
-  const state = new RunState(config, directory);
+  const state = new RunState(config, directory, directory);
   state.candidate = { path: directory, capture_id: metadata.capture_id, target_window_id: 1,
     target_bundle_name: 'app.fixture' };
   const device = { pageObservation, frozenScreenshot: undefined } as unknown as CollectionDevice;

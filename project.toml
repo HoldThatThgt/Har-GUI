@@ -13,6 +13,29 @@ llm = "default"
 root = "./output/settings-display/dataset"
 canvas = { width = 3120, height = 2080 }
 
+[delivery]
+directory = "."
+
+[[delivery.artifacts]]
+source = "accessibility"
+path = "{app}_{page_id}_{scene}_{state_id}_tree.json"
+
+[[delivery.artifacts]]
+source = "application_accessibility"
+path = "{app}_{page_id}_{scene}_{state_id}_windows_tree.json"
+
+[[delivery.artifacts]]
+source = "application_arkui"
+path = "{app}_{page_id}_{scene}_{state_id}_windows_akui.json"
+
+[[delivery.artifacts]]
+source = "screenshot"
+path = "{app}_{page_id}_{scene}_{state_id}_shot.png"
+
+[[delivery.artifacts]]
+source = "windows"
+path = "{app}_{page_id}_{scene}_{state_id}_wms.json"
+
 [tools]
 enabled = ["ListApplications", "LaunchApplication", "ReadWindows", "Tap", "Scroll", "ToggleWindowSize", "Capture"]
 

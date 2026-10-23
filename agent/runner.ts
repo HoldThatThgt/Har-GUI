@@ -11,6 +11,7 @@ import { RunState } from './state.js';
 import { saveRunConfiguration } from './provenance.js';
 import { withRunOutput } from './run-output.js';
 import { createRegistry } from './tools.js';
+import { exportAccepted } from './export.js';
 import { UsageRecorder, estimateUsageCost, type UsageRates } from './usage.js';
 
 /** @brief 仅约束本轮新增发布数量，不改变项目累计配额。 */
@@ -107,6 +108,7 @@ async function collectSample(
     state.signal.throwIfAborted();
     sample = await acceptCandidate(state, device, agent, () => ({ started_at: startedAt,
       finished_at: new Date().toISOString(), ...usageSnapshot(usage, state.config.profile.pricing, startIndex) }));
+    await exportAccepted(state, device.connection.python, sample);
     const visualize = fileURLToPath(new URL('../visualize.py', import.meta.url));
     await promisify(execFile)(device.connection.python, [visualize, state.candidate.path], {
       windowsHide: true, signal: state.signal, env: { ...process.env, PYTHONUTF8: '1' },
@@ -189,9 +191,10 @@ async function collectRemaining(
 /** @brief 在固定证据目录使用设备锁执行采集，保留真实配额和失败信息。 */
 async function executeRun(
   config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions, directory: string,
+  deliveryDirectory: string,
 ): Promise<void> {
   const { maxNewSamples } = options;
-  const state = new RunState(config, directory, options.projectSources);
+  const state = new RunState(config, directory, deliveryDirectory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const lockPath = path.join(path.dirname(connection.hdc), `har-gui-${connection.serial}.lock`);
   let lock: Awaited<ReturnType<typeof acquireDeviceLock>> | undefined;
@@ -230,5 +233,6 @@ async function executeRun(
 export async function run(
   config: LoadedConfiguration, connection: DeviceOptions, options: RunOptions = {},
 ): Promise<string> {
-  return withRunOutput(config.outputPath, (directory) => executeRun(config, connection, options, directory));
+  return withRunOutput(config.outputPath, config.datasetPath,
+    (directory, delivery) => executeRun(config, connection, options, directory, delivery));
 }

@@ -11,11 +11,13 @@ from unittest.mock import patch
 from PIL import Image
 
 from har_capture.collector import capture
-from har_capture.delivery_operations import prepare_delivery, verify_capture_evidence
+from har_capture.capture_facts import verify_capture_evidence
+from har_capture.delivery_operations import prepare_capture
 from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
 from har_capture.privacy import atomic_json
 from har_capture.stability import observe_stability, validate_rules, verify_project_rules
+from tests.delivery_fixture import CaptureFixture
 from tests.support import (fake_hdc, layout_data, png_bytes, raw_layout, save_page_stability,
                            synthetic_closing_geometry, synthetic_screen_geometry)
 
@@ -88,18 +90,17 @@ class StabilityCaptureTests(unittest.TestCase):
         metadata = json.loads((directory / "metadata.json").read_bytes())
         save_page_stability(directory, metadata)
         request = {"directory": str(directory), "privacy": {"enabled": False, "reason": "Synthetic image"},
-                   "options": {"app": "test", "page_id": "page", "scene": "scene", "state_id": "state",
-                               "canvas": {"width": 3120, "height": 2080}, "stability_regions": RULES}}
-        def normalized(evidence, window, canvas, scenes):
-            return {"window_id": window["window_id"], "bundle_name": window["bundle_name"], "tree": {}}
-        with patch("har_capture.export.load_scene_evidence", return_value={}), \
-                patch("har_capture.export.normalized_arkui", side_effect=normalized):
-            prepared = prepare_delivery(request)
-        wms = json.loads((Path(prepared["manifest"]["path"]) / prepared["manifest"]["files"]["wms"]["file"]).read_bytes())
-        self.assertEqual(wms["page_stability"]["decision"], "same_page")
-        self.assertEqual(wms["consistency"]["pixels"]["changed_pixel_count"], 2)
+                   "options": {"canvas": {"width": 3120, "height": 2080}, "stability_regions": RULES}}
+        with patch("har_capture.capture_facts.load_scene_evidence", return_value={}), \
+                patch("har_capture.capture_facts.normalized_arkui", side_effect=CaptureFixture.normalized):
+            prepared = prepare_capture(request)
+            repeated = prepare_capture(request)
+        record = Path(prepared["manifest"]["path"]) / prepared["manifest"]["files"]["capture"]["file"]
+        windows = json.loads(record.read_bytes())["windows"]
+        self.assertEqual(windows["page_stability"]["decision"], "same_page")
+        self.assertEqual(windows["consistency"]["pixels"]["changed_pixel_count"], 2)
         self.assertEqual(len(list(directory.rglob("*.png"))), 1)
-        self.assertEqual(prepare_delivery(request), prepared)
+        self.assertEqual(repeated, prepared)
 
     def test_diagnostic_receipt_tampering_is_still_rejected(self):
         directory = self.dynamic_capture()["path"]

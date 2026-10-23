@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { LoadedConfiguration } from '../agent/config.js';
 import type { RunState } from '../agent/state.js';
 import { saveRunConfiguration } from '../agent/provenance.js';
-import { writeFixtureConfiguration } from './agent-configuration.js';
+import { FIXTURE_DELIVERY, writeFixtureConfiguration } from './agent-configuration.js';
 import { writePageObservation } from './agent-page-fixture.js';
 
 const sdkDirectory = mkdtempSync(join(tmpdir(), 'har-gui-runner-sdk-'));
@@ -45,14 +45,32 @@ process.stdin.setEncoding('utf8').on('data', chunk => input += chunk).on('end', 
   let error;
   if (request.operation === 'dataset_status') {
     result = { samples: plan.restored, counts: {}, remaining: {}, failures: [] };
-  } else if (request.operation === 'prepare_delivery') {
+  } else if (request.operation === 'prepare_capture') {
     const metadata = JSON.parse(fs.readFileSync(path.join(request.directory, 'metadata.json'), 'utf8'));
-    result = { manifest: { path: request.directory, files: { screenshot: metadata.files.screenshot } } };
-  } else if (request.operation === 'publish_sample') {
+    result = { manifest: { path: request.directory,
+      screenshot: { ...metadata.files.screenshot, file:path.join(request.directory,metadata.files.screenshot.file) } } };
+  } else if (request.operation === 'publish_capture') {
     plan.publish_attempts += 1;
     if (plan.fail_publish_at === plan.publish_attempts) error = { message: 'Fixture publication failed' };
     else result = { sample_id: plan.publications[plan.publish_attempts - 1] || 'new-' + plan.publish_attempts,
-      task_name: request.acceptance.task_name, path: request.directory };
+      task_name: request.acceptance.task_name, path: request.directory, evidence_directory:request.evidence_directory };
+    if(result) (plan.samples??=[]).push(result);
+  } else if (request.operation === 'export_sample') {
+    const sample=plan.samples.find(item=>item.sample_id===request.sample_id);
+    const crypto=require('node:crypto'),files={};
+    for(const artifact of request.delivery.artifacts){
+      const name=artifact.path.replaceAll('{capture_id}',sample.sample_id);
+      const target=path.join(request.destination,name);
+      const bytes=artifact.source==='screenshot'?fs.readFileSync(path.join(sample.evidence_directory,'screenshot.png'))
+        :Buffer.from(JSON.stringify({capture_id:sample.sample_id,source:artifact.source}));
+      fs.writeFileSync(target,bytes);files[artifact.source]={file:name,bytes:bytes.length,
+        sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+    }
+    const filename=path.join(request.destination,'manifest.json'),manifest=JSON.parse(fs.readFileSync(filename,'utf8'));
+    const exported={capture_id:sample.sample_id,source_sha256:'fixture',files,naming:{capture_id:sample.sample_id}};
+    if(!manifest.samples.some(item=>item.capture_id===sample.sample_id))manifest.samples.push(exported);
+    fs.writeFileSync(filename,JSON.stringify(manifest));
+    result={sample,export:exported,new_samples:0};
   } else error = { message: 'Unexpected fixture operation: ' + request.operation };
   fs.writeFileSync(filename, JSON.stringify(plan));
   process.stdout.write(JSON.stringify(error ? { error } : { result }));
@@ -74,6 +92,7 @@ function configuration(directory: string, tasks: FixtureOptions['tasks']): Loade
       model_family: 'deepseek', api_key_env: 'HAR_GUI_RUNNER_TEST_KEY', supports_vision: true },
     project: { schema_version: 1,
       run: { name: 'fixture', output: 'runs', max_actions: 100, max_duration_seconds: 60 },
+      delivery: structuredClone(FIXTURE_DELIVERY),
       agent: { llm: 'vision' }, dataset: { root: 'dataset', canvas: { width: 4, height: 3 }, stability_regions: [] },
       tools: { enabled: ['Capture'] }, tasks: (tasks ?? [{ name: 'editor', target_count: 200 }])
         .map((task) => ({ ...task, app: task.name, scene: 'scene', privacy: { enabled: false, reason: 'Fixture' },
@@ -130,9 +149,9 @@ function fixture(t: TestContext, options: FixtureOptions = {}) {
   t.mock.method(console, 'error', () => {});
   return { directory, config, events, prompts, connection, planPath, passAcceptance: options.passAcceptance ?? true,
     plan: () => JSON.parse(readFileSync(planPath, 'utf8')),
-    summaries: () => readdirSync(config.outputPath).filter((name) => /^\d+-(success|failed|running)$/.test(name))
-      .map((name) => JSON.parse(
-      readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
+    artifacts: () => join(config.datasetPath, 'runs', readdirSync(join(config.datasetPath, 'runs'))[0]),
+    summaries: () => readdirSync(join(config.datasetPath, 'runs')).map((name) => JSON.parse(
+      readFileSync(join(config.datasetPath, 'runs', name, 'run.json'), 'utf8'))) };
 }
 
 function mockBridge(t: TestContext, f: ReturnType<typeof fixture>): void {
@@ -201,9 +220,11 @@ test('run cap adds one to a restored 200-target dataset and stops before another
   const directory = await run(f.config, f.connection, { maxNewSamples: 1 });
   const summary = f.summaries()[0];
   assert.equal(directory, join(f.config.outputPath, '001-success'));
-  assert.equal(summary.run_index, '001');
-  assert.equal(summary.artifacts_directory, join(f.config.outputPath, '.001'));
-  assert.deepEqual(readdirSync(directory), ['run.json']);
+  const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.run_index, '001');
+  assert.equal(manifest.samples.length, 1);
+  assert.equal(readdirSync(directory).length, FIXTURE_DELIVERY.artifacts.length + 1);
+  assert.deepEqual(readdirSync(f.config.outputPath), ['001-success']);
   assert.equal(summary.status, 'complete');
   assert.equal(summary.stop_reason, 'run_sample_limit');
   assert.equal(summary.max_new_samples, 1);
@@ -213,11 +234,11 @@ test('run cap adds one to a restored 200-target dataset and stops before another
   assert.match(f.prompts[0], /199 samples remain/);
   assert.deepEqual(f.events, ['connect', 'aiAct', 'aiAsk', 'aiAssert', 'visualize', 'destroy']);
   assert.deepEqual(f.plan().requests.map((request: any) => request.operation),
-    ['dataset_status', 'prepare_delivery', 'publish_sample']);
+    ['dataset_status', 'prepare_capture', 'publish_capture', 'export_sample']);
   assert.deepEqual(f.plan().requests[0].identity.tasks, [{ name: 'editor', target_count: 200 }]);
   assert.deepEqual(f.plan().requests[0].identity.project_sources, []);
-  assert.deepEqual(readFileSync(join(summary.artifacts_directory, 'project.toml')), readFileSync(f.config.projectPath));
-  assert.equal(summary.accepted[1].path, join(summary.artifacts_directory, 'captures', 'capture-1'));
+  assert.deepEqual(readFileSync(join(f.artifacts(), 'project.toml')), readFileSync(f.config.projectPath));
+  assert.equal(summary.accepted[1].path, join(f.artifacts(), 'captures', 'capture-1'));
   assert.equal(existsSync(join(summary.accepted[1].path, 'candidate.json')), true);
   assert.equal(f.config.project.tasks[0].target_count, 200);
   assert.deepEqual(summary.model_usage.call_ids, []);
@@ -257,9 +278,9 @@ test('run rejects changed raw project bytes before saving provenance or touching
   writeFileSync(f.config.projectPath, changed);
   await assert.rejects(run(f.config, f.connection, { maxNewSamples: 0 }), /Project source digest changed/);
   const summary = f.summaries()[0];
-  const directory = summary.artifacts_directory;
+  const directory = f.artifacts();
   assert.equal(summary.status, 'failed');
-  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
+  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'manifest.json')), true);
   assert.equal(existsSync(join(directory, 'project.toml')), false);
   assert.equal(existsSync(join(directory, 'configuration.json')), false);
   assert.deepEqual(f.plan().requests, []);
@@ -273,7 +294,7 @@ test('run preserves exact raw project bytes including comments and CRLF', async 
   writeFileSync(f.config.projectPath, raw);
   f.config.digests.project = createHash('sha256').update(raw).digest('hex');
   const directory = await run(f.config, f.connection, { maxNewSamples: 0 });
-  const artifacts = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8')).artifacts_directory;
+  const artifacts = f.artifacts();
   assert.deepEqual(readFileSync(join(artifacts, 'project.toml')), raw);
   assert.equal(JSON.parse(readFileSync(join(artifacts, 'configuration.json'), 'utf8')).digests.project,
     f.config.digests.project);
@@ -356,8 +377,9 @@ test('failed publication is not a new sample and does not simulate normal cap co
   assert.equal(f.plan().publish_attempts, 2);
   assert.equal(f.events.filter((event) => event === 'aiAct').length, 2);
   assert.equal(f.events.at(-1), 'destroy');
-  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
-  assert.equal(summary.candidate.path, join(f.config.outputPath, '.001', 'captures', 'capture-2'));
+  const failed = JSON.parse(readFileSync(join(f.config.outputPath, '001-failed', 'manifest.json'), 'utf8'));
+  assert.equal(failed.samples.length, 1);
+  assert.equal(summary.candidate.path, join(f.artifacts(), 'captures', 'capture-2'));
   assert.equal(existsSync(join(summary.candidate.path, 'metadata.json')), true);
 });
 
@@ -385,7 +407,7 @@ test('run rejects every invalid API cap before dataset or device access', async 
 
 function cli(args: string[], env = process.env) {
   const filename = fileURLToPath(new URL('../agent/cli.ts', import.meta.url));
-  return childProcess.spawnSync(process.execPath, ['--import', 'tsx', filename, ...args],
+  return childProcess.spawnSync(process.execPath, ['--import', 'tsx', '--', filename, ...args],
     { cwd: resolve(dirname(filename), '..'), windowsHide: true, encoding: 'utf8', env });
 }
 
@@ -409,7 +431,7 @@ test('CLI accepts decimal safe-integer limits and only exposes the option for ru
       assert.doesNotMatch(result.stderr, /max-new-samples must/);
     });
   }
-  for (const command of ['validate', 'tools', 'finalize']) {
+  for (const command of ['validate', 'tools', 'finalize', 'export']) {
     await t.test(command, () => {
       const result = cli([command, '--max-new-samples=0']);
       assert.equal(result.status, 1);
@@ -418,15 +440,15 @@ test('CLI accepts decimal safe-integer limits and only exposes the option for ru
   }
 });
 
-test('CLI restricts project sources to run and finalize and rejects empty paths', async (t) => {
+test('CLI restricts project sources to execution commands and rejects empty paths', async (t) => {
   for (const command of ['validate', 'tools']) {
     await t.test(command, () => {
       const result = cli([command, '--project-source=archive.toml']);
       assert.equal(result.status, 1);
-      assert.match(result.stderr, /--project-source is only available for run and finalize/);
+      assert.match(result.stderr, /--project-source is only available for run, finalize and export/);
     });
   }
-  for (const command of ['run', 'finalize']) {
+  for (const command of ['run', 'finalize', 'export']) {
     await t.test(`${command} empty`, () => {
       const result = cli([command, '--project-source=']);
       assert.equal(result.status, 1);
@@ -440,6 +462,42 @@ test('CLI restricts project sources to run and finalize and rejects empty paths'
       assert.doesNotMatch(result.stderr, /project-source is only|project-source requires/);
     });
   }
+});
+
+test('CLI exports an accepted identity without a device, model key or environment-file read', (t) => {
+  const f = fixture(t);
+  const evidence = join(f.directory, 'accepted-source');
+  capture(evidence, 'accepted-frame');
+  const original = readFileSync(join(evidence, 'screenshot.png'));
+  const plan = f.plan();
+  plan.samples = [{ sample_id: 'accepted-frame', task_name: 'editor', path: evidence, evidence_directory: evidence }];
+  writeFileSync(f.planPath, JSON.stringify(plan));
+  const source = join(f.directory, 'project-archive.toml');
+  writeFileSync(source, readFileSync(f.config.projectPath));
+  const hook = join(f.directory, 'export-bridge-hook.mjs');
+  writeFileSync(hook, `import cp from 'node:child_process';
+import { basename } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const original=cp.spawn;
+cp.spawn=(_executable,args,options)=>{
+  if(args.length!==1||basename(String(args[0]))!=='agent_device.py')throw new Error('Unexpected device parameters');
+  return original(process.execPath,['--input-type=commonjs','-e',${JSON.stringify(BRIDGE_STUB)},
+    ${JSON.stringify(f.planPath)}],{...options,env:{...options.env,NODE_OPTIONS:''}});
+};
+syncBuiltinESMExports();`);
+  const result = cli(['export', '--project', f.config.projectPath, '--config', f.config.configPath,
+    '--sample-id', 'accepted-frame', '--env-file', join(f.directory, 'missing.env'), '--project-source', source],
+  { ...process.env, HAR_GUI_RUNNER_TEST_KEY: '', NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.plan().requests.map((request: any) => request.operation), ['export_sample']);
+  assert.deepEqual(f.plan().requests[0].identity.project_sources, [source]);
+  assert.equal(f.plan().requests[0].sample_id, 'accepted-frame');
+  assert.equal(f.summaries()[0].operation, 'export');
+  assert.equal(f.summaries()[0].new_samples, 0);
+  const output = join(f.config.outputPath, '001-success');
+  assert.equal(readdirSync(output).length, FIXTURE_DELIVERY.artifacts.length + 1);
+  assert.deepEqual(readFileSync(join(output, 'accepted-frame_shot.png')), original);
+  assert.deepEqual(readFileSync(join(evidence, 'screenshot.png')), original);
 });
 
 test('CLI passes zero cap to the runner and resumes without a connected device or model key', (t) => {

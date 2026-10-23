@@ -147,9 +147,11 @@ export async function verifySavedScreenshot(
   state: RunState, device: Pick<CollectionDevice, 'frozenScreenshot'>,
   agent: Pick<CollectionAgent, 'aiAssert'>, manifest: any,
 ) {
-  const image = await readFile(path.join(manifest.path, manifest.files.screenshot.file));
+  const image = await readFile(manifest.screenshot.file);
   const screenshotHash = createHash('sha256').update(image).digest('hex');
-  if (screenshotHash !== manifest.files.screenshot.sha256) throw new Error('Final screenshot digest mismatch');
+  if (screenshotHash !== manifest.screenshot.sha256 || image.length !== manifest.screenshot.bytes) {
+    throw new Error('Final screenshot digest mismatch');
+  }
   device.frozenScreenshot = `data:image/png;base64,${image.toString('base64')}`;
   let verdict;
   try {
@@ -181,19 +183,18 @@ export async function acceptCandidate(
     const metadata = await verifyCapture(candidate.path);
     const windowOcclusions = verifyWindowChanges(metadata, candidate.window_changes);
     await assessPageStability(state, device, agent, metadata);
-    const prepared = await bridge(device.connection, { operation: 'prepare_delivery', directory: candidate.path,
-      options: { app: state.task.app, page_id: candidate.page_name, scene: state.task.scene,
-        state_id: candidate.capture_id, canvas: state.config.project.dataset.canvas,
+    const prepared = await bridge(device.connection, { operation: 'prepare_capture', directory: candidate.path,
+      options: { canvas: state.config.project.dataset.canvas,
         stability_regions: state.config.project.dataset.stability_regions }, privacy: state.task.privacy,
     }, state.signal);
     const accepted = await verifySavedScreenshot(state, device, agent, prepared.manifest);
     const acceptance = { task_name: state.task.name, target_bundle_name: candidate.target_bundle_name,
-      pass: true, export: prepared.manifest, accepted_screenshot_sha256: accepted.accepted_screenshot_sha256,
+      pass: true, capture: prepared.manifest, accepted_screenshot_sha256: accepted.accepted_screenshot_sha256,
       model_usage: modelUsage() };
     const evidence = { ...candidate, acceptance: accepted.verdict, window_occlusions: windowOcclusions,
       accepted_screenshot_sha256: accepted.accepted_screenshot_sha256, model_usage: acceptance.model_usage };
     await writeFile(path.join(candidate.path, 'sample.json'), JSON.stringify(evidence, null, 2) + '\n');
-    const published = await bridge(device.connection, { operation: 'publish_sample', root: state.config.datasetPath,
+    const published = await bridge(device.connection, { operation: 'publish_capture', root: state.config.datasetPath,
       identity: state.datasetIdentity, directory: prepared.manifest.path, acceptance,
       evidence_directory: candidate.path,
     }, state.signal);

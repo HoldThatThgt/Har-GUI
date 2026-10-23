@@ -51,7 +51,7 @@ def read_capture(directory: Path) -> dict:
         fail("Screenshot dimensions do not match capture metadata")
     screenshot = base64.b64encode((directory / screenshot_file).read_bytes()).decode("ascii")
     trees = read_trees(directory, metadata)
-    from har_capture.delivery_operations import verify_screen_geometry
+    from har_capture.capture_facts import verify_screen_geometry
     verify_screen_geometry(directory, metadata)
     trees = {"accessibility": {key: viewer_tree(tree) for key, tree in trees["accessibility"].items()},
              "arkui": {key: viewer_tree(tree) for key, tree in trees["arkui"].items()}}

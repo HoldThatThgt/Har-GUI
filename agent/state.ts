@@ -39,8 +39,9 @@ export class RunState {
   /** 调用者明确提供的原始项目文件或目录，统一使用绝对路径。 */
   readonly projectSources: string[];
 
-  /** @brief 建立运行预算、输出位置和明确的原始项目来源。 */
-  constructor(readonly config: LoadedConfiguration, readonly directory: string, projectSources: string[] = []) {
+  /** @brief 绑定稳定内部证据目录、本轮实际交付目录及明确的项目来源。 */
+  constructor(readonly config: LoadedConfiguration, readonly directory: string,
+    readonly deliveryDirectory: string, projectSources: string[] = []) {
     this.projectSources = projectSources.map((source) => path.resolve(source));
     this.signal = AbortSignal.any([this.controller.signal,
       AbortSignal.timeout(config.project.run.max_duration_seconds * 1000)]);
@@ -85,7 +86,8 @@ export class RunState {
   /** @brief 写入可独立检查的运行结果。 */
   save(status: string, extra: object = {}): void {
     writeFileSync(path.join(this.directory, 'run.json'), JSON.stringify({
-      status, artifacts_directory: this.directory, updated_at: new Date().toISOString(), actions: this.actions,
+      status, run_index: path.basename(this.deliveryDirectory).split('-')[0], artifacts_directory: this.directory,
+      updated_at: new Date().toISOString(), actions: this.actions,
       accepted: this.accepted, ...extra,
     }, null, 2) + '\n');
   }

@@ -327,7 +327,7 @@ test('saved-image acceptance binds the final digest without prematurely counting
   const device = { frozenScreenshot: undefined } as unknown as CollectionDevice;
   const agent = { aiAssert: async () => ({ pass: true, thought: 'Fixture passed' }) } as unknown as CollectionAgent;
   const accepted = await verifySavedScreenshot(state, device, agent,
-    { path: f.directory, files: { screenshot: f.metadata.files.screenshot } });
+    { screenshot: { ...f.metadata.files.screenshot, file: join(f.directory, f.metadata.files.screenshot.file) } });
   assert.equal(accepted.accepted_screenshot_sha256, f.metadata.files.screenshot.sha256);
   assert.deepEqual(state.candidate.window_changes, history);
   assert.equal(device.frozenScreenshot, undefined);
@@ -377,7 +377,7 @@ test('saved-image acceptance describes the privacy switch without changing custo
         return { pass: true };
       } } as unknown as CollectionAgent;
       await verifySavedScreenshot(state, device, agent,
-        { path: f.directory, files: { screenshot: f.metadata.files.screenshot } });
+        { screenshot: { ...f.metadata.files.screenshot, file: join(f.directory, f.metadata.files.screenshot.file) } });
       assert.equal(calls.length, 1);
       assert.equal(calls[0][0], acceptance);
       assert.match(calls[0][2].context, enabled
@@ -398,7 +398,8 @@ test('saved-image failure clears the frozen screenshot and never increments quot
   const device = { frozenScreenshot: undefined } as unknown as CollectionDevice;
   const agent = { aiAssert: async () => ({ pass: false, thought: 'Not the requested page' }) } as unknown as CollectionAgent;
   await assert.rejects(verifySavedScreenshot(state, device, agent,
-    { path: f.directory, files: { screenshot: f.metadata.files.screenshot } }), /Project acceptance failed/);
+    { screenshot: { ...f.metadata.files.screenshot, file: join(f.directory, f.metadata.files.screenshot.file) } }),
+  /Project acceptance failed/);
   assert.equal(device.frozenScreenshot, undefined);
   assert.equal(state.accepted.length, 0);
 });

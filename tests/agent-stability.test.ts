@@ -12,7 +12,7 @@ import { acceptCandidate } from '../agent/acceptance.js';
 import { finalize } from '../agent/finalize.js';
 import { RunState } from '../agent/state.js';
 import { createRegistry } from '../agent/tools.js';
-import { writeFixtureConfiguration } from './agent-configuration.js';
+import { FIXTURE_DELIVERY, writeFixtureConfiguration } from './agent-configuration.js';
 import { PAGE_PNG, writePageDecision, writePageObservation } from './agent-page-fixture.js';
 
 const REGIONS = [{ bundle_name: 'system.fixture', resource_id: 'clock-leaf' }];
@@ -79,6 +79,7 @@ function fixture(t: TestContext) {
       run: { name: 'fixture', output: 'runs', max_duration_seconds: 60, max_actions: 5 },
       agent: { llm: 'vision' }, tools: { enabled: ['Capture'] },
       dataset: { root: 'dataset', canvas: { width: 4, height: 3 }, stability_regions: REGIONS },
+      delivery: structuredClone(FIXTURE_DELIVERY),
       tasks: [{ name: 'fixture', app: 'Fixture', scene: 'Page', instruction: 'Inspect', acceptance: 'Pass',
         target_count: 1, bundle_names: ['app.fixture'], privacy: { enabled: false, reason: 'Synthetic fixture' } }],
     } } as LoadedConfiguration;
@@ -91,7 +92,7 @@ function fixture(t: TestContext) {
 test('Capture passes project stability selectors to the raw capture request', async (t) => {
   const f = fixture(t);
   const requests = interceptBridge(t, f.directory);
-  const state = new RunState(f.config, f.directory);
+  const state = new RunState(f.config, f.directory, f.directory);
   const device = { state, connection: { python: 'unused', hdc: 'unused', serial: 'fixture' },
     planningObservation: { id: 'observation', revision: 0, windows: [f.window] },
     windows: async () => [f.window] } as unknown as CollectionDevice;
@@ -109,7 +110,7 @@ test('Capture stores paired images only in device memory and persists an explici
   const f = fixture(t);
   const requests = interceptBridge(t, f.directory, { capture_id: 'frame', path: f.capture,
     page_observation: f.pageObservation });
-  const state = new RunState(f.config, f.directory);
+  const state = new RunState(f.config, f.directory, f.directory);
   const device = { state, connection: { python: 'unused', hdc: 'unused', serial: 'fixture' },
     planningObservation: { id: 'observation', revision: 0, windows: [f.window] },
     windows: async () => [f.window], pageObservation: undefined } as unknown as CollectionDevice;
@@ -131,7 +132,7 @@ test('Capture rejects missing or mismatched explicit target windows before the b
     { target_window_id: 1, target_bundle_name: 'app.other' }]) {
     await t.test(JSON.stringify(parameters), async (child) => {
       const f = fixture(child);
-      const state = new RunState(f.config, f.directory);
+      const state = new RunState(f.config, f.directory, f.directory);
       const device = { state, connection: { python: 'no-device-process', hdc: 'unused', serial: 'fixture' },
         planningObservation: { id: 'observation', revision: 0, windows: [f.window] },
         windows: async () => [f.window] } as unknown as CollectionDevice;
@@ -148,12 +149,12 @@ test('Capture rejects missing or mismatched explicit target windows before the b
 test('online acceptance passes the unchanged stability declaration to delivery preparation', async (t) => {
   const f = fixture(t);
   const requests = interceptBridge(t, f.directory);
-  const state = new RunState(f.config, f.directory);
+  const state = new RunState(f.config, f.directory, f.directory);
   state.candidate = f.candidate;
   const device = { connection: { python: 'unused', hdc: 'unused', serial: 'fixture' },
     pageObservation: f.pageObservation } as CollectionDevice;
   await assert.rejects(acceptCandidate(state, device, f.agent, () => ({})), /Fixture stopped/);
-  assert.equal(requests()[0].operation, 'prepare_delivery');
+  assert.equal(requests()[0].operation, 'prepare_capture');
   assert.deepEqual(requests()[0].options.stability_regions, REGIONS);
 });
 
@@ -163,7 +164,7 @@ test('offline finalization carries the same stability declaration without connec
   const requests = interceptBridge(t, f.directory);
   await assert.rejects(finalize(f.config, { python: 'unused' }, { directory: f.capture, taskName: 'fixture' }),
     /Fixture stopped/);
-  assert.deepEqual(requests().map((request) => request.operation), ['dataset_status', 'prepare_delivery']);
+  assert.deepEqual(requests().map((request) => request.operation), ['dataset_status', 'prepare_capture']);
   assert.deepEqual(requests()[1].options.stability_regions, REGIONS);
 });
 
@@ -177,7 +178,7 @@ test('online and offline preparation retain disabled privacy and its saved selec
       writeFixtureConfiguration(f.config);
       if (operation === 'offline') writePageDecision(f.capture, f.metadata, 'frame');
       const requests = interceptBridge(child, f.directory);
-      const state = new RunState(f.config, f.directory);
+      const state = new RunState(f.config, f.directory, f.directory);
       state.candidate = f.candidate;
       const device = { connection: { python: 'unused', hdc: 'unused', serial: 'fixture' },
         pageObservation: f.pageObservation } as CollectionDevice;
@@ -185,7 +186,7 @@ test('online and offline preparation retain disabled privacy and its saved selec
         ? acceptCandidate(state, device, f.agent, () => ({}))
         : finalize(f.config, { python: 'unused' }, { directory: f.capture, taskName: 'fixture' });
       await assert.rejects(pending, /Fixture stopped/);
-      const preparation = requests().filter((request) => request.operation === 'prepare_delivery');
+      const preparation = requests().filter((request) => request.operation === 'prepare_capture');
       assert.equal(preparation.length, 1);
       assert.deepEqual(preparation[0].privacy, privacy);
       assert.equal(preparation[0].privacy.enabled, false);

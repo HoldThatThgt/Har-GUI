@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 from har_capture.coordinates import detached_render_index, render_index
 from har_capture.hdc import CaptureError, Hdc
-from har_capture.delivery_operations import verify_screen_geometry
+from har_capture.capture_facts import verify_screen_geometry
 from har_capture.scene_evidence import load_source, select_window_scene
 from har_capture.tree_capture import artifact_info
 from har_capture.window_geometry import attach_captured_screen_geometry, read_window_geometry, window_screen_geometry

@@ -24,7 +24,7 @@ function fixture(t: TestContext) {
   t.mock.method(console, 'error', () => {});
   const events: Array<{ type: string; data: any }> = [];
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 10 } } } as LoadedConfiguration;
-  const state = new RunState(config, directory);
+  const state = new RunState(config, directory, directory);
   t.mock.method(state, 'event', (type: string, data: object) => { events.push({ type, data }); });
   const device = new CollectionDevice({ python: 'unused', hdc: 'unused', serial: 'fixture' }, state);
   t.mock.method(device, 'windows', async () => []);

@@ -1,347 +1,232 @@
-"""五件套发布、跨运行去重及中断恢复测试。"""
+"""真实 SQLite 的成功采集登记、去重、配额与只读导出测试。"""
 
 import copy
-import hashlib
 import json
 import sqlite3
-import subprocess
 import tempfile
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image
-
 from har_capture import dataset
 from har_capture.hdc import CaptureError
-from har_capture.metadata import file_info
-from har_capture.dataset_identity import configuration_identity, run_identity
-from tests.test_signatures import fixture
+from tests.delivery_fixture import CaptureFixture, delivery, snapshot_files
+from tests.support import layout_data, raw_accessibility, raw_layout
 
 
-def write_project(configuration):
-    script = ("import { stringify } from 'smol-toml'; let value = ''; "
-              "for await (const chunk of process.stdin) value += chunk; "
-              "process.stdout.write(stringify(JSON.parse(value)));")
-    result = subprocess.run(["node", "--input-type=module", "-e", script],
-                            input=json.dumps(configuration["project"]).encode(), capture_output=True,
-                            cwd=Path(__file__).resolve().parent.parent, check=True)
-    path = Path(configuration["projectPath"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(result.stdout)
-    configuration["digests"]["project"] = hashlib.sha256(result.stdout).hexdigest()
-    return result.stdout
+def changed_payload(text):
+    layout = layout_data()
+    layout["children"][0]["attributes"]["text"] = text
+    return {"layout": raw_layout(layout), "accessibility": raw_accessibility(layout["children"])}
 
 
 class DatasetTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.directory = Path(self.temporary.name)
-        self.root = self.directory / "dataset"
-        tasks = [{"name": name, "target_count": count, "app": "editor", "scene": "scene",
-                  "privacy": {"enabled": False, "reason": "test capture"},
-                  "instruction": "Find a page", "acceptance": "Page is visible"}
-                 for name, count in (("editor", 3), ("other", 2))]
-        configuration = {"project": {"schema_version": 1,
-            "run": {"name": "dataset", "output": "output", "max_actions": 20, "max_duration_seconds": 300},
-            "agent": {"llm": "vision"}, "dataset": {"root": "dataset",
-                "canvas": {"width": 3120, "height": 2080}, "stability_regions": []},
-            "tools": {"enabled": ["capture"]}, "tasks": tasks},
-            "profile": {"provider": "openai_compatible", "base_url": "https://model.example/v1",
-                "model": "vision", "model_family": "vlm-ui-tars", "api_key_env": "MODEL_KEY", "supports_vision": True},
-            "projectPath": str(self.directory / "project.toml"), "configPath": str(self.directory / "config.toml"),
-            "outputPath": str(self.directory / "output"), "datasetPath": str(self.root),
-            "digests": {"project": "a" * 64, "config": "b" * 64}}
-        write_project(configuration)
-        self.identity = {**configuration_identity(configuration), "configuration": configuration, "project_sources": []}
-        self.run_name = "run-a"
-
-    def tearDown(self):
-        self.temporary.cleanup()
-
-    def save_configuration(self, name):
-        configuration = self.identity["configuration"]
-        raw = write_project(configuration)
-        self.identity.update(configuration_identity(configuration))
-        run = Path(configuration["outputPath"]) / name
-        run.mkdir(parents=True, exist_ok=True)
-        (run / "project.toml").write_bytes(raw)
-        (run / "configuration.json").write_text(json.dumps(configuration), encoding="utf-8")
-        return run
-
-    def delivery(self, capture_id="frame-a", x=20, task="editor"):
-        run = self.save_configuration(self.run_name)
-        source = run / "captures" / capture_id / "delivery"
-        source.mkdir(parents=True)
-        wms, accessibility, arkui = fixture()
-        wms["capture_id"] = capture_id
-        wms["app_windows"][0]["bounding_box"]["x"] = x
-        checks = {key: "pass" for key in dataset.CHECKS}
-        wms["checks"] = checks
-        wms["sample"] = {"app": "editor", "page_id": "page", "scene": "scene", "state_id": "state"}
-        wms["stability"] = {"status": "verified", "rules": []}
-        for index, window in enumerate(wms["app_windows"]):
-            window["trees"] = {kind: {"file": f"editor_page_scene_state_{key}.json",
-                                      "json_pointer": f"/windows/{index}/tree"}
-                               for kind, key in (("accessibility", "windows_tree"), ("arkui", "windows_akui"))}
-        for document in (accessibility, arkui):
-            document.update(capture_id=capture_id, canvas=wms["canvas"])
-        documents = {"wms": wms, "tree": accessibility, "windows_tree": accessibility, "windows_akui": arkui}
-        files = {}
-        for kind, suffix in dataset.SUFFIXES.items():
-            destination = source / ("editor_page_scene_state" + suffix)
-            if kind == "screenshot":
-                Image.new("RGB", (3120, 2080), "white").save(destination)
-            else:
-                if kind == "wms":
-                    policy = self.identity["configuration"]["project"]["tasks"][0]["privacy"]
-                    sha256 = files["screenshot"]["sha256"]
-                    wms["privacy"] = {"enabled": False, "status": "disabled", "reason": policy["reason"],
-                        "regions": [], "before_sha256": sha256, "after_sha256": sha256,
-                        "policy_sha256": hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()}
-                destination.write_text(json.dumps(documents[kind]), encoding="utf-8")
-            files[kind] = file_info(destination)
-        acceptance = {"pass": True, "task_name": task, "target_bundle_name": "app.editor",
-                      "accepted_screenshot_sha256": files["screenshot"]["sha256"], "model_usage": {},
-                      "export": {"status": "complete", "path": str(source), "files": files, "checks": checks}}
-        return source, acceptance
-
-    def publish(self, item):
-        return dataset.publish_sample(self.root, self.identity, *item)
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = CaptureFixture(Path(self.temporary.name))
+        context = self.fixture.patch_geometry()
+        context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
 
     def status(self):
-        return dataset.dataset_status(self.root, self.identity)
+        return dataset.dataset_status(self.fixture.root, self.fixture.identity)
 
     def rows(self):
-        with closing(sqlite3.connect(self.root / "dataset.sqlite3")) as connection:
+        with closing(sqlite3.connect(self.fixture.root / "dataset.sqlite3")) as connection:
             return connection.execute("SELECT sample_id,status,error FROM samples ORDER BY sample_id").fetchall()
 
-    def test_initial_status_has_empty_quotas(self):
-        self.assertEqual(self.status()["counts"], {"editor": 0, "other": 0})
-        self.assertEqual(self.status()["remaining"], {"editor": 3, "other": 2})
-        self.assertFalse(self.root.exists())
-        changed = copy.deepcopy(self.identity)
-        changed["config_sha256"] = changed["configuration"]["digests"]["config"] = "c" * 64
-        self.assertEqual(dataset.dataset_status(self.root, changed)["counts"]["editor"], 0)
+    def accepted(self, capture_id="frame-a", payloads=None):
+        evidence = self.fixture.capture(capture_id, payloads=payloads)
+        return evidence, self.fixture.accept(evidence)
 
-    def test_publish_moves_exactly_five_files_and_resume_is_idempotent(self):
-        source, acceptance = self.delivery()
-        published = self.publish((source, acceptance))
-        self.assertFalse(source.exists())
-        self.assertEqual(len(list(Path(published["path"]).iterdir())), 5)
-        self.assertEqual(published["publication_version"], 1)
-        self.assertEqual(published["signature_version"], 1)
-        self.assertEqual(self.status(), self.status())
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+    def test_empty_status_has_quotas_without_creating_database(self):
+        self.assertEqual(self.status()["counts"], {"forms": 0})
+        self.assertEqual(self.status()["remaining"], {"forms": 3})
+        self.assertFalse((self.fixture.root / "dataset.sqlite3").exists())
+
+    def test_registration_stores_canonical_facts_and_leaves_only_png_in_original_evidence(self):
+        evidence, sample = self.accepted()
+        self.assertFalse((evidence / "accepted").exists())
+        self.assertEqual({path.name for path in Path(sample["path"]).iterdir()}, {"capture.json"})
+        self.assertTrue((evidence / "screenshot.png").is_file())
+        self.assertEqual(len(list(self.fixture.root.rglob("*.png"))), 1)
+        self.assertEqual(json.loads((evidence / "publication.json").read_bytes()), sample)
+        self.assertEqual(self.status()["counts"], {"forms": 1})
         self.assertEqual(self.rows(), [("frame-a", "committed", None)])
 
-    def test_same_state_cannot_be_counted_twice_across_runs(self):
-        self.publish(self.delivery())
-        with self.assertRaisesRegex(CaptureError, "Duplicate state"):
-            self.publish(self.delivery("frame-b"))
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+    def test_same_state_cannot_count_twice_across_internal_runs(self):
+        self.accepted()
+        self.fixture.run_name = "run-b"
+        evidence = self.fixture.capture("frame-b")
+        with self.assertRaisesRegex(CaptureError, "Duplicate capture state"):
+            self.fixture.accept(evidence)
+        self.assertEqual(self.status()["counts"], {"forms": 1})
 
-    def test_same_frame_state_cannot_be_assigned_to_another_task(self):
-        self.publish(self.delivery())
-        with self.assertRaisesRegex(CaptureError, "already belongs to task editor"):
-            self.publish(self.delivery("frame-b", task="other"))
-        self.assertEqual(self.status()["counts"], {"editor": 1, "other": 0})
-
-    def test_same_page_different_geometry_is_a_distinct_valid_state(self):
-        first = self.publish(self.delivery())
-        second = self.publish(self.delivery("frame-b", x=40))
+    def test_distinct_observed_content_is_a_distinct_state_on_the_same_page(self):
+        _, first = self.accepted()
+        _, second = self.accepted("frame-b", changed_payload("Different observed document"))
         self.assertEqual(first["page_hash"], second["page_hash"])
         self.assertNotEqual(first["state_hash"], second["state_hash"])
-        self.assertEqual(first["files"]["screenshot"]["sha256"], second["files"]["screenshot"]["sha256"])
-        self.assertEqual(self.status()["counts"]["editor"], 2)
-        self.assertEqual(first["page_id"], first["page_hash"][:16])
-        self.assertEqual(first["page_id"], second["page_id"])
-        self.assertEqual(first["state_id"], "000001")
-        self.assertEqual(second["state_id"], "000002")
-        for sample in (first, second):
-            expected = f"editor_{sample['page_id']}_scene_{sample['state_id']}"
-            self.assertEqual({info["file"] for info in sample["files"].values()},
-                             {expected + suffix for suffix in dataset.SUFFIXES.values()})
-            wms = json.loads((Path(sample["path"]) / sample["files"]["wms"]["file"]).read_bytes())
-            self.assertEqual(wms["sample"]["page_id"], sample["page_id"])
-            self.assertEqual(wms["sample"]["state_id"], sample["state_id"])
+        self.assertEqual((first["state_id"], second["state_id"]), ("000001", "000002"))
+        self.assertEqual(self.status()["counts"], {"forms": 2})
 
-    def test_failed_visual_acceptance_does_not_prepare_or_count(self):
-        source, acceptance = self.delivery()
-        acceptance["pass"] = False
-        with self.assertRaisesRegex(CaptureError, "passing saved-image"):
-            self.publish((source, acceptance))
-        self.assertEqual(self.status()["counts"]["editor"], 0)
-        self.assertEqual(self.rows(), [])
+    def test_quota_is_enforced_before_second_registration(self):
+        self.fixture.identity["configuration"]["project"]["tasks"][0]["target_count"] = 1
+        self.accepted()
+        evidence = self.fixture.capture("frame-b", changed_payload("Different state"))
+        with self.assertRaisesRegex(CaptureError, "quota"):
+            self.fixture.accept(evidence)
+        self.assertEqual(self.rows(), [("frame-a", "committed", None)])
 
-    def test_each_required_export_gate_blocks_publication(self):
-        for key in dataset.CHECKS:
-            with self.subTest(check=key):
-                source, acceptance = self.delivery(key)
-                acceptance["export"]["checks"][key] = "fail"
-                with self.assertRaisesRegex(CaptureError, "all required checks"):
-                    self.publish((source, acceptance))
-        self.assertEqual(self.status()["counts"]["editor"], 0)
+    def test_failed_or_mismatched_image_acceptance_never_counts(self):
+        evidence = self.fixture.capture("frame-a")
+        prepared = self.fixture.prepare(evidence)
+        for change in ({"pass": False}, {"accepted_screenshot_sha256": "0" * 64}):
+            acceptance = {**self.fixture.acceptance(prepared), **change}
+            with self.subTest(change=change), self.assertRaises(CaptureError):
+                dataset.publish_sample(self.fixture.root, self.fixture.identity,
+                                       Path(prepared["manifest"]["path"]), acceptance)
+        self.assertEqual(self.status()["counts"], {"forms": 0})
 
-    def test_wms_gate_must_also_pass(self):
-        source, acceptance = self.delivery()
-        info = acceptance["export"]["files"]["wms"]
-        path = source / info["file"]
-        document = json.loads(path.read_bytes())
-        document["checks"]["coordinates"] = "fail"
-        path.write_text(json.dumps(document))
-        acceptance["export"]["files"]["wms"] = file_info(path)
-        with self.assertRaisesRegex(CaptureError, "must all pass"):
-            self.publish((source, acceptance))
+    def test_prepared_capture_record_must_equal_reverified_complete_facts(self):
+        evidence = self.fixture.capture("frame-a")
+        prepared = self.fixture.prepare(evidence)
+        path = evidence / "accepted" / "capture.json"
+        stored = json.loads(path.read_bytes())
+        stored["windows"]["app_windows"][0]["bundle_name"] = "forged.bundle"
+        path.write_text(json.dumps(stored))
+        from har_capture.metadata import file_info
+        prepared["manifest"]["files"]["capture"] = file_info(path)
+        with self.assertRaisesRegex(CaptureError, "facts differ"):
+            self.fixture.accept(evidence, prepared)
+        self.assertEqual(self.status()["counts"], {"forms": 0})
 
-    def test_extra_file_or_second_screenshot_is_rejected(self):
-        for name in ("other.png", "metadata.json"):
-            with self.subTest(file=name):
-                source, acceptance = self.delivery(name.replace(".", "-"))
-                (source / name).write_bytes(b"extra")
-                with self.assertRaisesRegex(CaptureError, "exactly one matching"):
-                    self.publish((source, acceptance))
-
-    def test_tampered_published_file_prevents_resume_without_resetting_counts(self):
-        sample = self.publish(self.delivery())
-        path = Path(sample["path"]) / sample["files"]["tree"]["file"]
-        path.write_text("{}")
-        with self.assertRaisesRegex(CaptureError, "digest mismatch"):
+    def test_published_file_tampering_prevents_resume_without_resetting_row(self):
+        _, sample = self.accepted()
+        (Path(sample["path"]) / "capture.json").write_text("{}")
+        with self.assertRaisesRegex(CaptureError, "digest"):
             self.status()
         self.assertEqual(self.rows(), [("frame-a", "committed", None)])
 
-    def test_changed_configuration_is_not_silently_reset(self):
-        self.publish(self.delivery())
-        changed = copy.deepcopy(self.identity)
-        changed["config_sha256"] = changed["configuration"]["digests"]["config"] = "c" * 64
-        with self.assertRaisesRegex(CaptureError, "configuration identity differs"):
-            dataset.dataset_status(self.root, changed)
-        self.assertEqual(self.status()["counts"]["editor"], 1)
-
-    def test_interruption_after_prepare_recovers_source_once(self):
-        source, acceptance = self.delivery()
+    def test_interrupted_reservation_recovers_prepared_source_once(self):
+        evidence = self.fixture.capture("frame-a")
+        prepared = self.fixture.prepare(evidence)
         original = dataset.recover_dataset
         calls = 0
 
-        def stop_after_prepare(*args):
+        def interrupted(connection, root, identity):
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise KeyboardInterrupt("process stopped after prepare")
-            return original(*args)
+                raise RuntimeError("Interrupted after durable reservation")
+            return original(connection, root, identity)
 
-        with patch.object(dataset, "recover_dataset", stop_after_prepare):
-            with self.assertRaises(KeyboardInterrupt):
-                self.publish((source, acceptance))
+        with patch.object(dataset, "recover_dataset", side_effect=interrupted), self.assertRaises(RuntimeError):
+            self.fixture.accept(evidence, prepared)
         self.assertEqual(self.rows(), [("frame-a", "prepared", None)])
-        self.assertTrue(source.exists())
-        self.assertEqual(self.status()["counts"]["editor"], 1)
-        self.assertFalse(source.exists())
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+        self.assertTrue((evidence / "accepted").exists())
+        self.assertEqual(self.status()["counts"], {"forms": 1})
+        self.assertEqual(self.status()["counts"], {"forms": 1})
 
-    def test_interruption_after_rename_recovers_destination_once(self):
-        source, acceptance = self.delivery()
-        original = Path.rename
+    def test_interrupted_after_atomic_move_recovers_existing_destination(self):
+        evidence = self.fixture.capture("frame-a")
+        prepared = self.fixture.prepare(evidence)
 
-        def rename_then_stop(path, target):
-            original(path, target)
-            if path == source:
-                raise KeyboardInterrupt("process stopped after rename")
+        def interrupted(connection, root, row, identity):
+            Path(row["source"]).rename(root / "samples" / row["sample_id"])
+            raise RuntimeError("Interrupted after canonical record move")
 
-        with patch.object(Path, "rename", rename_then_stop):
-            with self.assertRaises(KeyboardInterrupt):
-                self.publish((source, acceptance))
-        self.assertFalse(source.exists())
+        with patch.object(dataset, "complete_prepared", side_effect=interrupted), self.assertRaises(RuntimeError):
+            self.fixture.accept(evidence, prepared)
+        self.assertFalse((evidence / "accepted").exists())
         self.assertEqual(self.rows(), [("frame-a", "prepared", None)])
-        self.assertEqual(self.status()["counts"]["editor"], 1)
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+        self.assertEqual(self.status()["counts"], {"forms": 1})
 
-    def test_damaged_prepared_evidence_is_recorded_failed_and_not_counted(self):
-        source, acceptance = self.delivery()
-        original = dataset.recover_dataset
-        with patch.object(dataset, "recover_dataset", side_effect=[None, KeyboardInterrupt()]):
-            with self.assertRaises(KeyboardInterrupt):
-                self.publish((source, acceptance))
-        (source / acceptance["export"]["files"]["tree"]["file"]).unlink()
-        with self.assertRaises(CaptureError):
-            self.status()
-        self.assertEqual(self.rows()[0][1], "failed")
-        self.assertEqual(self.status()["counts"]["editor"], 0)
-        self.assertTrue(self.status()["failures"][0]["error"])
-
-    def test_unregistered_orphan_directory_is_not_silently_imported(self):
-        self.status()
-        (self.root / "samples" / "orphan").mkdir(parents=True)
-        with self.assertRaisesRegex(CaptureError, "no registration database"):
+    def test_unregistered_sample_directory_is_not_imported(self):
+        self.accepted()
+        (self.fixture.root / "samples" / "orphan").mkdir()
+        with self.assertRaisesRegex(CaptureError, "unregistered"):
             self.status()
 
-    def test_recovery_rechecks_semantic_signatures(self):
-        self.publish(self.delivery())
-        with closing(sqlite3.connect(self.root / "dataset.sqlite3")) as connection:
-            manifest = json.loads(connection.execute("SELECT manifest FROM samples").fetchone()[0])
-            manifest["state_hash"] = "0" * 64
-            connection.execute("UPDATE samples SET manifest=?", (json.dumps(manifest),))
-            connection.commit()
-        with self.assertRaisesRegex(CaptureError, "signature no longer matches"):
-            self.status()
+    def test_signature_and_final_publication_receipt_are_rechecked(self):
+        evidence, sample = self.accepted()
+        receipt = evidence / "publication.json"
+        forged = json.loads(receipt.read_bytes())
+        forged["task_name"] = "another"
+        receipt.write_text(json.dumps(forged))
+        with self.assertRaisesRegex(CaptureError, "receipt differs"):
+            dataset.read_accepted_sample(self.fixture.root, self.fixture.identity, sample["sample_id"])
+        self.assertEqual(self.rows(), [("frame-a", "committed", None)])
 
-    def test_quota_is_enforced_before_publication(self):
-        self.identity["tasks"][0]["target_count"] = 1
-        self.identity["configuration"]["project"]["tasks"][0]["target_count"] = 1
-        self.publish(self.delivery())
-        source, acceptance = self.delivery("frame-b", x=40)
-        with self.assertRaisesRegex(CaptureError, "quota is already complete"):
-            self.publish((source, acceptance))
-        self.assertTrue(source.exists())
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+    def test_concurrent_publishers_cannot_count_one_observed_state_twice(self):
+        first = self.fixture.capture("frame-a")
+        second = self.fixture.capture("frame-b")
+        prepared = [self.fixture.prepare(first), self.fixture.prepare(second)]
 
-    def test_two_publishers_cannot_count_same_state_twice(self):
-        self.status()
-        items = [self.delivery("frame-a"), self.delivery("frame-b")]
-
-        def attempt(item):
+        def publish(item):
+            evidence, preparation = item
             try:
-                return self.publish(item)
+                return self.fixture.accept(evidence, preparation)
             except CaptureError:
                 return None
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(attempt, items))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(publish, zip((first, second), prepared)))
         self.assertEqual(sum(item is not None for item in results), 1)
-        self.assertEqual(self.status()["counts"]["editor"], 1)
+        self.assertEqual(self.status()["counts"], {"forms": 1})
 
-    def test_rule_version_change_requires_explicit_new_dataset(self):
-        self.publish(self.delivery())
-        with closing(sqlite3.connect(self.root / "dataset.sqlite3")) as connection:
-            manifest = json.loads(connection.execute("SELECT manifest FROM samples").fetchone()[0])
-            manifest["signature_version"] = 999
-            connection.execute("UPDATE samples SET manifest=?", (json.dumps(manifest),))
-            connection.commit()
-        with self.assertRaisesRegex(CaptureError, "rule version differs"):
-            self.status()
+    def test_equivalent_integer_json_reencoding_keeps_original_raw_window_signatures(self):
+        evidence, sample = self.accepted()
+        path = evidence / "metadata.json"
+        value = json.loads(path.read_text(), parse_float=lambda text: int(float(text))
+                           if float(text).is_integer() else float(text))
+        path.write_text(json.dumps(value))
+        before = snapshot_files([evidence, self.fixture.root / "dataset.sqlite3", Path(sample["path"])])
+        result = self.fixture.export(sample, declaration=delivery(6))
+        self.assertEqual(result["sample"]["state_hash"], sample["state_hash"])
+        self.assertEqual(before, snapshot_files([evidence, self.fixture.root / "dataset.sqlite3",
+                                               Path(sample["path"])]))
 
-    def test_interruption_during_each_artifact_rename_resumes_durable_naming_plan(self):
-        self.identity["tasks"][0]["target_count"] = 10
-        self.identity["configuration"]["project"]["tasks"][0]["target_count"] = 10
-        for index, kind in enumerate(dataset.SUFFIXES):
-            with self.subTest(kind=kind):
-                source, acceptance = self.delivery(f"rename-{kind}", x=30 + index)
-                original = Path.rename
-                def stop_after_named_file(path, target):
-                    original(path, target)
-                    if path.name == acceptance["export"]["files"][kind]["file"]:
-                        raise KeyboardInterrupt("process stopped during artifact naming")
-                with patch.object(Path, "rename", stop_after_named_file):
-                    with self.assertRaises(KeyboardInterrupt):
-                        self.publish((source, acceptance))
-                snapshot = self.status()
-                self.assertEqual(snapshot["counts"]["editor"], index + 1)
-                sample = next(item for item in snapshot["samples"] if item["sample_id"] == f"rename-{kind}")
-                self.assertEqual(sample["state_id"], f"{index + 1:06d}")
-                self.assertEqual(len(list(Path(sample["path"]).iterdir())), 5)
+    def test_changed_delivery_rules_export_five_then_six_without_writing_old_facts_or_database(self):
+        evidence, sample = self.accepted()
+        run = evidence.parent.parent
+        old = [evidence, self.fixture.root / "dataset.sqlite3", Path(sample["path"]),
+               run / "configuration.json", run / "project.toml"]
+        before = snapshot_files(old)
+        first = self.fixture.export(sample, "001-running", delivery())
+        second = self.fixture.export(sample, "002-running", delivery(6, "{app}/{capture_id}"))
+        self.assertEqual((len(first["export"]["files"]), len(second["export"]["files"])), (5, 6))
+        self.assertEqual((first["new_samples"], second["new_samples"]), (0, 0))
+        self.assertEqual(before, snapshot_files(old))
+        self.assertEqual(self.status()["counts"], {"forms": 1})
 
+    def test_explicit_historical_five_file_manifest_is_verified_readonly_without_format_guessing(self):
+        evidence, sample = self.accepted()
+        sample = self.fixture.historical_five_files(sample)
+        self.assertEqual(set(sample["files"]), {"tree", "windows_tree", "windows_akui", "screenshot", "wms"})
+        run = evidence.parent.parent
+        old = [evidence, self.fixture.root / "dataset.sqlite3", Path(sample["path"]),
+               run / "configuration.json", run / "project.toml"]
+        before = snapshot_files(old)
+        result = self.fixture.export(sample, "001-running", delivery(6))
+        self.assertEqual(result["new_samples"], 0)
+        self.assertEqual(len(result["export"]["files"]), 6)
+        self.assertEqual(before, snapshot_files(old))
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_manifest_verification_accepts_actual_nested_file_set_and_rejects_extra_or_missing(self):
+        root = Path(self.temporary.name) / "manifest-files"
+        (root / "nested").mkdir(parents=True)
+        (root / "nested" / "actual.bin").write_bytes(b"actual")
+        from har_capture.metadata import file_info
+        files = {"declared-source": {**file_info(root / "nested" / "actual.bin"), "file": "nested/actual.bin"}}
+        dataset.verify_files(root, files)
+        (root / "extra.txt").write_text("must not be ignored")
+        with self.assertRaisesRegex(CaptureError, "differ"):
+            dataset.verify_files(root, files)
+        (root / "extra.txt").unlink()
+        (root / "nested" / "actual.bin").unlink()
+        with self.assertRaises(CaptureError):
+            dataset.verify_files(root, files)

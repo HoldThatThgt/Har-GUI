@@ -8,8 +8,10 @@ ArkUI 组件树和窗口信息。两类树分别保存，保留来源与作用�
 
 `project.toml` 描述要找什么页面、怎样变化和收多少样本；`config.toml` 选择视觉模型。
 核心不预置应用或场景名单。当前最小闭环使用 Midscene HarmonyAgent 寻找页面，
-通过已注册工具操作设备，再采集原始证据、按开关独立打码、验证坐标和完整性，最后发布正式五件套。
-配置字段和后处理、恢复契约见[五件套与后处理接口](docs/delivery-contract.md)。
+通过已注册工具操作设备，采集完整原始证据、按开关打码、验证几何和页面，再验收最终保存的图片。
+成功采集经 SQLite 去重登记后，按项目必填的 `delivery` 声明导出文件；文件数量与采集计数分开。
+配置及恢复边界见[采集与交付契约](docs/delivery-contract.md)，来源和路径声明见
+[项目声明的交付文件](docs/declarative-delivery.md)。
 
 ```mermaid
 flowchart LR
@@ -19,7 +21,10 @@ flowchart LR
     Tools --> Capture[一张截图 窗口事实 ArkUI 无障碍树]
     Capture --> Privacy[按配置开关打码或保留原图]
     Privacy --> Check[覆盖 坐标 稳定性 最终图片视觉验收]
-    Check --> Result[去重 原子发布 五件套 持久化配额]
+    Check --> Register[SQLite 去重 登记采集与配额]
+    Register --> Export[按 delivery 来源和路径导出]
+    Project --> Export
+    Export --> Result[index-success 实际文件与 manifest.json]
 ```
 
 需要 Node.js 24、Python 3.11 或更新版本，以及已授权调试连接的鸿蒙设备。
@@ -39,6 +44,21 @@ npm run agent -- tools
 npm run agent -- validate --project project.toml --config config.toml
 ```
 
+新运行的 `project.toml` 必须声明 `[delivery]` 的 `directory` 和非空 `artifacts`，
+每项包含 `source` 与 `path`，没有默认五件套。仓库项目已提供明确声明；也可以只选择需要的来源：
+
+```toml
+[delivery]
+directory = "{app}/{capture_id}"
+
+[[delivery.artifacts]]
+source = "screenshot"
+path = "{capture_id}.png"
+```
+
+少选文件不会减少全窗口覆盖、原生几何、目标页面、隐私、图片验收或去重检查。
+全部来源、固定路径替换项及五份、六份文件示例见[交付声明](docs/declarative-delivery.md)。
+
 `validate` 不连接设备、不读取凭据、不调用模型。当前示例使用 `deepseek-flash`，
 密钥通过 `api_key_env` 指定的环境变量读取，也可以用 `--env-file` 加载已有环境变量文件：
 
@@ -57,57 +77,63 @@ npm run agent -- run --project project.toml --config config.toml `
 `ReadWindows.task_scope` 明确当前范围内的普通窗口与缺席应用；窗口存在不等于页面合格。
 通用规划规则、现有范围保护和离线验证限制见[应用导航](docs/navigation-guidance.md)。
 
-运行证据位于 `run.output`，正式数据位于 `dataset.root`；路径均相对 `project.toml`。
-项目必须声明 `dataset.canvas` 的宽高，每个任务必须声明 `app`、`scene`、`privacy`。
-画布不符时拒收，不拉伸图像。输出结构如下：
+`dataset.root` 继续保存内部数据库、已验收事实和新运行证据；保留项目已有值与既有数据。
+`run.output` 保存本轮实际交付，路径均相对 `project.toml`。
+项目仍须声明 `dataset.canvas`，任务仍须声明 `app`、`scene` 和 `privacy`；画布不符时拒收，不拉伸图片。
+新运行布局如下，已有目录及收据不搬移或重写：
 
 ```text
-output/001-success/run.json  本轮正常结束；artifacts_directory 指向固定证据目录
-output/002-failed/run.json   本轮失败；保留错误、已发布进度和固定证据目录
-output/003-running/run.json  本轮尚未正常结束
-output/.001/                不随结果改名的运行证据目录
-  project.toml          本次装载时的原始项目字节，按 SHA-256 核对后保存
-  configuration.json    已冻结的任务、模型名称、凭据变量名和配置摘要，不包含密钥
-  events.jsonl          固定规划阶段、观察摘要、工具参数与结果、窗口变化及验收记录
-  model-usage.jsonl     每次模型调用的实际模型、时间、状态和服务商原始用量计数
-  run.json              complete / failed 状态、已验收样本和失败原因
-  captures/<capture_id>/
-    screenshot.png      尚未导出时的唯一截图，按打码开关处理后移动到正式目录
-    metadata.json       窗口边界、包名、层叠顺序、采集时间和文件摘要
-    accessibility.json  原始无障碍控件树
-    arkui/              ArkUI JSON 及原始文本
-    candidate.json      任务、目标窗口与包名和窗口变化证据，用于离线后处理
-    page-observation.json  目标窗口首尾观测摘要与原始文件关联，不包含图片
-    page-stability.json  目标页面变化、主体空白或无法观察的判断收据
-    privacy.json        打码区域、规则摘要和图片前后摘要
-    sample.json         任务、页面、变化证据和最终图片验收结果
-    model-usage-summary.json  本样本导航、执行和验收的模型用量及可计算的费用估算
-    viewer.html         可离线打开的窗口与双树检查页面
+output/
+  001-success/
+    manifest.json        每个样本实际导出的来源、相对路径、大小与 SHA-256
+    <声明的文件或样本子目录>
+  002-failed/
+    manifest.json        真实错误及失败前已完成的交付项
+  003-running/
+    manifest.json        尚未正常结束的运行
 
 dataset/
-  dataset.sqlite3       项目身份、页面与状态签名、验收收据和已发布配额
+  dataset.sqlite3        继续使用原采集登记、签名、验收与配额
   samples/<capture_id>/
-    <App>_<页面ID>_<场景>_<状态序号>_tree.json
-    <App>_<页面ID>_<场景>_<状态序号>_windows_tree.json
-    <App>_<页面ID>_<场景>_<状态序号>_windows_akui.json
-    <App>_<页面ID>_<场景>_<状态序号>_shot.png
-    <App>_<页面ID>_<场景>_<状态序号>_wms.json
+    capture.json         新登记的完整规范事实
+  runs/<UUID>/
+    project.toml         本次装载时按摘要核对的原始项目字节
+    configuration.json   任务、模型声明和配置摘要，不包含密钥
+    run.json             详细状态、run_index、artifacts_directory、进度和错误
+    events.jsonl         观察、工具、窗口变化与验收记录
+    model-usage.jsonl    实际模型请求与服务商用量
+    captures/<capture_id>/
+      screenshot.png    唯一采集 PNG，按开关处理；导出不移动它
+      metadata.json     窗口、时间及原始文件索引
+      accessibility.json
+      arkui/
+      candidate.json
+      page-observation.json
+      page-stability.json
+      privacy.json
+      capture-preparation.json
+      sample.json
+      publication.json
+      viewer.html
+    exports/<capture_id>.json  本轮明确导出计划及收据
 ```
 
-`run` 和 `finalize` 在同一个输出根内共同递增编号，保留旧输出。
-CLI 返回带结果的目录；其中 `run.json.artifacts_directory` 定位配置、日志与原始采集。
-正常结束只表示本次命令成功；达到本轮采集上限时，项目总目标可能仍未完成。
-编号并发预留、固定路径和中断语义见[运行输出](docs/run-output.md)。
+`run`、`finalize` 和 `export` 在同一输出根共同递增编号。CLI 返回 `001-success` 这样的实际交付目录，
+其中只有声明产物和 `manifest.json`；不新建并列 `.001`，不把内部 `run.json` 当作交付入口。
+清单中的产物引用是相对路径，结果目录改名不改变内部证据、候选或数据库来源。
+正常结束只表示本次命令成功，达到本轮采集上限不代表项目总目标完成。
+编号、真实失败状态和中断语义见[运行输出](docs/run-output.md)。
 
-正式样本目录严格只有五个文件。开启打码时覆盖唯一截图，关闭时保留原图，随后移动到正式目录；
-不另存原图副本或 screenshot-after。
-`_tree.json` 包含系统窗口；两份应用窗口树使用同一窗口集合，包含子窗口和对话框。
-`_wms.json` 保留全部 WMS 窗口、`app_windows` 和六种整屏窗口模式。
-页面编号由目标应用结构签名生成，状态序号在数据库事务中分配，跨运行稳定。
+开启打码时原地覆盖唯一采集截图，关闭时保留原图；不另存 screenshot-after。
+交付时复制已经存在且验收通过的最终 PNG，原始证据不因重新导出而变化。
+`accessibility` 来源包含实际覆盖的系统窗口，应用双树来源包含已覆盖普通应用的子窗口和对话框。
+`windows` 来源保留窗口事实和检查结果，只引用本次确实选择的配套树。
+页面标识来自目标应用结构签名，状态序号在 SQLite 事务中分配，与输出文件名或数量无关。
 
 导航截图和 SDK 临时日志在运行结束时清理。视觉验收只读取最终保存的 PNG，不重拍当前设备；
 Midscene 会在内存中将其编码为模型使用的图片表示。验收收据绑定 PNG 摘要。
-失败保留本地证据并返回非零退出码，不增加配额。
+采集或验收失败不计配额，命令保留证据并返回非零退出码。
+若采集已登记、随后导出失败，已采计数仍保留；更正交付声明后可以离线导出。
 首尾像素、窗口与控件树差异只作为诊断，不因光标闪烁、同页局部更新或背景窗口变化拒收。
 `Capture` 明确目标窗口标识与包名，复用 Midscene 参考图片接口判断目标是否换页或主体变空。
 首尾目标裁图仅在内存中使用，判断收据绑定实际观测摘要；原图和控件树保持原样。
@@ -138,8 +164,9 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 ```
 
 `selectors` 只列资源标识、类型和坐标，不打印正文。`apply` 不调用模型或设备，按同一个开关处理，
-开启时原地覆盖唯一截图、更新摘要并删除含旧图的查看页。`finalize` 在最终图片上调用视觉模型，验证通过后登记五件套，
-无需连接设备；它不导航、不输入，也不读取当前屏幕。未发布候选必须已有有效的目标观测与页面判断收据，
+开启时原地覆盖唯一截图、更新摘要并删除含旧图的查看页。首次 `finalize` 在最终图片上调用视觉模型，
+通过后登记采集，再按当前声明导出。它无需连接设备，不导航、不输入，也不读取当前屏幕。
+未发布候选必须已有有效的目标观测与页面判断收据，
 缺失时不能离线补做首尾比较。直接使用 `capture.py` 得到的原始采集不能仅靠 `--target-bundle` 进入正式发布。
 选择器读取前核对原始无障碍文件摘要；所有动作的日志与反馈隐藏定位描述，Input 另隐藏输入正文，保留已解析坐标。
 
@@ -147,51 +174,57 @@ npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
 关闭打码可保留已配置的区域，便于下一次切换开关；所有配置都必须填写 `reason`。
 邮箱示例的视觉验收只判断页面场景，打码要求由开关与确定性检查执行；只切开关即可选择打码或原图。
 自定义 `acceptance` 若明确要求打码，应与开关一致。工具不假设任意应用都暴露正文容器。
-原始双树正文仍保存在本地证据与五件套 JSON 内，用于训练和审计；查看器只复制结构属性。
+原始双树正文仍保存在本地证据中，选择相应树来源时也会进入交付；截图打码不等于树正文脱敏。
+查看器只复制结构属性。
 导航截图会发送给配置的视觉模型，采后打码不改变已经发生的导航请求。
 
-### 去重与恢复
+### 离线导出、去重与恢复
 
-同一项目再次运行，会重新核验五文件摘要、采集契约、验收和状态签名，恢复已完成配额。
-等价 JSON 的重复准备与发布恢复保留现有收据、元数据的字节和修改时间；真实变更才原子替换。
-失败 Input 会保存本次坐标、模式、窗口、原生步骤与候选筛选；文本只记录类型、长度和摘要。
-反射坐标修复、字节守恒验证、单次输入补证及仍拒收的证据边界见[后续修复验证](docs/followup-repairs.md)。
-新采集始终读取当前设备，不复用旧坐标或旧树。页面签名忽略绝对位置和临时身份；
-状态签名包含窗口模式、边界、相对层级、滚动、编辑及阅读正文的内容摘要，时钟文字和光标闪烁不产生新状态。
-同一状态只计入一个主任务。
+已经成功登记的样本可以按当前声明重新导出：
 
-首次查询不建立空数据库；首份正式样本发布时才绑定项目与模型配置摘要。
-仅留下待核实选择器的原始采集时，可补充 `regions` 并沿用该目录执行 `finalize`，绑定修改后的配置。
-提示词、视觉验收描述、隐私原因说明、运行预算和任务目标数量可以调整；剩余数量按当前目标计算。
-已有样本继续使用其原运行的 `configuration.json`、隐私处理收据和发布清单核验，不按新描述重新验收，
-也不改写历史摘要、数据库记录或正式文件。每次运行并排保存原始 `project.toml` 与 `configuration.json`，
-恢复时核对原文字节摘要、解析内容和历史快照。保留整个运行证据目录。
-原文另有归档时，用 `--project-source PATH` 明确提供原项目文件或归档目录，可重复传入；工具只读取，
-不补写旧运行目录。缺少原文、字节摘要不符或解析内容不符都会拒绝恢复。
-任务名称、应用、场景、包名、工具、画布、稳定性规则、隐私开关和区域、模型配置等采集契约必须保持相同。
-`config.toml` 的原始文件摘要仍严格绑定；独立项目各用独立 `dataset.root`，不静默重置配额。
-发布先持久化完整收据，再重命名五文件和移动目录；中断恢复重新核验实际字节并幂等登记。
-存活进程的设备锁会拒绝第二个运行，只有确认原进程退出才回收旧锁。
+```powershell
+npm run agent -- export --sample-id CAPTURE_ID --project project.toml --config config.toml
+```
 
-可用运行参数限制本轮新增数量，不必修改项目总目标：
+需要历史项目原文时，可重复增加 `--project-source PATH`，提供原 TOML 文件或归档目录。
+`export` 不需要设备、HDC 或模型 key，不加载凭据环境文件，不调用模型、不增加采集计数。
+同一个已验收帧可以先导出五份，再按新声明导出六份，写入新的编号结果；原数据库、证据和收据保持不变。
+它仍核验完整采集事实，不能通过少选文件绕过覆盖、几何、页面、隐私、图片验收和去重要求。
+
+再次 `run` 会核验已有登记与状态签名，恢复已采数量，再从当前设备寻找新页面；不复用旧坐标或旧树。
+再次 `finalize` 对已登记样本核验原明确事实并执行本轮导出，不重复图片验收或计数。
+等价 JSON 的键序、缩进和换行变化不会改变采集身份；恢复不重写现有收据或元数据。
+
+任务描述、验收文字、目标数量、隐私原因说明和运行预算可以调整。
+交付规则及存储位置不进入采集合同；运行名称、任务身份、应用、场景、包名、工具、画布、
+稳定性规则、隐私开关与区域、模型配置等采集语义仍严格绑定。
+`config.toml` 的原始摘要与选中模型声明仍须匹配。
+保持原 `dataset.root`，不要为改交付形式清空或替换数据库。
+位置不绑定采集身份也不意味着工具会搬数据或自动映射复制后的旧路径。
+
+新运行保存原始 `project.toml` 和 `configuration.json`，恢复按被引用快照的真实原文、
+原始摘要、解析内容、采集证据及验收收据核验。
+缺少原文或来源不符会明确拒绝，不补写旧配置、不改旧 identity 或清单，
+也不因历史项目缺少交付字段而猜测五文件。
+完整原始目录与收据都应保留，不能通过更改旧路径伪装恢复。
+
+页面签名忽略绝对位置和临时身份；状态签名包含窗口模式、边界、相对层级、滚动、编辑及正文内容摘要。
+时钟文字和光标闪烁不产生新状态，同一状态只计入一个主任务。
+采集登记先保存完整事实与准备记录，再原子完成内部样本目录；歧义或损坏不补记成功。
+导出失败不回退此前已经登记的进度；失败清单与内部详细记录都保存真实错误。
+设备锁拒绝存活进程的并发运行，只有确认原进程退出才回收旧锁。
+
+可用参数限制本轮新增数量，不修改项目总目标：
 
 ```powershell
 npm run agent -- run --project project.toml --config config.toml `
   --device YOUR_DEVICE_SERIAL --max-new-samples 1
 ```
 
-`--max-new-samples 1` 在本轮成功发布一个不同的新样本后正常结束，已有样本不占这个上限；省略时按项目目标采集。
-`--max-new-samples 0` 只恢复和核验已有样本，不连接设备或调用模型。
-例如目标 200、已有 1 份时，零新增运行仍剩余 199，不能解释为总配额已满。
-`run.json` 记录 `max_new_samples`、`new_samples` 和 `stop_reason`；
-本轮达到上限为 `run_sample_limit`，全部任务达到项目目标为 `quota_complete`。
-
-对原项目文件另有归档的数据集，只恢复核验的示例：
-
-```powershell
-npm run agent -- run --project project.toml --config config.toml `
-  --project-source PATH_TO_ORIGINAL_PROJECTS --device YOUR_DEVICE_SERIAL --max-new-samples 0
-```
+`--max-new-samples 1` 在本轮成功登记一个不同新样本后正常结束，已有样本不占此上限；省略时按项目目标采集。
+`--max-new-samples 0` 只恢复核验，不连接设备和模型。内部 `run.json` 记录 `new_samples`、
+`max_new_samples` 和 `stop_reason`；`run_sample_limit` 是本轮上限，`quota_complete` 才是项目目标满足。
+离线导出始终 `new_samples=0`。原有输入与坐标修复记录见[后续修复验证](docs/followup-repairs.md)。
 
 ### 模型用量与费用
 
@@ -255,15 +288,17 @@ Midscene 内置 `Sleep` 是运行器等待动作，也计入动作预算。任�
 不会改用近似尺寸或其他操作。`OccludeWindow` 另外核验前景窗口的 `z_order` 与部分矩形交集，
 返回的 `bounding_box_overlap_fraction` 是几何比例，不是透明度、圆角或真实遮挡像素的测量结果。
 内容缩放仍未实现专用工具。应用范围、任务数量和验收条件均属于项目，
-Issue #8 的应用清单不进入核心；五文件命名中的应用与场景由项目提供。
+Issue #8 的应用清单不进入核心；交付来源、命名和组织由项目明确声明。
 
 `bundle_names` 限制显式应用启动、窗口操作和原生输入的目标应用。坐标范围检查依据普通应用的
 WMS 矩形与层叠顺序，不将透明系统窗口的矩形当作像素遮挡证明。`Input` 始终必须提供定位目标；
 限定范围时 `Scroll` 也必须定位；按键始终校验实际聚焦应用。运行失败会保存原因，
 不会绕开范围检查继续执行。
 
-### 既有五件套实机验证
+### 历史五文件实机记录
 
+以下是旧固定五文件接口的历史实机记录，早于当前声明式交付和目标页面判断规则。
+它们不证明本次接口已完成新一轮真机或真实模型采集。
 2026-10-22 在加入显式打码开关前的版本中，已登录华为邮箱完成了一份邮件阅读样本。
 Agent 自主读取窗口、还原、最大化并采集，
 随后独立遮盖阅读正文与邮件列表摘要，视觉模型验收最终保存的 PNG，正式目录只有五个文件。
@@ -518,8 +553,8 @@ ArkUI 单轴 `-1` 尺寸仅在原文、原生端点、RS Bounds/Frame、无绘�
 ## ArkUI JSON 节点
 
 每个 `arkui/window-<ID>.json` 保存一个窗口根节点，通过 `children` 递归保存全部后代。
-它可独立用于数据处理。正式 `_windows_akui.json` 在完整原树上附加经过验证的 `geometry`，
-不改写 `FrameRect`；查看器在交付完成后使用该坐标数据，只嵌入结构属性。
+它可独立用于数据处理。选择 `application_arkui` 来源时，在完整原树上附加经过验证的 `geometry`，
+不改写 `FrameRect`；文件名由项目声明。查看器只嵌入结构属性。
 尚未挂载的节点明确保留 `rendered=false`，不会在截图中画出假的可见边框。
 
 窗口到屏幕的映射使用同批 SceneBoard 浮点父链，WMS 的整数外包与比例只用于交叉核验。
@@ -589,10 +624,10 @@ npm run test:agent
 npm run typecheck
 ```
 
-当前实机为 HAD-W32，系统报告 `OpenHarmony-7.0.0.33`、API 26、UiTest `7.0.0.1`，
-主机 HDC `3.2.0b`。自动化检查覆盖配对导出、正文打码、坐标变换、窗口补齐、最终图片验收、
-重复状态拒绝、发布中断恢复以及配置身份。实机交付结果和已知限制记录在
-[五件套与后处理接口](docs/delivery-contract.md)。其他系统版本需要提供相同的官方证据字段。
+历史实机记录来自 HAD-W32，系统报告 `OpenHarmony-7.0.0.33`、API 26、UiTest `7.0.0.1`，
+主机 HDC `3.2.0b`。自动化检查覆盖声明交付、正文打码、坐标、窗口覆盖、图片验收、
+状态去重、登记恢复及配置身份。当前交付变更的离线验证不等于新的实机或真实模型采集验收。
+边界见[采集与交付契约](docs/delivery-contract.md)，其他系统版本仍须提供相同的官方证据字段。
 
 ## 官方接口依据
 

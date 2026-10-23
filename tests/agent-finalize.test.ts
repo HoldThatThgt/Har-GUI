@@ -10,14 +10,32 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { after, test, type TestContext } from 'node:test';
 import sharp from 'sharp';
 import { localBridge } from '../agent/bridge.js';
+import { exportSample } from '../agent/export.js';
 import type { LoadedConfiguration } from '../agent/config.js';
-import { writeFixtureConfiguration } from './agent-configuration.js';
+import { FIXTURE_DELIVERY, writeFixtureConfiguration } from './agent-configuration.js';
 
 const sdkDirectory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-sdk-'));
 process.env.MIDSCENE_RUN_DIR = sdkDirectory;
 process.env.MIDSCENE_RECORD_MODEL_CALL = 'false';
 process.env.HAR_GUI_FINALIZE_TEST_KEY = 'local-fixture-key';
-const { finalize, SavedScreenshotDevice } = await import('../agent/finalize.js');
+const { finalize: finalizeSample, SavedScreenshotDevice } = await import('../agent/finalize.js');
+const runArtifacts = new Map<string, string>();
+
+/** @brief 仅在测试端记录一次调用新建的内部目录，不要求生产记录易变结果路径。 */
+async function finalize(config: LoadedConfiguration, connection: Parameters<typeof finalizeSample>[1],
+  options: Parameters<typeof finalizeSample>[2]) {
+  const storage = join(config.datasetPath, 'runs');
+  const before = new Set(existsSync(storage) ? readdirSync(storage) : []);
+  const outputs = new Set(existsSync(config.outputPath) ? readdirSync(config.outputPath) : []);
+  try { return await finalizeSample(config, connection, options); }
+  finally {
+    const created = readdirSync(storage).filter((name) => !before.has(name));
+    const results = readdirSync(config.outputPath).filter((name) => !outputs.has(name));
+    assert.equal(created.length, 1);
+    assert.equal(results.length, 1);
+    runArtifacts.set(join(config.outputPath, results[0]), join(storage, created[0]));
+  }
+}
 after(() => {
   assert.equal(dirname(sdkDirectory), resolve(tmpdir()));
   assert.ok(basename(sdkDirectory).startsWith('har-gui-finalize-sdk-'));
@@ -31,7 +49,7 @@ from pathlib import Path
 from unittest.mock import patch
 from tests.support import fake_hdc, synthetic_screen_geometry, layout_data, raw_layout, raw_accessibility
 from har_capture.collector import capture
-from har_capture.delivery_operations import prepare_delivery
+from har_capture.delivery_operations import prepare_capture
 from har_capture.privacy import atomic_json
 root = Path(sys.argv[1])
 geometry = patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry)
@@ -58,25 +76,31 @@ atomic_json(root / 'page-stability.json',{'rule_version':1,'capture_id':metadata
 policy = {'enabled':redacted,'reason':'Synthetic fixture'}
 if redacted:
     policy['regions'] = [{'bundle_name':'com.example.settings','resource_id':'synthetic-body'}]
-options = {'app':'editor','page_id':sys.argv[2] or metadata['capture_id'],'scene':'scene',
-           'state_id':metadata['capture_id'],'canvas':{'width':3120,'height':2080},'stability_regions':[]}
+options = {'canvas':{'width':3120,'height':2080},'stability_regions':[]}
 def normalized(directory,window,canvas,scenes):
     tree = json.loads((directory / window['trees']['arkui']['file']).read_bytes())
     tree['coordinate_validation'] = {'status':'verified'}
     return {'window_id':window['window_id'],'bundle_name':window['bundle_name'],'tree':tree}
-with patch('har_capture.export.load_scene_evidence',return_value={}), \\
-        patch('har_capture.export.normalized_arkui',side_effect=normalized):
-    prepare_delivery({'directory':str(root),'privacy':policy,'options':options})
+with patch('har_capture.capture_facts.load_scene_evidence',return_value={}), \\
+        patch('har_capture.capture_facts.normalized_arkui',side_effect=normalized):
+    prepared = prepare_capture({'directory':str(root),'privacy':policy,'options':options})
+print(json.dumps(prepared['manifest']))
 `;
 
 /** @brief 在每个真实离线 Python 进程内明确替换匿名测试几何证明，不改生产验证流程。 */
 function mockSyntheticGeometry(t: TestContext): void {
   const original = childProcess.spawn;
-  const script = `import sys
+  const script = `import json,sys
 from unittest.mock import patch
 from tests.support import synthetic_screen_geometry
 import agent_device
-with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry):
+def normalized(evidence,window,canvas,scenes):
+    tree=json.loads((evidence/window['trees']['arkui']['file']).read_bytes())
+    tree['coordinate_validation']={'status':'verified'}
+    return {'window_id':window['window_id'],'bundle_name':window['bundle_name'],'tree':tree}
+with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_effect=synthetic_screen_geometry), \\
+        patch('har_capture.capture_facts.load_scene_evidence',return_value={}), \\
+        patch('har_capture.capture_facts.normalized_arkui',side_effect=normalized):
     sys.exit(agent_device.main())`;
   const spawn = t.mock.method(childProcess, 'spawn', (executable: any, args: any, options: any) => {
     if (Array.isArray(args) && basename(String(args[0])) === 'agent_device.py') {
@@ -88,11 +112,11 @@ with patch('har_capture.window_geometry.attach_captured_screen_geometry',side_ef
   t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
 }
 
-/** 在测试临时目录建立真实五件套及可重新核验的准备凭证。 */
+/** 在测试临时目录建立完整采集事实及可重新核验的准备凭证。 */
 function fixture(t: TestContext, candidate = true, captureInRun = false, redacted = false) {
   mockSyntheticGeometry(t);
   const directory = mkdtempSync(join(tmpdir(), 'har-gui-finalize-test-'));
-  let capture = captureInRun ? join(directory, 'runs', '.001', 'captures') : join(directory, 'capture');
+  let capture = captureInRun ? join(directory, 'dataset', 'runs', 'source-run', 'captures') : join(directory, 'capture');
   mkdirSync(capture, { recursive: true });
   t.after(() => {
     assert.equal(dirname(directory), resolve(tmpdir()));
@@ -101,10 +125,10 @@ function fixture(t: TestContext, candidate = true, captureInRun = false, redacte
   });
   t.mock.method(console, 'error', () => {});
   t.mock.method(console, 'warn', () => {});
-  execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : '',
+  const prepared = JSON.parse(execFileSync('python', ['-c', PREPARED_FIXTURE, capture, candidate ? 'page' : '',
     captureInRun ? 'agent_run' : '', redacted ? 'redacted' : ''], {
     windowsHide: true, env: { ...process.env, PYTHONUTF8: '1' },
-  });
+  }).toString('utf8'));
   if (captureInRun) capture = join(capture, readdirSync(capture)[0]);
   const metadata = JSON.parse(readFileSync(join(capture, 'metadata.json'), 'utf8'));
   if (candidate) writeFileSync(join(capture, 'candidate.json'), JSON.stringify({ capture_id: metadata.capture_id,
@@ -116,6 +140,7 @@ function fixture(t: TestContext, candidate = true, captureInRun = false, redacte
     profile: { provider: 'openai_compatible', base_url: 'http://127.0.0.1:1/v1', model: 'fixture-vision',
       model_family: 'deepseek', api_key_env: 'HAR_GUI_FINALIZE_TEST_KEY', supports_vision: true },
     project: { schema_version: 1, run: { name: 'fixture', output: 'runs', max_actions: 1, max_duration_seconds: 60 },
+      delivery: structuredClone(FIXTURE_DELIVERY),
       agent: { llm: 'vision' }, dataset: { root: 'dataset', canvas: { width: 3120, height: 2080 }, stability_regions: [] },
       tools: { enabled: ['Capture'] }, tasks: [{ name: 'editor', app: 'editor', scene: 'scene', target_count: 1,
         privacy: { enabled: redacted, reason: 'Synthetic fixture', ...(redacted
@@ -123,22 +148,27 @@ function fixture(t: TestContext, candidate = true, captureInRun = false, redacte
         bundle_names: ['com.example.settings'],
         instruction: 'Inspect the saved fixture', acceptance: 'The saved screenshot is white' }] } };
   writeFixtureConfiguration(config);
-  return { directory, capture, config, request: { directory: capture, taskName: 'editor' },
-    runs: () => readdirSync(config.outputPath).filter((name) => /^\d+-(success|failed|running)$/.test(name))
-      .map((name) => JSON.parse(
-      readFileSync(join(config.outputPath, name, 'run.json'), 'utf8'))) };
+  return { directory, capture, config, prepared, request: { directory: capture, taskName: 'editor' },
+    runs: () => readdirSync(join(config.datasetPath, 'runs'))
+      .filter((name) => existsSync(join(config.datasetPath, 'runs', name, 'run.json')))
+      .map((name) => JSON.parse(readFileSync(join(config.datasetPath, 'runs', name, 'run.json'), 'utf8'))) };
 }
 
 /** @brief 从结果索引取得始终不改名的运行证据目录。 */
 function artifacts(directory: string): string {
-  const result = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
-  assert.equal(result.artifacts_directory, join(dirname(directory), `.${result.run_index}`));
-  assert.equal(resolve(result.artifacts_directory), result.artifacts_directory);
-  assert.deepEqual(readdirSync(directory), ['run.json']);
-  return result.artifacts_directory;
+  const internal = runArtifacts.get(directory);
+  assert.ok(internal, 'Test must bind the actual internal run created by this invocation');
+  assert.equal(existsSync(join(directory, 'run.json')), false);
+  assert.equal(existsSync(join(directory, 'manifest.json')), true);
+  return internal;
 }
 
-/** 记录全部原始证据、发布收据及正式五件套的字节摘要和精确修改时间。 */
+/** @brief 读取内部详细状态，对外交付目录只含产物及实际清单。 */
+function runSummary(directory: string) {
+  return JSON.parse(readFileSync(join(artifacts(directory), 'run.json'), 'utf8'));
+}
+
+/** 记录原始证据、登记收据及声明交付的字节摘要和精确修改时间。 */
 function savedFiles(roots: Record<string, string>) {
   const result: Record<string, { sha256: string; modified: string }> = {};
   for (const [label, root] of Object.entries(roots)) {
@@ -146,6 +176,7 @@ function savedFiles(roots: Record<string, string>) {
     while (pending.length) {
       const directory = pending.pop()!;
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (label === 'dataset' && directory === root && entry.name === 'runs') continue;
         const file = join(directory, entry.name);
         if (entry.isDirectory()) pending.push(file);
         else result[`${label}:${file.slice(root.length)}`] = {
@@ -161,7 +192,8 @@ function savedFiles(roots: Record<string, string>) {
 /** @brief 直接读取真实 SQLite 的持久来源与原清单，不经过桥接结果重建。 */
 function publishedRows(directory: string) {
   const script = `import json,sqlite3,sys
-with sqlite3.connect(sys.argv[1]) as database:
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True) as database:
     rows = database.execute('SELECT source,manifest,status FROM samples').fetchall()
 print(json.dumps([{'source':r[0],'manifest':json.loads(r[1]),'status':r[2]} for r in rows]))`;
   return JSON.parse(execFileSync('python', ['-B', '-c', script, join(directory, 'dataset.sqlite3')],
@@ -170,7 +202,7 @@ print(json.dumps([{'source':r[0],'manifest':json.loads(r[1]),'status':r[2]} for 
 
 /** 将已发布收据改为等价的不同键序、缩进、转义和换行，验证恢复不会重新序列化。 */
 function varyReceipts(capture: string): void {
-  for (const name of ['metadata.json', 'delivery-manifest.json', 'delivery-preparation.json', 'publication.json']) {
+  for (const name of ['metadata.json', 'capture-preparation.json', 'publication.json']) {
     const file = join(capture, name);
     const value = JSON.parse(readFileSync(file, 'utf8'));
     const ordered = Object.fromEntries(Object.entries(value).reverse());
@@ -230,7 +262,7 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
   assert.equal(metadata.privacy.enabled, false);
   assert.equal(metadata.privacy.before_sha256, originalObservation.before.screenshot_sha256);
   assert.equal(metadata.privacy.before_sha256, metadata.privacy.after_sha256);
-  const expectedHash = metadata.delivery.files.screenshot.sha256;
+  const expectedHash = f.prepared.screenshot.sha256;
   const savedInputs: string[] = [];
   const original = SavedScreenshotDevice.prototype.screenshotBase64;
   t.mock.method(SavedScreenshotDevice.prototype, 'screenshotBase64', async function (
@@ -241,7 +273,7 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
     return image;
   });
   const run = await finalize(f.config, { python: 'python' }, f.request);
-  const result = JSON.parse(readFileSync(join(run, 'run.json'), 'utf8'));
+  const result = runSummary(run);
   assert.equal(result.status, 'complete');
   assert.equal(result.actions, 0);
   assert.equal(requests.length, 1);
@@ -260,8 +292,11 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
   assert.deepEqual([sentMetadata.width, sentMetadata.height], [3120, 2080]);
   const sentPixels = await sentImage.removeAlpha().raw().toBuffer();
   assert.ok(sentPixels.every((value) => value === 255));
-  assert.equal(readdirSync(result.sample.path).length, 5);
-  assert.equal(result.sample.files.screenshot.sha256, expectedHash);
+  assert.deepEqual(readdirSync(result.sample.path), ['capture.json']);
+  const delivered = JSON.parse(readFileSync(join(run, 'manifest.json'), 'utf8'));
+  assert.equal(Object.keys(delivered.samples[0].files).length, FIXTURE_DELIVERY.artifacts.length);
+  assert.equal(readdirSync(run).length, FIXTURE_DELIVERY.artifacts.length + 1);
+  assert.equal(result.sample.visual_acceptance.screenshot_sha256, expectedHash);
   assert.equal(existsSync(join(f.capture, 'delivery')), false);
   assert.equal(basename(run), '001-success');
   assert.doesNotMatch(readFileSync(join(artifacts(run), 'model-usage.jsonl'), 'utf8'),
@@ -281,7 +316,7 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
   assert.equal(f.config.digests.config, modelDigest);
   for (const repeat of ['published', 'repeated']) {
     const resumed = await finalize(f.config, { python: 'python' }, f.request);
-    const receipt = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
+    const receipt = runSummary(resumed);
     assert.equal(receipt.sample.sample_id, result.sample.sample_id, repeat);
     assert.equal(receipt.model_usage.calls, 0);
     assert.equal(receipt.accepted.length, 1);
@@ -304,10 +339,77 @@ test('offline finalization uses the saved final PNG, records mocked provider usa
   assert.equal(requests.length, 1);
 });
 
+test('one accepted frame exports five and six declared artifacts without models, recounting or old file changes', async (t) => {
+  const f = fixture(t);
+  const requests = await model(t, f.config, 'pass');
+  const original = await finalize(f.config, { python: 'python' }, f.request);
+  const accepted = runSummary(original).sample;
+  const rows = publishedRows(f.config.datasetPath);
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, original,
+    original_artifacts: artifacts(original) };
+  const before = savedFiles(roots);
+  f.config.project.delivery.directory = '{app}/{capture_id}';
+  f.config.project.delivery.artifacts.push({ source: 'capture_metadata', path: '{capture_id}_metadata.json' });
+  writeFixtureConfiguration(f.config);
+  const key = process.env.HAR_GUI_FINALIZE_TEST_KEY;
+  delete process.env.HAR_GUI_FINALIZE_TEST_KEY;
+  let exported: string;
+  try { exported = await exportSample(f.config, 'python', { sampleId: accepted.sample_id }); }
+  finally { process.env.HAR_GUI_FINALIZE_TEST_KEY = key; }
+  assert.equal(basename(exported), '002-success');
+  const manifest = JSON.parse(readFileSync(join(exported, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.samples.length, 1);
+  const sample = manifest.samples[0];
+  assert.equal(sample.capture_id, accepted.sample_id);
+  assert.equal(Object.keys(sample.files).length, 6);
+  for (const file of Object.values(sample.files) as any[]) {
+    assert.ok(file.file.startsWith(`editor/${accepted.sample_id}/`));
+    const bytes = readFileSync(join(exported, file.file));
+    assert.equal(bytes.length, file.bytes);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);
+  }
+  assert.equal(sample.files.screenshot.sha256, accepted.visual_acceptance.screenshot_sha256);
+  assert.deepEqual(JSON.parse(readFileSync(join(exported, sample.files.capture_metadata.file), 'utf8')),
+    JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8')));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(publishedRows(f.config.datasetPath), rows);
+  assert.deepEqual(savedFiles(roots), before);
+  assert.deepEqual(readdirSync(f.config.outputPath), ['001-success', '002-success']);
+});
+
+test('an export source failure keeps the accepted database progress and retries without visual reassessment', async (t) => {
+  const f = fixture(t);
+  f.config.project.delivery = { directory: '.', artifacts: [{ source: 'raw:missing', path: 'missing.bin' }] };
+  const requests = await model(t, f.config, 'pass');
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /not indexed/);
+  const failed = join(f.config.outputPath, '001-failed');
+  const summary = runSummary(failed);
+  assert.equal(summary.accepted.length, 1);
+  const rows = publishedRows(f.config.datasetPath);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, 'committed');
+  assert.equal(requests.length, 1);
+  const roots = { evidence: f.capture, dataset: f.config.datasetPath, failed, failed_artifacts: artifacts(failed) };
+  const before = savedFiles(roots);
+  f.config.project.delivery = structuredClone(FIXTURE_DELIVERY);
+  writeFixtureConfiguration(f.config);
+  const key = process.env.HAR_GUI_FINALIZE_TEST_KEY;
+  delete process.env.HAR_GUI_FINALIZE_TEST_KEY;
+  let retried: string;
+  try { retried = await finalize(f.config, { python: 'python' }, f.request); }
+  finally { process.env.HAR_GUI_FINALIZE_TEST_KEY = key; }
+  assert.equal(basename(retried), '002-success');
+  assert.equal(runSummary(retried).model_usage.calls, 0);
+  assert.equal(runSummary(retried).sample.sample_id, rows[0].manifest.sample_id);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(publishedRows(f.config.datasetPath), rows);
+  assert.deepEqual(savedFiles(roots), before);
+});
+
 test('unpublished capture keeps its old run origin while a new project run finalizes and publishes it', async (t) => {
   const f = fixture(t, true, true);
   const requests = await model(t, f.config, 'pass');
-  const sourceRun = join(f.config.outputPath, '.001');
+  const sourceRun = join(f.config.datasetPath, 'runs', 'source-run');
   const sourceConfiguration = join(sourceRun, 'configuration.json');
   writeFileSync(sourceConfiguration, JSON.stringify(f.config, null, 2) + '\n');
   writeFileSync(join(sourceRun, 'project.toml'), readFileSync(f.config.projectPath));
@@ -329,9 +431,9 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.notEqual(f.config.digests.project, originalProjectDigest);
   assert.equal(f.config.digests.config, modelDigest);
   const finalized = await finalize(f.config, { python: 'python' }, f.request);
-  const result = JSON.parse(readFileSync(join(finalized, 'run.json'), 'utf8'));
-  assert.equal(basename(finalized), '002-success');
-  assert.equal(result.artifacts_directory, join(f.config.outputPath, '.002'));
+  const result = runSummary(finalized);
+  assert.equal(basename(finalized), '001-success');
+  assert.equal(dirname(result.artifacts_directory), join(f.config.datasetPath, 'runs'));
   const expectedIdentity = createHash('sha256').update(JSON.stringify({ config_sha256: modelDigest,
     project_sha256: f.config.digests.project, tasks: [{ name: 'editor', target_count: 200 }] })).digest('hex');
   assert.equal(result.status, 'complete');
@@ -346,7 +448,7 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.equal(sample.path, f.capture);
   const [row] = publishedRows(f.config.datasetPath);
   assert.equal(row.status, 'committed');
-  assert.equal(row.source, join(f.capture, 'delivery'));
+  assert.equal(row.source, join(f.capture, 'accepted'));
   assert.equal(row.manifest.evidence_directory, f.capture);
   assert.equal(row.manifest.sample_id, captureId);
   assert.deepEqual(readFileSync(sourceConfiguration), oldConfiguration);
@@ -358,8 +460,8 @@ test('unpublished capture keeps its old run origin while a new project run final
     dataset: f.config.datasetPath };
   const preserved = savedFiles(roots);
   const repeated = await finalize(f.config, { python: 'python' }, f.request);
-  assert.equal(basename(repeated), '003-success');
-  const receipt = JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8'));
+  assert.equal(basename(repeated), '002-success');
+  const receipt = runSummary(repeated);
   assert.equal(receipt.sample.sample_id, result.sample.sample_id);
   assert.equal(receipt.sample.identity_sha256, expectedIdentity);
   assert.equal(receipt.accepted.length, 1);
@@ -368,10 +470,14 @@ test('unpublished capture keeps its old run origin while a new project run final
   assert.equal(requests.length, 1);
   assert.deepEqual(savedFiles(roots), preserved);
   const { run } = await import('../agent/runner.js');
+  const beforeRuns = new Set(readdirSync(join(f.config.datasetPath, 'runs')));
   const resumed = await run(f.config, { python: 'python', hdc: join(f.directory, 'missing-hdc.exe'), serial: 'fixture' },
     { maxNewSamples: 0 });
-  const restored = JSON.parse(readFileSync(join(resumed, 'run.json'), 'utf8'));
-  assert.equal(basename(resumed), '004-success');
+  const created = readdirSync(join(f.config.datasetPath, 'runs')).filter((name) => !beforeRuns.has(name));
+  assert.equal(created.length, 1);
+  runArtifacts.set(resumed, join(f.config.datasetPath, 'runs', created[0]));
+  const restored = runSummary(resumed);
+  assert.equal(basename(resumed), '003-success');
   assert.equal(restored.actions, 0);
   assert.equal(restored.accepted[0].sample_id, result.sample.sample_id);
   assert.equal(requests.length, 1);
@@ -381,12 +487,12 @@ test('unpublished capture keeps its old run origin while a new project run final
 test('failed finalization keeps its numbered evidence while a successful retry publishes and resumes once', async (t) => {
   const f = fixture(t, true, true);
   const requests = await model(t, f.config, ['fail', 'pass']);
-  const source = join(f.config.outputPath, '.001');
+  const source = join(f.config.datasetPath, 'runs', 'source-run');
   writeFileSync(join(source, 'configuration.json'), JSON.stringify(f.config, null, 2) + '\n');
   writeFileSync(join(source, 'project.toml'), readFileSync(f.config.projectPath));
   await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /Project acceptance failed/);
-  const failed = join(f.config.outputPath, '002-failed');
-  const summary = JSON.parse(readFileSync(join(failed, 'run.json'), 'utf8'));
+  const failed = join(f.config.outputPath, '001-failed');
+  const summary = runSummary(failed);
   assert.equal(summary.status, 'failed');
   assert.equal(summary.candidate.path, f.capture);
   assert.equal(summary.model_usage.completed_calls, 1);
@@ -394,8 +500,8 @@ test('failed finalization keeps its numbered evidence while a successful retry p
   const failedRoots = { failed, failed_artifacts: artifacts(failed) };
   const failedFiles = savedFiles(failedRoots);
   const success = await finalize(f.config, { python: 'python' }, f.request);
-  assert.equal(basename(success), '003-success');
-  const result = JSON.parse(readFileSync(join(success, 'run.json'), 'utf8'));
+  assert.equal(basename(success), '002-success');
+  const result = runSummary(success);
   assert.equal(result.sample.evidence_directory, f.capture);
   assert.equal(JSON.parse(readFileSync(join(f.capture, 'sample.json'), 'utf8')).finalization_directory,
     artifacts(success));
@@ -404,8 +510,8 @@ test('failed finalization keeps its numbered evidence while a successful retry p
   const roots = { ...failedRoots, source, success, success_artifacts: artifacts(success), dataset: f.config.datasetPath };
   const preserved = savedFiles(roots);
   const repeated = await finalize(f.config, { python: 'python' }, f.request);
-  assert.equal(basename(repeated), '004-success');
-  assert.equal(JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8')).model_usage.calls, 0);
+  assert.equal(basename(repeated), '003-success');
+  assert.equal(runSummary(repeated).model_usage.calls, 0);
   assert.equal(requests.length, 2);
   assert.equal(publishedRows(f.config.datasetPath).length, 1);
   assert.deepEqual(savedFiles(roots), preserved);
@@ -415,7 +521,7 @@ test('published recovery requires matching raw project evidence from a saved or 
   const f = fixture(t);
   const requests = await model(t, f.config, 'pass');
   const original = await finalize(f.config, { python: 'python' }, f.request);
-  const result = JSON.parse(readFileSync(join(original, 'run.json'), 'utf8'));
+  const result = runSummary(original);
   const archive = join(f.directory, 'project-archives');
   mkdirSync(join(archive, 'nested'), { recursive: true });
   const source = join(archive, 'nested', 'original-project.toml');
@@ -433,7 +539,7 @@ test('published recovery requires matching raw project evidence from a saved or 
   assert.deepEqual(savedFiles(roots), preserved);
   for (const projectSource of [source, archive]) {
     const repeated = await finalize(f.config, { python: 'python' }, { ...f.request, projectSources: [projectSource] });
-    const receipt = JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8'));
+    const receipt = runSummary(repeated);
     assert.equal(receipt.sample.sample_id, result.sample.sample_id);
     assert.equal(receipt.model_usage.calls, 0);
     assert.equal(receipt.accepted.length, 1);
@@ -451,7 +557,7 @@ test('finalization refuses a changed current raw project before preserving a sna
   const directory = f.runs()[0].artifacts_directory;
   assert.equal(existsSync(join(directory, 'project.toml')), false);
   assert.equal(existsSync(join(directory, 'configuration.json')), false);
-  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'run.json')), true);
+  assert.equal(existsSync(join(f.config.outputPath, '001-failed', 'manifest.json')), true);
   assert.equal(f.runs()[0].status, 'failed');
   assert.equal(requests.length, 0);
   assert.deepEqual(readFileSync(f.config.projectPath), raw);
@@ -489,11 +595,11 @@ test('prepared redaction preserves the original paired-page receipt and accepts 
   assert.equal(observation.before.screenshot_sha256, metadata.privacy.before_sha256);
   assert.equal(metadata.files.screenshot.sha256, metadata.privacy.after_sha256);
   const directory = await finalize(f.config, { python: 'python' }, f.request);
-  const result = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+  const result = runSummary(directory);
   assert.equal(result.status, 'complete');
-  assert.equal(result.sample.files.screenshot.sha256, metadata.privacy.after_sha256);
+  assert.equal(result.sample.visual_acceptance.screenshot_sha256, metadata.privacy.after_sha256);
   assert.equal(requests.length, 1);
-  const image = sharp(readFileSync(join(result.sample.path, result.sample.files.screenshot.file)));
+  const image = sharp(readFileSync(f.prepared.screenshot.file));
   const pixel = await image.extract({ left: 1034, top: 153, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
   assert.deepEqual([...pixel], [0, 0, 0]);
   assert.deepEqual(readFileSync(join(f.capture, 'page-stability.json')), semantic);
@@ -501,7 +607,7 @@ test('prepared redaction preserves the original paired-page receipt and accepts 
     original_artifacts: artifacts(directory) };
   const preserved = savedFiles(roots);
   const repeated = await finalize(f.config, { python: 'python' }, f.request);
-  assert.equal(JSON.parse(readFileSync(join(repeated, 'run.json'), 'utf8')).model_usage.calls, 0);
+  assert.equal(runSummary(repeated).model_usage.calls, 0);
   assert.equal(requests.length, 1);
   assert.deepEqual(savedFiles(roots), preserved);
 });
@@ -543,7 +649,7 @@ test('rejected saved-image assertion keeps usage and leaves the dataset uncounte
   assert.equal(run.model_usage.completed_calls, 1);
   assert.equal(run.model_usage.totals.total_tokens, 110);
   assert.equal(existsSync(join(f.config.datasetPath, 'dataset.sqlite3')), false);
-  assert.equal(existsSync(join(f.capture, 'delivery')), true);
+  assert.equal(existsSync(join(f.capture, 'accepted')), true);
 });
 
 test('provider failure is recorded as failed usage without manufacturing tokens or publishing', async (t) => {
@@ -581,9 +687,9 @@ test('task, target identity and prepared file tampering fail before any model re
   await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
     /Page observation raw WMS or layout source differs from its captured index/);
   writeFileSync(rawFile, original);
-  const metadata = JSON.parse(readFileSync(join(f.capture, 'metadata.json'), 'utf8'));
-  writeFileSync(join(f.capture, 'delivery', metadata.delivery.files.tree.file), '{}');
-  await assert.rejects(finalize(f.config, { python: 'python' }, f.request), /digest mismatch/);
+  writeFileSync(join(f.prepared.path, f.prepared.files.capture.file), '{}');
+  await assert.rejects(finalize(f.config, { python: 'python' }, f.request),
+    /Prepared capture facts changed after preparation/);
   assert.equal(requests.length, 0);
   assert.ok(f.runs().every((run) => run.status === 'failed' && run.model_usage.calls === 0));
 });

@@ -24,7 +24,7 @@ function fixture(t: TestContext, windows = [windowInfo()]) {
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 10 },
     tools: { enabled: ['MoveWindow', 'ResizeWindow', 'OccludeWindow'] },
     tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
-  const state = new RunState(config, 'unused');
+  const state = new RunState(config, 'unused', 'unused');
   const events: Array<{ type: string; data: any }> = [];
   t.mock.method(state, 'event', (type: string, data: object) => { events.push({ type, data }); });
   const commands: string[] = [];

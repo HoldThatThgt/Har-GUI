@@ -12,6 +12,40 @@ const privacySchema = z.object({
     bundle_name: nonEmpty, resource_id: nonEmpty,
   }).strict()).min(1).optional(),
 }).strict();
+
+/** @brief 校验固定替换项及跨平台安全的相对交付路径。 */
+function deliveryPath(value: string, directory: boolean): boolean {
+  if (directory && value === '.') return true;
+  const substituted = value.replace(/\{(app|scene|task|capture_id|page_id|state_id)\}/g, 'value');
+  if (!substituted || /[{}\\:\x00-\x1f<>"|?*]/.test(substituted) || substituted.startsWith('/')) return false;
+  return substituted.split('/').every((part) => !!part && !['.', '..'].includes(part)
+    && !/^[. ]|[. ]$/.test(part) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
+}
+
+const deliverySchema = z.object({
+  directory: z.string().refine((value) => deliveryPath(value, true), 'Unsafe delivery directory'),
+  artifacts: z.array(z.object({
+    source: z.string().refine((value) => ['screenshot', 'accessibility', 'application_accessibility',
+      'application_arkui', 'windows', 'capture_metadata'].includes(value)
+        || (value.startsWith('raw:') && value.length > 4),
+    'Unknown delivery source'),
+    path: z.string().refine((value) => deliveryPath(value, false), 'Unsafe delivery artifact path'),
+  }).strict()).min(1),
+}).strict().superRefine((delivery, context) => {
+  for (const field of ['source', 'path'] as const) {
+    const values = delivery.artifacts.map((artifact) =>
+      field === 'path' ? artifact[field].toLowerCase() : artifact[field]);
+    if (new Set(values).size !== values.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['artifacts'], message: `Duplicate delivery ${field}` });
+    }
+  }
+  if (delivery.directory === '.'
+    && delivery.artifacts.some((artifact) => ['manifest.json', 'manifest.json.pending']
+      .includes(artifact.path.toLowerCase()))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['artifacts'],
+      message: 'Delivery cannot overwrite the run manifest or its pending write' });
+  }
+});
 const profileSchema = z.object({
   provider: z.literal('openai_compatible'),
   base_url: z.string().url().regex(/^https?:\/\//, 'Must use HTTP or HTTPS'),
@@ -39,6 +73,7 @@ const projectSchema = z.object({
     max_duration_seconds: z.number().finite().positive(),
   }).strict(),
   agent: z.object({ llm: nonEmpty }).strict(),
+  delivery: deliverySchema,
   dataset: z.object({ root: nonEmpty, canvas: z.object({
     width: z.number().int().positive(), height: z.number().int().positive(),
   }).strict(), stability_regions: z.array(z.object({

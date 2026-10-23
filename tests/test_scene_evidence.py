@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from har_capture.arkui_selection import index_nodes
-from har_capture.delivery_operations import verify_tree_references
+from har_capture.capture_facts import verify_tree_references
 from har_capture.geometry_capture import collect_geometry_evidence
 from har_capture.hdc import CaptureError
 from har_capture.scene_evidence import load_scene_evidence

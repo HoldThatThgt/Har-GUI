@@ -12,7 +12,7 @@ function fixture(t: TestContext) {
   t.mock.method(console, 'error', () => {});
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 100 },
     tools: { enabled: ['KeyboardPress'] }, tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
-  const state = new RunState(config, 'unused');
+  const state = new RunState(config, 'unused', 'unused');
   const audit = t.mock.method(state, 'event', () => {});
   const device = new CollectionDevice({ serial: 'unused-test-device', hdc: 'unused-hdc',
     python: 'unused-python' }, state);

@@ -11,7 +11,7 @@ import type { LoadedConfiguration } from '../agent/config.js';
 import { CollectionDevice } from '../agent/device.js';
 import { RunState, type WindowInfo } from '../agent/state.js';
 import { createRegistry } from '../agent/tools.js';
-import { writeFixtureConfiguration } from './agent-configuration.js';
+import { FIXTURE_DELIVERY, writeFixtureConfiguration } from './agent-configuration.js';
 import { PAGE_PNG, writePageObservation } from './agent-page-fixture.js';
 
 const TARGET_BUNDLE = 'org.example.browser';
@@ -69,6 +69,7 @@ function configuration(directory: string, bundleNames: string[] | null): LoadedC
       run: { name: 'navigation', output: 'runs', max_actions: 30, max_duration_seconds: 60 },
       agent: { llm: 'vision' }, tools: { enabled: [...ENABLED] },
       dataset: { root: 'dataset', canvas: { width: 4, height: 3 }, stability_regions: [] },
+      delivery: structuredClone(FIXTURE_DELIVERY),
       tasks: [{ name: 'target-page', app: 'Browser', scene: 'Page', instruction: 'Collect the requested visible page',
         acceptance: 'The requested page is present', target_count: 1, privacy: { enabled: false, reason: 'Fixture' },
         ...(bundleNames === null ? {} : { bundle_names: [...bundleNames] }) }] } };
@@ -117,7 +118,7 @@ function fixture(t: TestContext, before: WindowInfo[], bundleNames: string[] | n
   const after = [target, ...surroundings()];
   const config = configuration(directory, bundleNames);
   writeFixtureConfiguration(config);
-  const state = new RunState(config, directory);
+  const state = new RunState(config, directory, directory);
   const device = new CollectionDevice({ python: 'unused-python', hdc: 'unused-hdc', serial: 'fixture' }, state);
   const native = t.mock.method(device, 'nativeActions', () => { throw new Error('Unexpected native input lookup'); });
   const hdc = t.mock.method(device, 'getHdc', async () => { throw new Error('Unexpected HDC connection'); });

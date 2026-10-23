@@ -156,8 +156,8 @@ def redact_capture(directory: Path, policy: dict) -> dict:
     @param policy 项目中的明确打码规则。 @return 更新后的采集信息。
     """
     metadata = json.loads((directory / "metadata.json").read_bytes())
-    if metadata.get("delivery"):
-        fail("Cannot modify a prepared or published delivery")
+    if metadata.get("delivery") or (directory / "publication.json").exists():
+        fail("Cannot modify a prepared delivery or an accepted capture")
     enabled = validate_policy(policy)
     policy_hash = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
     screenshot = directory / metadata["files"]["screenshot"]["file"]

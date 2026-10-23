@@ -165,7 +165,7 @@ function registeredInput(t: TestContext, windows: WindowInfo[]) {
   t.mock.method(console, 'error', () => {});
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 10 },
     tools: { enabled: ['Tap'] }, tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
-  const state = new RunState(config, 'unused');
+  const state = new RunState(config, 'unused', 'unused');
   t.mock.method(state, 'event', () => {});
   let nativeCalls = 0;
   let nativeParameters: unknown;

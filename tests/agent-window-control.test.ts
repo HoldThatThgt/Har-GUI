@@ -51,7 +51,7 @@ function fixture(t: TestContext, initial = [windowInfo()], control = windowContr
   t.mock.method(console, 'error', () => {});
   const config = { project: { run: { max_duration_seconds: 60, max_actions: 10 },
     tools: { enabled: ['ToggleWindowSize'] }, tasks: [{ bundle_names: ['app.allowed'] }] } } as LoadedConfiguration;
-  const state = new RunState(config, 'unused');
+  const state = new RunState(config, 'unused', 'unused');
   const audit = t.mock.method(state, 'event', () => {});
   let current = structuredClone(initial);
   const after = windowInfo({ window_mode: 1, bounding_box: { x: 0, y: 0, width: 1600, height: 1000 } });

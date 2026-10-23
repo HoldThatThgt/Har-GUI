@@ -11,6 +11,7 @@ import { saveRunConfiguration } from './provenance.js';
 import { withRunOutput } from './run-output.js';
 import { verifyPageStability } from './page-stability.js';
 import { UsageRecorder, estimateUsageCost } from './usage.js';
+import { exportAccepted } from './export.js';
 
 /** @brief 已保存采集的独立验收参数，不包含设备动作或历史观察。 */
 export interface FinalizeOptions {
@@ -109,12 +110,11 @@ async function restorePublication(state: RunState, connection: Pick<DeviceOption
   return existing;
 }
 
-/** @brief 独立打码及五件套准备；重试由 Python 核对规则凭证和全部文件摘要。 */
+/** @brief 独立准备完整采集事实；重试核对原始凭证和全部来源摘要。 */
 async function prepare(state: RunState, connection: Pick<DeviceOptions, 'python'>) {
   const candidate = state.candidate;
-  return localBridge(connection.python, { operation: 'prepare_delivery', directory: candidate.path,
-    options: { app: state.task.app, page_id: candidate.page_name, scene: state.task.scene,
-      state_id: candidate.capture_id, canvas: state.config.project.dataset.canvas,
+  return localBridge(connection.python, { operation: 'prepare_capture', directory: candidate.path,
+    options: { canvas: state.config.project.dataset.canvas,
       stability_regions: state.config.project.dataset.stability_regions }, privacy: state.task.privacy,
   }, state.signal);
 }
@@ -133,14 +133,14 @@ async function assertSavedImage(state: RunState, usage: UsageRecorder, manifest:
 async function publish(state: RunState, connection: Pick<DeviceOptions, 'python'>, facts: any) {
   const candidate = state.candidate;
   const acceptance = { task_name: state.task.name, target_bundle_name: candidate.target_bundle_name,
-    pass: true, export: facts.manifest, accepted_screenshot_sha256: facts.accepted.accepted_screenshot_sha256,
+    pass: true, capture: facts.manifest, accepted_screenshot_sha256: facts.accepted.accepted_screenshot_sha256,
     model_usage: facts.usage };
   const sample = { ...candidate, finalization_directory: state.directory, acceptance: facts.accepted.verdict,
     window_occlusions: facts.occlusions, accepted_screenshot_sha256: acceptance.accepted_screenshot_sha256,
     model_usage: facts.usage };
   const sampleFile = path.join(candidate.path, 'sample.json');
   await writeFile(sampleFile, JSON.stringify(sample, null, 2) + '\n');
-  const published = await localBridge(connection.python, { operation: 'publish_sample', root: state.config.datasetPath,
+  const published = await localBridge(connection.python, { operation: 'publish_capture', root: state.config.datasetPath,
     identity: state.datasetIdentity, directory: facts.manifest.path, evidence_directory: candidate.path, acceptance,
   }, state.signal);
   state.accepted.push(published);
@@ -178,8 +178,9 @@ async function complete(
  */
 async function executeFinalize(
   config: LoadedConfiguration, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions, directory: string,
+  deliveryDirectory: string,
 ): Promise<void> {
-  const state = new RunState(config, directory, options.projectSources);
+  const state = new RunState(config, directory, deliveryDirectory, options.projectSources);
   const usage = new UsageRecorder(path.join(directory, 'model-usage.jsonl'));
   const interrupt = () => state.controller.abort(new Error('Finalization interrupted'));
   process.once('SIGINT', interrupt);
@@ -190,6 +191,7 @@ async function executeFinalize(
     await saveRunConfiguration(config, directory);
     state.save('running', { operation: 'finalize', capture_directory: path.resolve(options.directory) });
     const sample = await complete(state, connection, { ...options, directory: path.resolve(options.directory) }, usage);
+    await exportAccepted(state, connection.python, sample);
     state.save('complete', { operation: 'finalize', sample, model_usage: modelUsage(state, usage) });
   } catch (error) {
     console.error('Saved capture finalization failed:', String(error));
@@ -208,5 +210,6 @@ async function executeFinalize(
 export async function finalize(
   config: LoadedConfiguration, connection: Pick<DeviceOptions, 'python'>, options: FinalizeOptions,
 ): Promise<string> {
-  return withRunOutput(config.outputPath, (directory) => executeFinalize(config, connection, options, directory));
+  return withRunOutput(config.outputPath, config.datasetPath,
+    (directory, delivery) => executeFinalize(config, connection, options, directory, delivery));
 }

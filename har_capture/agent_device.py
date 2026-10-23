@@ -24,8 +24,9 @@ OPERATIONS = {
     "window_title_bar": {"window_id"},
     "input_text": {"x", "y", "value", "mode", "window_id", "bundle_name", "display_id"},
     "dataset_status": {"root", "identity"},
-    "prepare_delivery": {"directory", "options", "privacy"},
-    "publish_sample": {"root", "identity", "directory", "evidence_directory", "acceptance"},
+    "prepare_capture": {"directory", "options", "privacy"},
+    "publish_capture": {"root", "identity", "directory", "evidence_directory", "acceptance"},
+    "export_sample": {"root", "identity", "sample_id", "delivery", "destination", "receipt"},
 }
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 ABILITY_HEADER = "callingBundleName bundleName moduleName abilityName"
@@ -320,7 +321,7 @@ def capture_frame(hdc: Hdc, request: dict) -> dict:
 def execute_operation(hdc: Hdc | None, request: object) -> dict:
     """@brief 派发单次白名单操作，禁止任意命令。 @param hdc 连接。 @param request 请求。 @return 完整操作结果。"""
     operation = validate_request(request)
-    if operation in ("dataset_status", "prepare_delivery", "publish_sample"):
+    if operation in ("dataset_status", "prepare_capture", "publish_capture", "export_sample"):
         return {"operation": operation, "result": execute_local(request)}
     if hdc is None:
         fail("Device operations require both --hdc and --device")

@@ -64,7 +64,7 @@ test('restored state counts only published samples without restoring old device 
   const config = { digests: { project: 'a'.repeat(64), config: 'b'.repeat(64) }, project: {
     run: { max_duration_seconds: 100 }, tasks: [{ name: 'editor', target_count: 3 }, { name: 'browser', target_count: 2 }],
   } } as LoadedConfiguration;
-  const state = new RunState(config, root);
+  const state = new RunState(config, root, root);
   state.accepted = [{ task_name: 'editor', sample_id: 'saved' }];
   assert.equal(state.acceptedCount('editor'), 1);
   assert.equal(state.acceptedCount('browser'), 0);
@@ -83,7 +83,7 @@ test('state preserves explicit raw project sources without adding fields to load
   } } as LoadedConfiguration;
   const sources = [path.join(root, 'old-project.toml'), 'relative-project-archives'];
   const expected = sources.map((source) => path.resolve(source));
-  const state = new RunState(config, root, sources);
+  const state = new RunState(config, root, root, sources);
   sources.push('later-mutation');
   const identity = state.datasetIdentity;
   assert.deepEqual(identity.project_sources, expected);

@@ -3,7 +3,6 @@
 import copy
 import hashlib
 import json
-import os
 import re
 import tomllib
 from pathlib import Path
@@ -42,8 +41,9 @@ def validate_configuration(configuration: dict) -> None:
     if not isinstance(configuration, dict) or set(configuration) != CONFIGURATION_KEYS:
         fail("Dataset identity requires a complete loaded configuration snapshot")
     project = configuration["project"]
-    if not isinstance(project, dict) or set(project) != {
-            "schema_version", "run", "agent", "dataset", "tools", "tasks"}:
+    required = {"schema_version", "run", "agent", "dataset", "tools", "tasks"}
+    if (not isinstance(project, dict) or not required.issubset(project)
+            or set(project) - required - {"delivery"}):
         fail("Saved project configuration structure is invalid")
     if not isinstance(configuration["profile"], dict) or not configuration["profile"]:
         fail("Saved model profile is missing")
@@ -142,13 +142,30 @@ def verify_project_snapshot(configuration: dict, raw: bytes) -> None:
         fail("Saved project snapshot differs from its raw TOML source")
 
 
+def configuration_paths(identity: dict) -> set[Path]:
+    """@brief 只索引声明的输出归档、内部运行和显式项目来源。 @param identity 当前身份。
+    @return 实际配置快照路径，不跟随记录中的其他绝对路径。
+    """
+    current = identity["configuration"]
+    paths = set(Path(current["outputPath"]).glob("*/configuration.json"))
+    paths.update((Path(current["datasetPath"]) / "runs").glob("*/configuration.json"))
+    for value in identity["project_sources"]:
+        path = Path(value)
+        if path.is_dir():
+            paths.update(path.rglob("configuration.json"))
+        elif (path.parent / "configuration.json").is_file():
+            paths.add(path.parent / "configuration.json")
+    return paths
+
+
 def raw_project_sources(identity: dict) -> dict:
     """@brief 仅索引当前路径、新运行归档和显式声明的原文。 @param identity 本次身份。
     @return 按实际字节 SHA256 索引的原文。
     """
     configuration = identity["configuration"]
     paths = {Path(configuration["projectPath"])}
-    paths.update(Path(configuration["outputPath"]).glob("*/project.toml"))
+    paths.update(path.parent / "project.toml" for path in configuration_paths(identity)
+                 if (path.parent / "project.toml").exists())
     for value in identity["project_sources"]:
         path = Path(value)
         if path.is_dir():
@@ -172,15 +189,19 @@ def verify_saved_project(record: dict) -> None:
 
 
 def stable_contract(configuration: dict) -> dict:
-    """@brief 仅移除明确允许变化的运行字段。 @param configuration 已验证快照。 @return 严格采集合同。"""
-    project = copy.deepcopy(configuration["project"])
-    for key in ("max_actions", "max_duration_seconds"):
-        project["run"].pop(key)
-    for task in project["tasks"]:
-        for key in ("instruction", "acceptance", "target_count"):
-            task.pop(key)
-        task["privacy"].pop("reason")
-    return {"project": project, "config_sha256": configuration["digests"]["config"],
+    """@brief 明确投影采集语义，交付声明及存储位置不决定采集身份。 @param configuration 已验证快照。
+    @return 严格采集合同。
+    """
+    project = configuration["project"]
+    tasks = [{key: copy.deepcopy(value) for key, value in task.items()
+              if key not in {"instruction", "acceptance", "target_count"}} for task in project["tasks"]]
+    for task in tasks:
+        del task["privacy"]["reason"]
+    collection = {"schema_version": project["schema_version"], "run_name": project["run"]["name"],
+                  "agent": project["agent"], "tools": project["tools"], "tasks": tasks,
+                  "canvas": project["dataset"]["canvas"],
+                  "stability_regions": project["dataset"]["stability_regions"]}
+    return {"project": collection, "config_sha256": configuration["digests"]["config"],
             "profile": copy.deepcopy(configuration["profile"])}
 
 
@@ -191,7 +212,7 @@ def configuration_sources(identity: dict) -> dict:
     validate_identity(identity)
     current = identity["configuration"]
     records = [{"configuration": current, "path": None}]
-    for path in sorted(Path(current["outputPath"]).glob("*/configuration.json")):
+    for path in sorted(configuration_paths(identity)):
         if path.is_symlink() or not path.is_file():
             fail("Saved run configuration must be an ordinary file")
         try:
@@ -235,14 +256,6 @@ def verify_contract(identity_sha256: str, identity: dict, sources: dict) -> dict
     return original
 
 
-def relocate_evidence(manifest: dict, historical: dict, current: dict) -> Path:
-    """@brief 按项目相对位置唯一映射原证据，支持完整目录副本。 @param manifest 原清单。
-    @param historical 原运行配置。 @param current 本次运行配置。 @return 当前目录中的证据路径。
-    """
-    relative = os.path.relpath(manifest["evidence_directory"], Path(historical["projectPath"]).parent)
-    return (Path(current["projectPath"]).parent / relative).resolve()
-
-
 def read_capture_identity(path: Path) -> dict:
     """@brief 读取必须存在的普通采集身份文件。 @param path 当前副本内的身份文件。 @return 原记录。"""
     if path.is_symlink() or not path.is_file():
@@ -263,17 +276,13 @@ def finalization_configuration(manifest: dict, sample: dict, identity: dict, sou
     directory = sample.get("finalization_directory")
     if not isinstance(directory, str) or not directory:
         fail("Published capture origin belongs to a different run identity without a recorded finalization")
-    name = Path(directory).name
-    actual = (Path(identity["configuration"]["outputPath"]) / name / "configuration.json").resolve()
+    actual = (Path(directory) / "configuration.json").resolve()
     records = [record for record in sources.get(manifest["identity_sha256"], [])
                if record["path"] == str(actual)]
     if len(records) != 1:
         fail("Capture finalization run differs from its registered identity")
     configuration = records[0]["configuration"]
     verify_saved_project(records[0])
-    expected = Path(configuration["outputPath"]) / name
-    if Path(directory).resolve() != expected.resolve():
-        fail("Recorded finalization directory differs from its original run path")
     return configuration
 
 
@@ -293,11 +302,9 @@ def finalized_capture_configuration(manifest: dict, identity: dict, sources: dic
     @param identity 本次身份。 @param sources 已核验来源。 @param captured 采集运行。 @return 发布运行配置。
     """
     origin = Path(manifest["evidence_directory"])
-    name = origin.parent.parent.name
-    expected = Path(captured["outputPath"]) / name / "captures" / manifest["sample_id"]
-    if origin.resolve() != expected.resolve():
+    if origin.name != manifest["sample_id"] or origin.parent.name != "captures":
         fail("Captured evidence origin differs from its saved run path")
-    directory = Path(identity["configuration"]["outputPath"]) / name / "captures" / manifest["sample_id"]
+    directory = origin
     path = directory / "sample.json"
     if not path.is_file():
         fail("Published capture origin belongs to a different run identity without a recorded finalization")
@@ -328,7 +335,7 @@ def manifest_configuration(manifest: dict, identity: dict, sources: dict) -> dic
         return original
     if origin.name != manifest["sample_id"]:
         fail("Published capture origin does not match its sample identity")
-    run_path = Path(identity["configuration"]["outputPath"]) / origin.parent.parent.name / "configuration.json"
+    run_path = origin.parent.parent / "configuration.json"
     for key, records in sources.items():
         for record in records:
             if record["path"] == str(run_path.resolve()):
@@ -339,18 +346,18 @@ def manifest_configuration(manifest: dict, identity: dict, sources: dict) -> dic
     fail("Original capture run configuration is missing")
 
 
-def verify_sample_contract(documents: dict, manifest: dict, configuration: dict) -> None:
-    """@brief 以实际五件套约束解析来源，拒绝画布、任务、隐私或稳定规则漂移。
-    @param documents 已核验文档。 @param manifest 原发布清单。 @param configuration 原运行快照。
+def verify_sample_contract(facts: dict, manifest: dict, configuration: dict) -> None:
+    """@brief 以完整采集事实核对画布、任务、隐私和观察要求，与交付选择无关。
+    @param facts 已核验事实。 @param manifest 原登记清单。 @param configuration 原运行快照。
     """
-    project, wms = configuration["project"], documents["wms"]
+    project, wms = configuration["project"], facts["windows"]
     matches = [task for task in project["tasks"] if task["name"] == manifest["task_name"]]
     if len(matches) != 1:
         fail("Published sample task is not present in its saved run")
     task = matches[0]
     if wms["canvas"] != project["dataset"]["canvas"]:
         fail("Published sample canvas differs from its saved project")
-    if any(wms["sample"].get(key) != task[key] for key in ("app", "scene")):
+    if any(manifest["publication_sample"].get(key) != task[key] for key in ("app", "scene")):
         fail("Published sample app or scene differs from its saved task")
     bundle = manifest["target_bundle_name"]
     if "bundle_names" in task and bundle not in task["bundle_names"]:
@@ -362,7 +369,7 @@ def verify_sample_contract(documents: dict, manifest: dict, configuration: dict)
     policy_sha256 = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
     if receipt.get("policy_sha256") != policy_sha256 or receipt["enabled"] != policy["enabled"]:
         fail("Published privacy receipt differs from its saved task policy")
-    if receipt["after_sha256"] != manifest["files"]["screenshot"]["sha256"]:
+    if receipt["after_sha256"] != facts["screenshot"]["sha256"]:
         fail("Published privacy receipt does not match its paired screenshot")
     stability = wms["stability"]
     if stability.get("status") != "verified" or stability.get("rules") != project["dataset"]["stability_regions"]:

@@ -1,328 +1,131 @@
-"""@brief 将离线后处理和持久化登记接入受限操作桥，并恢复中断后的证据指针。"""
+"""@brief 分别准备和登记采集事实，以及对已成功采集执行只读声明式导出。"""
 
-import hashlib
 import json
-import math
+import logging
 from pathlib import Path
 
-from har_capture.capture_checks import compare_capture_states, coverage_report, verify_pixel_receipt
-from har_capture.dataset import SUFFIXES, dataset_status, publish_sample, read_documents, verify_files
-from har_capture.export import sample_prefix, write_delivery
+from har_capture.capture_facts import build_capture_facts, verify_capture_evidence
+from har_capture.dataset import CHECKS, dataset_status, publish_sample, read_accepted_sample, verify_files
+from har_capture.export import write_export
 from har_capture.hdc import fail
-from har_capture.metadata import file_info, image_info, load_layout, parse_windows
-from har_capture.privacy import atomic_json, redact_capture, validate_policy, verify_privacy_receipt
-from har_capture.signatures import digest
-from har_capture.system_accessibility import read_window_accessibility
-from har_capture.stability import observe_stability, verify_project_rules
+from har_capture.metadata import file_info
 from har_capture.page_observation import verify_page_stability
+from har_capture.privacy import atomic_json, redact_capture, validate_policy
+from har_capture.signatures import digest
+from har_capture.stability import verify_project_rules
+
+LOGGER = logging.getLogger(__name__)
 
 
-def verify_raw_files(directory: Path, metadata: dict, skip_screenshot: bool) -> None:
-    """@brief 核验原始文件索引，只有发布截图允许引用正式样本目录。 @param directory 证据目录。
-    @param metadata 采集信息。 @param skip_screenshot 让打码恢复先核对自己的图片收据。
+def save_capture_preparation(directory: Path, facts: dict, rules: str) -> dict:
+    """@brief 保存规范事实和准备收据，不移动图片或生成项目交付。 @param directory 原始采集目录。
+    @param facts 完整规范事实。 @param rules 准备要求摘要。 @return 准备清单。
     """
-    required = {"layout": "layout.json", "windows": "windows.txt", "accessibility": "accessibility.json",
-                "session_details": "session-details.txt", "coverage": "coverage.json",
-                "consistency": "consistency.json", "closing_layout": "closing-layout.json",
-                "closing_windows": "closing-windows.txt", "pixel_consistency": "pixel-consistency.json",
-                "stability": "stability.json"}
-    if any(metadata["files"].get(key, {}).get("file") != name for key, name in required.items()):
-        fail("Capture is missing a required original evidence file index")
-    for kind, record in metadata["files"].items():
-        if kind == "screenshot" and skip_screenshot:
-            continue
-        path = directory / record["file"]
-        if path.is_symlink() or not path.is_file():
-            fail(f"Capture artifact is missing or is a symbolic link: {record['file']}")
-        if not path.resolve().is_relative_to(directory):
-            delivery = metadata.get("delivery", {})
-            expected = Path(delivery.get("path", directory)) / delivery.get("files", {}).get(
-                "screenshot", {}).get("file", "")
-            if kind != "screenshot" or path.resolve() != expected.resolve():
-                fail("Capture artifact path escapes its evidence directory")
-        actual = file_info(path)
-        if any(actual[key] != record[key] for key in ("bytes", "sha256")):
-            fail(f"Capture artifact digest mismatch: {record['file']}")
-    if skip_screenshot:
-        return
-    screenshot = (directory / metadata["files"]["screenshot"]["file"]).resolve()
-    images = {path.resolve() for path in directory.rglob("*") if path.suffix.lower() in (
-        ".png", ".jpg", ".jpeg", ".webp")}
-    expected_images = {screenshot} if screenshot.is_relative_to(directory) else set()
-    if images != expected_images:
-        fail("Capture evidence must contain exactly its indexed screenshot")
-    image = image_info(screenshot)
-    if any(image[key] != metadata["display"][key] for key in ("width", "height")):
-        fail("Capture screenshot dimensions differ from its display")
-
-
-def verify_tree_references(window: dict, indexed: dict) -> None:
-    """@brief 要求双树及其原文、几何证据均使用已核验索引。 @param window 采集窗口。
-    @param indexed 原始文件索引。
-    """
-    for kind in ("accessibility", "arkui"):
-        tree = window["trees"][kind]
-        if not tree.get("node_count", 0) > 0:
-            fail("Captured window tree is empty")
-        references = [tree["artifact"]] if kind == "accessibility" else [tree, tree["raw"], tree["response"]]
-        if kind == "arkui":
-            geometry_keys = ("arkui_geometry", "response", "render_tree", "render_detached_tree")
-            geometry = tree["coordinate_evidence"]
-            references.extend(geometry[key] for key in geometry_keys)
-            sources = geometry.get("scene_sources")
-            if not isinstance(sources, list):
-                fail("Captured window is missing its explicit SceneBoard source list")
-            for source in sources:
-                if not isinstance(source, dict) or not all(key in source for key in ("raw", "arkui_geometry")):
-                    fail("Captured window has an invalid SceneBoard source reference")
-                references.extend(source[key] for key in ("raw", "arkui_geometry"))
-        for record in references:
-            expected = indexed.get(record["file"])
-            if expected is None or any(record[key] != expected[key] for key in ("bytes", "sha256")):
-                fail("Captured window tree evidence differs from the verified file index")
-
-
-def verify_capture_windows(directory: Path, metadata: dict, inventory: dict) -> None:
-    """@brief 重新核对窗口事实、双树索引与全屏覆盖。 @param directory 原始目录。
-    @param metadata 采集信息。 @param inventory 原始 WMS 记录。
-    """
-    windows = metadata["windows"]
-    if not windows or len({window["window_id"] for window in windows}) != len(windows):
-        fail("Capture requires distinct exposed window records")
-    indexed = {record["file"]: record for record in metadata["files"].values()}
-    for window in windows:
-        original = inventory.get(window["window_id"])
-        if (not original or any(window.get(key) != value for key, value in original.items())
-                or not window.get("bundle_name") or not math.isfinite(window["z_order"])):
-            fail("Captured window does not match the original WMS evidence")
-        verify_tree_references(window, indexed)
-        read_window_accessibility(directory, window)
-    recorded = metadata["window_inventory"]
-    if len(recorded) != len(inventory) or {window["window_id"] for window in recorded} != set(inventory):
-        fail("Capture window inventory differs from the original WMS evidence")
-    if any(any(window.get(key) != value for key, value in inventory[window["window_id"]].items())
-           for window in recorded):
-        fail("Capture window inventory facts differ from the original WMS evidence")
-    sessions = (directory / "session-details.txt").read_text(encoding="utf-8")
-    coverage = coverage_report(metadata, inventory, sessions)
-    if coverage["status"] != "verified" or coverage != metadata["coverage"]:
-        fail("Capture coverage does not match the original window and session evidence")
-    if json.loads((directory / "coverage.json").read_bytes()) != coverage:
-        fail("Capture coverage receipt differs from its metadata")
-    excluded = {window["window_id"] for window in coverage["excluded_windows"]}
-    if any(window_id not in excluded for window_id in metadata["foreground_window_ids_without_tree"]):
-        fail("Capture has unaccounted foreground windows without trees")
-
-
-def verify_capture_evidence(directory: Path, metadata: dict, skip_screenshot: bool = False) -> None:
-    """@brief 为初次准备核验原始摘要、窗口覆盖与首尾观测绑定。 @param directory 原始目录。
-    @param metadata 采集元数据。 @param skip_screenshot 打码恢复前只延后图片摘要核验。
-    """
-    if metadata.get("status") != "complete":
-        fail("Cannot prepare an incomplete capture")
-    verify_raw_files(directory, metadata, skip_screenshot)
-    inventory = parse_windows((directory / "windows.txt").read_text(encoding="utf-8"))
-    verify_capture_windows(directory, metadata, inventory)
-    verify_screen_geometry(directory, metadata)
-    before = {"windows": inventory, "layout": load_layout(directory / "layout.json")}
-    after = {"windows": parse_windows((directory / "closing-windows.txt").read_text(encoding="utf-8")),
-             "layout": load_layout(directory / "closing-layout.json")}
-    stability = observe_stability(metadata["stability"]["rules"])
-    if stability != metadata["stability"] or stability != json.loads((directory / "stability.json").read_bytes()):
-        fail("Capture observation declaration differs from its original evidence")
-    state = compare_capture_states(before, after)
-    pixels = json.loads((directory / "pixel-consistency.json").read_bytes())
-    verify_pixel_receipt(pixels, metadata["display"])
-    state["pixels"] = pixels
-    if state != metadata["consistency"] or state != json.loads((directory / "consistency.json").read_bytes()):
-        fail("Capture consistency receipt differs from its original evidence")
-
-
-def verify_screen_geometry(directory: Path, metadata: dict) -> None:
-    """@brief 离线重算同批精确屏幕边界，拒绝缺失或被改写的动作验收事实。 @param directory 证据目录。
-    @param metadata 已保存的采集信息。
-    """
-    from har_capture.window_geometry import attach_captured_screen_geometry
-    observed = {**metadata, "windows": [dict(window) for window in metadata["windows"]]}
-    attach_captured_screen_geometry(directory, observed)
-    for expected, actual in zip(metadata["windows"], observed["windows"], strict=True):
-        if any(expected.get(key) != actual[key] for key in ("screen_bounds", "screen_bounds_source")):
-            fail("Captured screen geometry differs from its original SceneBoard and RenderService evidence")
-
-
-def manifest_digest(manifest: dict) -> str:
-    """@brief 摘要只包含不随原子移动改变的交付事实。 @param manifest 清单。 @return 规范摘要。"""
-    return digest({key: manifest[key] for key in ("status", "capture_id", "files", "checks", "canvas")})
-
-
-def verify_preparation(directory: Path, metadata: dict, request: dict, receipt: dict) -> dict:
-    """@brief 重试时核对规则身份、五文件摘要及正文打码结果。 @param directory 证据目录。
-    @param metadata 当前元数据。 @param request 当前规则。 @param receipt 持久准备凭证。 @return 已核验清单。
-    """
-    expected = digest({"options": request["options"], "privacy": request["privacy"]})
-    if receipt.get("rule_version") != 1 or receipt["rules_sha256"] != expected:
-        fail("Delivery preparation rules differ from the existing receipt")
-    if receipt["capture_id"] != metadata["capture_id"]:
-        fail("Delivery preparation capture identity differs")
-    manifest = metadata["delivery"]
-    location = Path(manifest["path"]).resolve()
-    verify_files(location, manifest["files"])
-    documents = read_documents(location, manifest["files"])
-    wms = documents["wms"]
-    naming = {key: request["options"][key] for key in ("app", "page_id", "scene", "state_id")}
-    if manifest.get("publication"):
-        naming = manifest["publication"]["publication_sample"]
-    if wms["sample"] != naming or wms["canvas"] != request["options"]["canvas"]:
-        fail("Prepared delivery does not match its naming or canvas rules")
-    if wms["stability"] != metadata["stability"]:
-        fail("Prepared delivery stability evidence differs from its verified original capture")
-    if wms.get("page_stability") != metadata.get("page_stability"):
-        fail("Prepared delivery target page receipt differs from its original metadata")
-    policy_hash = hashlib.sha256(json.dumps(request["privacy"], sort_keys=True).encode()).hexdigest()
-    verify_privacy_receipt(wms["privacy"])
-    if (wms["privacy"]["policy_sha256"] != policy_hash or wms["privacy"] != metadata["privacy"]
-            or wms["privacy"]["enabled"] != request["privacy"]["enabled"]):
-        fail("Prepared delivery redaction policy differs")
-    screenshot_hash = manifest["files"]["screenshot"]["sha256"]
-    if screenshot_hash != receipt["screenshot_sha256"] or screenshot_hash != wms["privacy"]["after_sha256"]:
-        fail("Prepared delivery screenshot differs from the redaction receipt")
-    if receipt["status"] == "complete" and receipt["manifest_sha256"] != manifest_digest(manifest):
-        fail("Prepared delivery manifest changed after preparation")
+    stage = directory / "accepted"
+    stage.mkdir(exist_ok=True)
+    record = stage / "capture.json"
+    if any(path.name not in {"capture.json", "capture.json.pending"} for path in stage.iterdir()):
+        fail("Capture preparation contains unrecognized artifacts")
+    if record.exists() and json.loads(record.read_bytes()) != facts:
+        fail("Prepared capture facts changed after preparation")
+    atomic_json(record, facts)
+    manifest = {"status": "complete", "capture_id": facts["capture_id"], "path": str(stage),
+                "files": {"capture": file_info(record)}, "screenshot": facts["screenshot"],
+                "canvas": facts["canvas"], "checks": dict.fromkeys(CHECKS, "pass")}
+    receipt = {"rule_version": 1, "status": "complete", "capture_id": facts["capture_id"],
+               "rules_sha256": rules, "manifest": manifest}
+    path = directory / "capture-preparation.json"
+    if path.exists() and json.loads(path.read_bytes()) != receipt:
+        fail("Capture preparation differs from its recorded facts")
+    verify_files(stage, manifest["files"])
+    atomic_json(path, receipt)
     return manifest
 
 
-def restore_uncommitted_delivery(directory: Path, metadata: dict, request: dict) -> None:
-    """@brief 只回滚未写入完成元数据的本次导出文件，以便重新执行完整验证。 @param directory 证据目录。
-    @param metadata 尚未完成导出的元数据。 @param request 相同导出规则。
-    """
-    delivery = directory / "delivery"
-    if not delivery.exists():
-        return
-    if delivery.is_symlink() or not delivery.is_dir():
-        fail("Interrupted delivery path is not a regular directory")
-    prefix = sample_prefix(request["options"])
-    expected = {prefix + suffix for suffix in SUFFIXES.values()}
-    if any(path.is_symlink() or not path.is_file() or path.name not in expected for path in delivery.iterdir()):
-        fail("Interrupted delivery contains unrecognized files")
-    shot = delivery / (prefix + SUFFIXES["screenshot"])
-    original = (directory / metadata["files"]["screenshot"]["file"]).resolve()
-    if original.parent != directory or original.name != "screenshot.png":
-        fail("Uncommitted screenshot is outside the controlled evidence directory")
-    if shot.exists():
-        if original.exists() or file_info(shot)["sha256"] != metadata["files"]["screenshot"]["sha256"]:
-            fail("Interrupted delivery screenshot cannot be restored unambiguously")
-        shot.rename(original)
-    for path in delivery.iterdir():
-        path.unlink()
-    delivery.rmdir()
-
-
-def save_preparation(directory: Path, metadata: dict, request: dict, receipt: dict) -> dict:
-    """@brief 完成重试校验并保存可重复使用的准备凭证。 @param directory 证据目录。
-    @param metadata 已完成元数据。 @param request 同一规则。 @param receipt 准备凭证。 @return 结果。
-    """
-    verify_capture_evidence(directory, metadata)
-    manifest = verify_preparation(directory, metadata, request, receipt)
-    receipt.update(status="complete", manifest_sha256=manifest_digest(manifest))
-    atomic_json(directory / "delivery-preparation.json", receipt)
-    atomic_json(directory / "delivery-manifest.json", manifest)
-    return {"manifest": manifest, "metadata": metadata}
-
-
-def prepare_delivery(request: dict) -> dict:
-    """@brief 独立打码后准备五件套；相同规则重试必须重新核验所有交付文件。 @param request 参数。
-    @return 清单及元数据。
+def prepare_capture(request: dict) -> dict:
+    """@brief 完整核验并准备最终图片与规范事实，选择的交付文件不参与检查。 @param request 准备参数。
+    @return 供图片验收使用的完整事实清单和元数据。
     """
     directory = Path(request["directory"]).resolve()
     validate_policy(request["privacy"])
     metadata = json.loads((directory / "metadata.json").read_bytes())
+    if (directory / "publication.json").exists():
+        fail("Capture is already registered; export its accepted sample instead")
     verify_project_rules(metadata, request["options"])
-    receipt_path = directory / "delivery-preparation.json"
-    rules_hash = digest({"options": request["options"], "privacy": request["privacy"]})
-    receipt = json.loads(receipt_path.read_bytes()) if receipt_path.exists() else None
-    if receipt and (receipt.get("rule_version") != 1 or receipt["rules_sha256"] != rules_hash
-                    or receipt["capture_id"] != metadata["capture_id"]):
-        fail("Delivery preparation rules or capture identity differ from the existing receipt")
-    if metadata.get("delivery"):
-        if receipt is None:
-            fail("Prepared delivery has no rule identity receipt")
-        metadata["page_stability"] = verify_page_stability(directory, metadata)
-        return save_preparation(directory, metadata, request, receipt)
-    if receipt:
-        restore_uncommitted_delivery(directory, metadata, request)
-    elif (directory / "delivery").exists():
-        fail("Unregistered delivery directory prevents preparation")
-    page_stability = verify_page_stability(directory, metadata)
-    metadata["page_stability"] = page_stability
+    rules = digest({"options": request["options"], "privacy": request["privacy"]})
+    receipt = directory / "capture-preparation.json"
+    if receipt.exists():
+        saved = json.loads(receipt.read_bytes())
+        if saved.get("rule_version") != 1 or saved["rules_sha256"] != rules:
+            fail("Capture preparation requirements differ from their recorded rules")
+    page = verify_page_stability(directory, metadata)
     verify_capture_evidence(directory, metadata, skip_screenshot=True)
     metadata = redact_capture(directory, request["privacy"])
-    metadata["page_stability"] = page_stability
-    verify_raw_files(directory, metadata, skip_screenshot=False)
-    receipt = {"rule_version": 1, "rules_sha256": rules_hash, "capture_id": metadata["capture_id"],
-               "status": "started", "screenshot_sha256": metadata["files"]["screenshot"]["sha256"]}
-    atomic_json(receipt_path, receipt)
-    write_delivery(directory, metadata, request["options"])
-    return save_preparation(directory, metadata, request, receipt)
+    metadata["page_stability"] = page
+    atomic_json(directory / "metadata.json", metadata)
+    facts = build_capture_facts(directory, metadata, request["options"])
+    return {"manifest": save_capture_preparation(directory, facts, rules), "metadata": metadata}
 
 
-def synchronize_publication(result: dict, context: dict) -> None:
-    """@brief 核验后仅补齐明确中断的原子写入，保留原收据路径。 @param result 已登记样本。
-    @param context 原配置和实际读写位置。
+def publish_capture(request: dict) -> dict:
+    """@brief 只登记已通过模型验收的采集，不调用项目导出或改变原采集文件。 @param request 登记参数。
+    @return 该采集的持久登记收据。
     """
-    from har_capture.publication_evidence import publication_plan, verify_published_evidence
-    pending = publication_plan(result, context)
-    for record in pending:
-        atomic_json(record["path"], record["after"])
-    if pending:
-        verify_published_evidence(result, context)
-
-
-def resume_dataset(request: dict) -> dict:
-    """@brief 验证已发布配额并修复在登记后中断的证据同步。 @param request 项目身份与根目录。 @return 进度。"""
-    status = dataset_status(Path(request["root"]), request["identity"])
-    from har_capture.dataset_identity import configuration_sources
-    from har_capture.publication_evidence import publication_context
-    sources = configuration_sources(request["identity"])
-    for sample in status["samples"]:
-        context = publication_context(sample, request["identity"], sources)
-        synchronize_publication(sample, context)
-    return status
-
-
-def publish_delivery(request: dict) -> dict:
-    """@brief 持久化登记后同步原始证据的最终文件指针。 @param request 发布参数。 @return 正式样本收据。"""
-    from har_capture.dataset_identity import configuration_sources
-    from har_capture.publication_evidence import publication_context
     evidence = Path(request["evidence_directory"]).resolve()
-    metadata = json.loads((evidence / "metadata.json").read_bytes())
     directory = Path(request["directory"]).resolve()
-    if directory != (evidence / "delivery").resolve():
-        fail("Publication directory must be the evidence delivery directory")
-    if metadata["capture_id"] != request["acceptance"]["export"]["capture_id"]:
-        fail("Publication evidence capture identity does not match")
-    status = resume_dataset(request)
+    if directory != evidence / "accepted":
+        fail("Capture registration requires its canonical preparation directory")
+    metadata = json.loads((evidence / "metadata.json").read_bytes())
+    acceptance = request["acceptance"]
+    if metadata["capture_id"] != acceptance["capture"]["capture_id"]:
+        fail("Capture registration identity differs from its evidence")
+    status = dataset_status(Path(request["root"]), request["identity"])
     existing = [sample for sample in status["samples"] if sample["sample_id"] == metadata["capture_id"]]
     if existing:
-        result = existing[0]
-        acceptance = request["acceptance"]
-        if (acceptance["task_name"] != result["task_name"]
-                or acceptance["target_bundle_name"] != result["target_bundle_name"]
-                or acceptance["accepted_screenshot_sha256"] != result["visual_acceptance"]["screenshot_sha256"]):
-            fail("Repeated publication request differs from its durable acceptance")
-        return result
-    result = publish_sample(Path(request["root"]), request["identity"], directory, request["acceptance"])
-    context = publication_context(result, request["identity"], configuration_sources(request["identity"]))
-    synchronize_publication(result, context)
-    return result
+        sample = existing[0]
+        if (acceptance["task_name"] != sample["task_name"]
+                or acceptance["target_bundle_name"] != sample["target_bundle_name"]
+                or acceptance["accepted_screenshot_sha256"] != sample["visual_acceptance"]["screenshot_sha256"]):
+            fail("Repeated registration differs from its durable acceptance")
+        return sample
+    return publish_sample(Path(request["root"]), request["identity"], directory, acceptance)
+
+
+def export_sample(request: dict) -> dict:
+    """@brief 从只读成功登记按当前项目交付声明导出，不重新验收或计数。 @param request 当前声明及目标。
+    @return 原登记、本次实际交付计划和零新增采集数。
+    """
+    identity = request["identity"]
+    configuration = identity["configuration"]
+    if request["delivery"] != configuration["project"]["delivery"]:
+        fail("Export declaration differs from the actual project")
+    destination, receipt = Path(request["destination"]).resolve(), Path(request["receipt"]).resolve()
+    if destination.parent != Path(configuration["outputPath"]).resolve() or destination.is_symlink():
+        fail("Delivery directory must belong to the configured output root")
+    internal = Path(configuration["datasetPath"]).resolve() / "runs"
+    if not receipt.is_relative_to(internal) or receipt.is_symlink():
+        fail("Export receipt must belong to internal run storage")
+    sample, facts, original = read_accepted_sample(Path(request["root"]), identity, request["sample_id"])
+    task = next(item for item in original["project"]["tasks"] if item["name"] == sample["task_name"])
+    naming = {"app": task["app"], "scene": task["scene"], "task": sample["task_name"],
+              "capture_id": sample["sample_id"], "page_id": sample["page_id"], "state_id": sample["state_id"]}
+    result = write_export(facts, request["delivery"], naming, destination, receipt)
+    return {"sample": sample, "export": result, "new_samples": 0}
 
 
 def execute_local(request: dict) -> dict:
-    """@brief 执行明确注册的本地操作，不连接设备。 @param request 已校验请求。 @return 操作结果。"""
-    operation = request["operation"]
-    if operation == "dataset_status":
-        return resume_dataset(request)
-    if operation == "prepare_delivery":
-        return prepare_delivery(request)
-    if operation == "publish_sample":
-        return publish_delivery(request)
-    fail("Unsupported local delivery operation")
+    """@brief 执行明确的本地事实或导出操作，不连接设备。 @param request 已校验参数。 @return 操作结果。"""
+    try:
+        operation = request["operation"]
+        if operation == "dataset_status":
+            return dataset_status(Path(request["root"]), request["identity"])
+        if operation == "prepare_capture":
+            return prepare_capture(request)
+        if operation == "publish_capture":
+            return publish_capture(request)
+        if operation == "export_sample":
+            return export_sample(request)
+        fail("Unsupported local capture or export operation")
+    except BaseException:
+        LOGGER.exception("Local capture or export operation failed")
+        raise

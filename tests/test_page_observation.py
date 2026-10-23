@@ -13,7 +13,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from har_capture.collector import capture
-from har_capture.delivery_operations import prepare_delivery
+from har_capture.delivery_operations import prepare_capture
 from har_capture.hdc import CaptureError
 from har_capture.metadata import file_info
 from har_capture.page_observation import crop_bounds, verify_page_observation, verify_page_stability
@@ -90,11 +90,10 @@ class PageObservationTests(unittest.TestCase):
     def test_missing_semantic_receipt_cannot_prepare_or_recompute_from_the_single_saved_image(self):
         (self.directory / "page-stability.json").unlink()
         request = {"directory": str(self.directory), "privacy": {"enabled": False, "reason": "Synthetic"},
-                   "options": {"app": "test", "page_id": "page", "scene": "scene", "state_id": "state",
-                               "canvas": {"width": 3120, "height": 2080}, "stability_regions": []}}
+                   "options": {"canvas": {"width": 3120, "height": 2080}, "stability_regions": []}}
         with self.assertRaisesRegex(CaptureError, "page-stability.json"):
-            prepare_delivery(request)
-        self.assertFalse((self.directory / "delivery").exists())
+            prepare_capture(request)
+        self.assertFalse((self.directory / "accepted").exists())
         self.assertEqual(len(list(self.directory.rglob("*.png"))), 1)
 
     def test_raw_capture_without_target_is_complete_but_not_semantically_publishable(self):

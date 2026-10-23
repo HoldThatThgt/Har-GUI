@@ -4,10 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { stringify } from 'smol-toml';
 import { loadConfiguration, resolveModelConfig } from '../agent/config.js';
+import { FIXTURE_DELIVERY } from './agent-configuration.js';
 
 const KEY_NAME = 'HAR_GUI_CONFIG_TEST_KEY';
 const TOOLS = ['Observe', 'Capture'];
+const DELIVERY = stringify({ delivery: FIXTURE_DELIVERY });
 const TASK = `
 [[tasks]]
 name = "calendar-week"
@@ -27,6 +30,7 @@ max_actions = 12
 max_duration_seconds = 3.5
 [agent]
 llm = "chosen"
+${DELIVERY}
 [dataset]
 root = "./dataset"
 canvas = { width = 3120, height = 2080 }
@@ -86,12 +90,83 @@ test('loads generic tasks without reading credentials and preserves original fil
   assert.equal(loaded.profile.model, 'deployment-specific-model');
   assert.equal(loaded.profile.pricing, undefined);
   assert.deepEqual(loaded.project.dataset.stability_regions, []);
+  assert.deepEqual(loaded.project.delivery, FIXTURE_DELIVERY);
   for (const [name, path] of [['project', f.projectPath], ['config', f.configPath]] as const) {
     assert.equal(loaded.digests[name], createHash('sha256').update(readFileSync(path)).digest('hex'));
   }
   assert.ok(Object.isFrozen(loaded.project.tasks[0]));
   assert.ok(Object.isFrozen(loaded.project.tools.enabled));
+  assert.ok(Object.isFrozen(loaded.project.delivery.artifacts[0]));
+  assert.ok(Object.isFrozen(loaded.project.delivery.artifacts));
   assert.throws(() => { loaded.project.tasks[0].name = 'changed'; }, TypeError);
+});
+
+test('delivery preserves explicit sources and all fixed path tokens without inventing files', (t) => {
+  const declaration = { directory: '{app}/{scene}/{task}/{capture_id}/{page_id}/{state_id}', artifacts: [
+    ...FIXTURE_DELIVERY.artifacts,
+    { source: 'capture_metadata', path: 'facts/{app}_{scene}_{task}_{capture_id}_{page_id}_{state_id}.json' },
+    { source: 'raw:page_observation', path: 'raw/page-observation.json' },
+  ] };
+  const f = fixture(t, PROJECT.replace(DELIVERY, stringify({ delivery: declaration })));
+  const loaded = loadConfiguration(f.projectPath, f.configPath, TOOLS);
+  assert.deepEqual(loaded.project.delivery, declaration);
+  assert.ok(Object.isFrozen(loaded.project.delivery));
+});
+
+test('delivery permits one selected source without expanding it into an implicit artifact set', (t) => {
+  const declaration = { directory: '.', artifacts: [{ source: 'windows', path: 'window-facts.json' }] };
+  const f = fixture(t, PROJECT.replace(DELIVERY, stringify({ delivery: declaration })));
+  assert.deepEqual(loadConfiguration(f.projectPath, f.configPath, TOOLS).project.delivery, declaration);
+});
+
+test('delivery requires an explicit directory and nonempty unique artifact sources', async (t) => {
+  const cases: [string, unknown][] = [
+    ['missing declaration', undefined], ['missing directory', { artifacts: FIXTURE_DELIVERY.artifacts }],
+    ['missing artifacts', { directory: '.' }], ['empty artifacts', { directory: '.', artifacts: [] }],
+    ['unknown source', { directory: '.', artifacts: [{ source: 'tree', path: 'tree.json' }] }],
+    ['empty raw key', { directory: '.', artifacts: [{ source: 'raw:', path: 'raw.json' }] }],
+    ['duplicate source', { directory: '.', artifacts: [
+      { source: 'screenshot', path: 'first.png' }, { source: 'screenshot', path: 'second.png' },
+    ] }],
+    ['duplicate output', { directory: '.', artifacts: [
+      { source: 'screenshot', path: 'same.json' }, { source: 'windows', path: 'same.json' },
+    ] }],
+    ['case insensitive duplicate output', { directory: '.', artifacts: [
+      { source: 'screenshot', path: 'same.json' }, { source: 'windows', path: 'SAME.JSON' },
+    ] }],
+    ['extra declaration field', { ...FIXTURE_DELIVERY, count: 5 }],
+    ['extra artifact field', { directory: '.', artifacts: [{ source: 'windows', path: 'windows.json', count: 1 }] }],
+    ['missing source', { directory: '.', artifacts: [{ path: 'windows.json' }] }],
+    ['missing path', { directory: '.', artifacts: [{ source: 'windows' }] }],
+  ];
+  for (const [name, declaration] of cases) {
+    await t.test(name, (child) => {
+      const log = child.mock.method(console, 'error', () => {});
+      const replacement = declaration === undefined ? '' : stringify({ delivery: declaration });
+      const f = fixture(child, PROJECT.replace(DELIVERY, replacement));
+      assert.throws(() => loadConfiguration(f.projectPath, f.configPath, TOOLS), /delivery/);
+      assert.equal(log.mock.callCount(), 1);
+    });
+  }
+});
+
+test('delivery rejects unsafe paths, reserved manifests and unsupported token syntax', async (t) => {
+  const invalid = ['', ' ', '/absolute', 'C:/absolute', 'C:relative', '//server/share', '\\server\\share',
+    'nested\\file', '..', '../escape', 'nested/../escape', './file', 'nested/./file', 'nested//file',
+    'nested/', 'CON', 'nul.json', 'nested/COM1.txt', 'name.', 'name ', 'line\nbreak',
+    '{unknown}', '{capture_id:04}', '{app.name}', '{app[0]}', '{app!s}', '{{app}}', '{app', 'app}'];
+  for (const field of ['directory', 'path']) {
+    for (const value of [...invalid, ...(field === 'path' ? ['.', 'manifest.json', 'manifest.json.pending'] : [])]) {
+      await t.test(`${field} ${JSON.stringify(value)}`, (child) => {
+        child.mock.method(console, 'error', () => {});
+        const declaration = { directory: '.', artifacts: [{ source: 'screenshot', path: 'shot.png' }] };
+        if (field === 'directory') declaration.directory = value;
+        else declaration.artifacts[0].path = value;
+        const f = fixture(child, PROJECT.replace(DELIVERY, stringify({ delivery: declaration })));
+        assert.throws(() => loadConfiguration(f.projectPath, f.configPath, TOOLS), /delivery/);
+      });
+    }
+  }
 });
 
 test('explicit stability selectors are frozen in the project without device-specific defaults', (t) => {

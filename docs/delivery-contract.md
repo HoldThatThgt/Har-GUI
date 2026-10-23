@@ -1,184 +1,182 @@
-# 五件套、后处理与恢复的当前接口
+# 采集事实、交付与恢复
 
-原始采集、独立打码、离线视觉验收、去重发布和中断恢复已经接入。
-原生坐标与系统窗口覆盖仍须逐帧通过实机证据验证；功能接入不代表整批采集已经验收。
-在加入显式打码开关前的版本中，已在现有账号的邮件阅读页完成正式五件套、正文打码、
-离线重复发布和恢复运行。新增 `enabled=false` 也已在真机验证原图摘要不变、五件套发布和重复运行不增计数；
-开启与关闭的证据分别保留，不改写历史样本。
-具体测量与限制见 [README 的当前实机验证](../README.md#当前五件套实机验证)。
+采集成功与交付文件分开登记。完整采集先通过覆盖、几何、页面判断、隐私和最终图片验收，
+再经 SQLite 去重并增加一次已采计数；随后按当前项目声明导出文件。
+少选文件不会减少采集检查，改变文件数量、名称或目录也不会产生新样本。
 
-每份 `project.toml` 必须声明正式数据集位置和画布，以及任务应用名、场景和打码规则：
-
-```toml
-[dataset]
-root = "./output/my-task/dataset"
-canvas = { width = 3120, height = 2080 }
-
-[[tasks]]
-name = "mail-reading"
-app = "华为邮箱"
-scene = "邮件页面"
-instruction = "自主打开已登录邮箱中的一封邮件；只查看，不发送、删除或修改邮件。"
-acceptance = "邮件阅读页面可见，有侧栏与阅读工具栏，不是登录、设置、空白或错误页。"
-target_count = 1
-bundle_names = ["com.huawei.hmos.email"]
-privacy = { enabled = true, reason = "等待在真实页面核实正文容器标识后独立打码" }
+```mermaid
+flowchart LR
+    Raw[单图 窗口 原始双树及来源] --> Prepare[核验完整事实 按开关处理截图]
+    Prepare --> Visual[视觉验收实际保存的 PNG]
+    Visual --> Register[SQLite 去重 登记采集与配额]
+    Register --> Export[按当前 delivery 导出]
+    Rules[项目声明的来源和路径] --> Export
+    Export --> Result[index-success 实际文件与 manifest.json]
+    Register --> Retry[已登记样本可再次离线导出]
+    Retry --> Export
 ```
 
-内容稳定性按[目标页面稳定性](target-page-stability.md)判断。
-`Capture` 必须明确 `target_window_id` 和 `target_bundle_name`；同应用多窗口不猜测焦点或层级。
-像素、全量窗口和树差异仅作诊断；内容拒收只针对目标换页或主体空白。
-首尾目标裁图暂存于内存，模型结论写入 `page-stability.json`，并随 WMS 导出。
-`unobservable` 明确表示观察不足，本身不拒收，也不构成已证实稳定；最终图片验收仍然独立。
+## 项目声明与存储
 
-`dataset.stability_regions` 省略时为 `[]`，只接受 `bundle_name` 和 `resource_id` 声明，
-随原项目及 `metadata.stability.rules` 保存以核对来源。它不再屏蔽像素，不授予变化豁免，
-也不要求系统叶子的匹配数量、路径、边界或文字相等。原始截图和树保持不变。
+新运行的 `project.toml` 必须声明 `[delivery]`，其中 `directory` 和非空 `artifacts` 都必填。
+每项产物只声明 `source` 和 `path`。以下片段仅选择已验收截图；完整采集和全部验收仍然执行：
 
-`privacy.enabled` 是必填布尔开关，`reason` 是必填原因：
+```toml
+[delivery]
+directory = "{app}/{capture_id}"
 
-| 配置 | 后处理与最终验收 |
+[[delivery.artifacts]]
+source = "screenshot"
+path = "{capture_id}.png"
+```
+
+来源、固定替换项、路径规则及五份、六份文件的具体例子统一见
+[项目声明的交付文件](declarative-delivery.md)。没有默认五件套，也没有文件数量开关。
+未声明的文件不输出；来源不存在、重复来源、路径冲突或越界会明确拒绝。
+窗口文件只引用本次确实选中的配套树，不生成指向未输出文件的引用。
+
+`dataset.root` 继续使用项目已有的内部位置，保存数据库、已验收事实及新运行证据。
+不要为了更换交付形式重置它，也不要搬移旧数据库、原始配置或收据。
+新运行证据集中保存在 `<dataset.root>/runs/<UUID>/`；新登记的规范事实保存在
+`<dataset.root>/samples/<capture_id>/capture.json`。
+`run.output` 只用于本轮实际交付，目录布局与中断状态见[运行输出](run-output.md)。
+
+每个项目仍须明确 `dataset.canvas`，每个任务仍须声明 `app`、`scene`、`privacy`、
+任务描述、验收条件和目标数量。画布必须与实际截图一致，不拉伸图片满足声明。
+
+## 完整事实与验收
+
+`Capture` 必须明确 `target_window_id` 和 `target_bundle_name`，同应用多窗口不猜焦点。
+原始截图、WMS、无障碍树、ArkUI、原生几何及渲染来源按同一 `capture_id` 配对。
+普通应用 ArkUI 坐标须由同批原文、原生端点和实际渲染父链交叉证明；
+不能证明的变换、裁剪、树归属或窗口覆盖明确拒收。
+具体几何边界见[精确窗口映射](exact-window-mapping.md)。
+
+像素、全量窗口和树的首尾差异只作诊断；内容拒收针对目标换页或主体空白。
+首尾目标裁图仅在内存中比较，`page-stability.json` 绑定原观测摘要。
+`unobservable` 表示观察不足，不宣称稳定已经证实；最终图片验收仍然独立。
+`dataset.stability_regions` 只保存原项目声明，不屏蔽像素、不授予变化豁免，
+也不要求系统叶子的路径、数量或文字相等。详见[目标页面稳定性](target-page-stability.md)。
+
+当前本地处理接口分别承担这些职责：
+
+| 操作 | 输入与结果 |
 | --- | --- |
-| `enabled=false` | 不改写截图，最终视觉验收使用原图；可以保留 `regions` 供再次启用 |
-| `enabled=true`，省略 `regions` | 保存原始证据后等待核实选择器，不导出、不计配额 |
-| `enabled=true`，提供非空 `regions` | 按全部选择器打码，核验后在最终图片上进行视觉验收 |
+| `prepare_capture` | 输入原始证据目录、画布、稳定性声明和隐私规则；核验完整事实，返回内部事实清单与实际最终 PNG 信息 |
+| `publish_capture` | 输入完整准备清单及绑定最终 PNG 摘要的视觉通过收据；去重、分配页面和状态标识，并登记采集一次 |
+| `export_sample` | 输入已登记样本、当前交付声明和新结果目录；只读核验原事实，输出选中文件与清单，`new_samples=0` |
 
-只有开启打码时才执行选择器匹配。`regions` 若提供则必须为非空数组；不接受空数组代替待核实状态。
-取得真实控件标识后，可补充如下规则；示例标识不得直接用于实机：
+`prepare_capture.options` 只包含 `canvas` 和 `stability_regions`，隐私规则单独传入。
+返回的 `manifest.files.capture` 明确索引规范事实，`manifest.screenshot` 提供实际 PNG 的绝对路径、
+大小、SHA-256 和宽高；视觉验收读取这张图片，登记请求以 `acceptance.capture` 关联准备清单。
+`export_sample` 返回原登记 `sample`、本轮 `export` 和零新增计数，
+实际交付清单中的 `files` 按声明来源索引相对文件、字节数和摘要。
+
+准备收据为 `capture-preparation.json`，规范事实实体为 `accepted/capture.json`。
+登记时内部准备目录原子移入 `dataset.root/samples/<capture_id>/`；
+原始截图和双树不因交付而移动，准备收据中原有来源也不改写。
+对外文件集合由本轮 `manifest.json` 明确列出，导出不改写原始元数据中的来源引用。
+
+最终视觉验收读取准备清单明确指向、大小和摘要均匹配的保存 PNG，不重拍设备屏幕。
+每次新登记都核验完整采集事实并计算页面、状态签名，不从选中的交付文件重建采集身份。
+例如只输出截图时，缺失 ArkUI 几何、窗口覆盖不全或无效页面收据仍会阻止验收。
+截图和树是顺序读取，始终标记 `atomic=false`，这些检查不是硬件原子快照。
+
+## 可选打码
+
+任务的 `privacy.enabled` 是必填布尔开关，`reason` 必填。`regions` 若提供，必须为非空数组。
+
+| 配置 | 处理与最终图片验收 |
+| --- | --- |
+| `enabled=false` | 保留原图，不执行选择器；可保留 `regions` 供再次启用 |
+| `enabled=true`，未提供 `regions` | 保留原始证据，等待核实选择器，不登记采集 |
+| `enabled=true`，提供 `regions` | 按全部声明选择器打码，核验后验收最终图片 |
+
+选择器使用本次无障碍树的包名、`attributes.id` 和实际屏幕矩形，不复用上一帧坐标。
+所有选择器必须匹配且具有可见面积；系统不自动推断任意应用的正文容器。
+示例资源标识不能直接用于实机。只想保留原图时，可使用：
 
 ```toml
-privacy = { enabled = true, reason = "覆盖已核实的正文及输入容器", regions = [
-  { bundle_name = "com.huawei.hmos.email", resource_id = "REPLACE_WITH_OBSERVED_BODY_ID" }
-] }
+[tasks.privacy]
+enabled = false
+reason = "本次保留原始截图"
 ```
 
-规则匹配本次无障碍树中的 `attributes.id`，采用本次实际屏幕矩形，不复用上一帧坐标。
-所有规则必须匹配并有可见面积；无法提供语义节点的 WebView 不会凭空产生正文标识。
-需要保留原图时，把 `enabled` 改为 `false`，可保留同一组选择器。
-最终视觉验收会收到本次打码开关状态。邮箱示例的 `acceptance` 只判断页面场景，
-打码要求由开关和确定性核验表达，因此切换时不必修改验收描述。
-自定义验收若额外写明“正文必须打码”，应与开关协调，否则原图可能无法通过该自定义断言。
-当前没有自动识别任意应用正文区域的保证，也不把应用无正文标识解释为无需打码。
-
-已有 `capture.py` 可单独采原始证据。以下打码命令不访问设备或模型：
+以下命令只处理已保存证据，不连接设备或模型：
 
 ```powershell
 python redact.py selectors PATH_TO_CAPTURE
-python redact.py apply PATH_TO_CAPTURE --project PATH_TO_PROJECT --task TASK_NAME
+python redact.py apply PATH_TO_CAPTURE --project project.toml --task TASK_NAME
 ```
 
-`selectors` 先核对无障碍原始文件的大小与 SHA-256，再输出包名、窗口、资源标识、类型和矩形，不打印正文。
-`apply` 遵循同一个开关：开启时原地覆盖唯一 PNG，保存区域和前后摘要，移除包含旧图的查看页；
-关闭时记录关闭原因与原图摘要。原始双树留在本地。
-默认 agent 流程在 `Capture` 之后执行同一后处理，再验收最终 PNG，最后登记五件套。
-导航使用设备已有登录状态；导航截图会发送给配置的视觉模型，后处理不会追溯改变既有模型请求。
-动作执行时使用原参数；持久日志与规划反馈隐藏所有动作的定位描述及输入正文，保留已解析坐标。
+`selectors` 先核对原始无障碍文件的大小和摘要，只输出标识、类型及矩形，不打印正文。
+开启 `apply` 时原地覆盖唯一采集 PNG，保存规则、区域及前后摘要，并删除含旧图的查看页；
+关闭时记录原因和原图摘要。关闭开关不能恢复已经覆盖的像素。
+已经准备的候选必须继续使用原准备规则，不能以新开关或新原因说明改写旧收据。
 
-离线验收与发布使用已实现的 `finalize` 命令：
+原始双树正文仍保留在本地；若声明树或原始来源，也会进入相应交付。
+截图打码不等于树正文脱敏。导航截图已经发送给配置的视觉模型，采后打码不改变这些既有请求。
+查看页只复制结构属性，其截图仍遵循本次隐私开关。
+
+## 独立验收与离线导出
+
+已有完整候选可在不连接设备的情况下验收：
 
 ```powershell
 npm run agent -- finalize --capture PATH_TO_CAPTURE --task TASK_NAME `
-  --project PATH_TO_PROJECT --config config.toml --env-file C:\config\deepseek.env
+  --project project.toml --config config.toml --env-file C:\config\deepseek.env
 ```
 
-`finalize` 无需设备连接，只使用保存的原始证据与最终 PNG。它先恢复未完成的文件移动，
-重新核验全部原始文件摘要、双树与几何文件引用、窗口覆盖和观测收据，再准备五件套。
-未发布候选必须已有绑定本次目标和观测摘要的页面判断收据；没有末图时不能补造结论。
-最终图片的视觉验收只使用按开关处理后的保存图片，关闭时就是原图；验收通过后原子发布，配额才增加。
-直接由 `capture.py` 生成的原始采集没有自动页面判断收据，不能仅增加 `--target-bundle` 追认为正式样本。
-已有 agent 候选则继续使用其中的任务、目标应用与窗口变化证据，不重做导航。
+尚未登记的候选必须已有绑定目标及观测的页面判断收据；缺少末帧图片时不能离线补造判断。
+单独 `capture.py` 生成的原始证据不能只靠增加 `--target-bundle` 追认为成功采集。
+首次 `finalize` 通过最终图片验收后登记采集，再执行当前交付声明。
+对已经登记的样本再次 `finalize`，按原明确事实核验后导出，不重复图片验收或增加计数。
 
-```mermaid
-flowchart LR
-    Raw[保存原始采集] --> Prepare[finalize 恢复并核验原始证据]
-    Prepare --> Enabled{privacy.enabled}
-    Enabled -->|false| Original[保留原图]
-    Enabled -->|true| Regions{已有 regions}
-    Regions -->|否| Wait[等待核实选择器 不计配额]
-    Regions -->|是| Redact[按本次控件矩形打码]
-    Original --> Assert[视觉验收最终 PNG]
-    Redact --> Assert
-    Assert --> Publish[去重与原子发布]
-    Publish --> Quota[登记配额]
+只需要更换文件集合、名字或组织时，使用离线导出命令：
+
+```powershell
+npm run agent -- export --sample-id CAPTURE_ID --project project.toml --config config.toml
 ```
 
-`dataset_status` 在 `dataset.sqlite3` 不存在时只校验配置身份并返回零计数，不创建目录或绑定空库。
-因此仅完成等待选择器的原始采集时，可以补充 `regions`，沿用同一个 `dataset.root`
-执行 `finalize`。首次进入正式发布时，数据库绑定的是修改后的项目和模型配置摘要及任务配额。
-这不会保留尚未发布时的配置摘要。无数据库却存在非空 `samples/` 时明确拒绝。
+如需证明历史项目原文，可重复提供 `--project-source PATH`，路径可以是原项目文件或归档目录。
+`export` 不需要设备或模型 key，不加载凭据环境文件，不调用模型，不增加采集计数；
+它只读已成功登记、原始证据和原收据，写入新的编号交付目录及本轮内部导出收据。
+同一个已验收帧可以先导出五份，再按新声明导出六份，原 DB、配置、证据和收据保持不变。
+重新导出复制已存在的最终 PNG，不恢复被打码覆盖的原图，也不产生新的采集帧。
 
-数据库建立后，同一 `dataset.root` 严格属于同一采集契约和模型配置。
-只允许调整任务 `instruction`、`acceptance`、`target_count`、`privacy.reason`，
-以及 `run.max_actions`、`run.max_duration_seconds`；计数不清零，剩余数量为当前目标减已发布数量，最小为零。
-其他项目字段保持严格相同，包含任务身份、应用、场景、包名、工具、画布、稳定性和隐私处理规则。
-`config.toml` 原始 SHA-256 和选中的模型配置仍严格绑定，修改后须使用新目录。
-数据库保留首次登记的三字段运行来源，每份清单保留发布时的运行摘要；不迁移数据库或重写旧记录。
-恢复时根据原运行 `configuration.json` 核对稳定采集契约，再按原隐私与准备收据核验实际文件。
-每次新运行保留原始 `project.toml` 和解析快照 `configuration.json`。
-只读取当前项目原文、当前输出目录各运行保存的原文，以及显式 `--project-source PATH` 指定的文件或目录。
-引用某次来源时，必须找到字节 SHA-256 一致的项目原文，并核对其解析内容；不能只相信快照内自报的摘要。
-原文另存于归档时显式传入该路径，不移动目录、不补写旧文件；缺失或不匹配的来源直接拒绝。
-改变视觉验收文字不会重新验收或追认历史样本。
+导出前必须核验完整原事实，不能通过省略窗口文件、树或截图绕过任一验收条件。
+缺少来源、证明或实际文件时停止，不补造数据。
+已经登记后才遇到导出错误，采集计数仍保留；本轮结果标记失败，可更正交付声明后再次离线导出。
 
-```mermaid
-flowchart LR
-    Current[当前项目与模型配置] --> Contract{采集契约相同}
-    Raw[原项目 TOML 字节与解析内容] --> Saved
-    Saved[原运行配置快照] --> Contract
-    Contract --> Verify[按原收据核验历史五件套与原始证据]
-    Verify --> Count[恢复已发布数量]
-    Target[当前任务目标] --> Remaining[计算剩余数量]
-    Count --> Remaining
-    Remaining --> Run[从当前设备寻找新页面]
-```
+## 身份与恢复边界
 
-已打码或已准备的单份采集还受打码和准备收据约束，重试必须使用相同开关与规则，不能换规则重新解释旧收据。
-未发布且已准备的候选仍需要原准备规则，包含当时的 `privacy.reason`；调整原因说明后可以恢复已发布数据，
-新采集使用新说明，不能用新说明覆盖旧候选的准备收据。
-关闭开关不能恢复已经覆盖的像素；需要原图时应以关闭配置重新采集，不能复用旧打码收据。
-独立项目各用独立 `dataset.root`，例如 `out/<task-name>/dataset`；运行证据可放在
-`out/<task-name>/runs`。系统不限定应用或场景数量，项目层汇总应保留各数据集的独立身份和登记记录。
+采集合同绑定运行名称、模型引用和配置、工具、任务身份、`app`、`scene`、包名范围、
+画布、稳定性声明、隐私开关及区域等采集语义。
+任务描述、视觉验收文字、目标数量、隐私原因说明和运行预算可以调整，剩余数量取当前目标减已采数量，最小为零。
+`delivery` 规则和存储位置不进入采集合同；改变它们不清零配额。
+`config.toml` 的原始摘要与选中的模型配置仍严格绑定。
 
-重复 `run` 会重新核验正式文件、验收收据和状态签名，再从当前设备观察并补齐缺额。
-重复 `finalize` 会核验并返回已有发布收据，不重复增加配额，也不再次调用模型验收已发布样本。
-准备与发布中断时，恢复过程验证规则摘要和每个文件的实际字节；无法唯一确认的证据明确失败。
+位置不属于采集身份，不代表工具会搬移数据或自动重映射旧路径。
+继续使用原 `dataset.root`，保留所有被引用的原始目录。
+复制证据到其他布局不能使原引用自动有效，也不能改写旧清单中的路径来伪装恢复成功。
 
-`run --max-new-samples N` 只限制当前运行成功新增的不同正式样本数量，跨任务累加，不改写任务总目标。
-`N=0` 只恢复核验，不连接设备和模型；省略参数不限制本轮新增数量。
-`run.json.new_samples` 不含恢复的旧样本；`stop_reason=run_sample_limit` 表示达到本轮上限，
-`stop_reason=quota_complete` 才表示所有任务已达到项目总目标。达到本轮上限属于正常完成。
+每次新运行保存原始 `project.toml` 和 `configuration.json`。
+被引用的历史快照必须有真实 TOML 原文，字节 SHA-256 和解析内容均须匹配；
+只读快照内自报的摘要不足以证明来源。
+工具读取本次原文、明确保存的运行原文及显式 `--project-source` 来源，不补写旧原文。
+旧 identity、数据库行、清单和收据按原明确事实核验，保留其原字节、摘要与来源路径。
+历史项目没有交付声明时，也不据此猜测五件套；新运行仍必须明确声明当前交付规则。
 
-每次 `run` 和 `finalize` 保留独立运行，按同一 `run.output` 根内的递增序号生成
-`001-running`、`001-success` 或 `001-failed` 结果入口。入口的 `run.json.artifacts_directory`
-指向不改名的 `.001` 固定证据目录；候选、收据、数据库及独立验收的来源路径始终引用该目录。
-运行失败也保留已发布进度及原始证据，不清空旧输出；见[运行输出](run-output.md)。
+采集登记中断后，只有原清单、实际字节及唯一来源位置足以证明时才完成原事务。
+未知孤儿目录、缺文件、歧义和摘要不符均拒绝，不因目录存在就补记成功。
+离线导出只接受已经成功登记的样本，不借导出操作修复数据库或追认未完成采集。
+新导出依据持久计划逐项核对，已有冲突文件不会被覆盖；再次执行命令会保留旧结果并取得新编号。
 
-正式 `samples/<capture_id>/` 严格只有 `_tree.json`、`_windows_tree.json`、
-`_windows_akui.json`、`_shot.png`、`_wms.json`；四份 JSON 共享采集标识和画布。
-原始证据、打码收据、用量、查看页不放进这个五文件目录。
-页面编号由目标应用结构签名生成，状态序号在发布事务内分配；文件名及 WMS 内部双树引用一起更新。
-`_tree.json` 包含实际可见系统窗口；两份应用树与 `app_windows` 使用同一组实际可见应用窗口。
-原始双树正文保留在本地证据与五件套 JSON 中；打码作用于截图，查看页仅复制结构属性。
+`run --max-new-samples N` 只限制本轮新增的不同成功采集，跨任务累加，不改任务总目标。
+`N=0` 仅恢复核验，不连接设备和模型。`run.json.new_samples` 不包含旧样本或离线导出；
+`stop_reason=run_sample_limit` 表示本轮上限，只有 `quota_complete` 表示项目任务配额已满足。
+命令失败不抹掉此前已登记的采集；失败原因及实际进度保存在内部 `run.json`。
 
-单轴 `-1` 且另一轴为正的 ArkUI 节点须同时通过完整原生投影与 RS 无绘制叶节点证明。
-原始属性和结构保留，已验证几何可以为正面积但标记 `rendered=false`；不以此放宽裁剪或误差门槛。
-具体接收条件见[单轴负尺寸节点](mixed-dimension-nodes.md)，旧失败采集不会因此被追认为正式成功。
-正式登记前必须通过窗口覆盖、原生 ArkUI 坐标、截图后处理、采集稳定性和最终图片视觉验收。
-截图与树仍为顺序读取，`atomic=false`；前后检查不等于硬件原子快照。
-
-原生坐标采用 `-element`、`-allInfo` 的 `$rect` 和 RenderService 渲染树交叉验证。
-不能证明的变换、裁剪或可见窗口缺树将明确拒收，不填假坐标，也不靠忽略节点凑齐。
-应用 ArkUI 的 `screen_bounds` 是裁剪前的轴对齐组件边界；`clip_chain` 保留矩形及圆角裁剪，
-不表示实际遮挡后的像素区域。离屏渲染节点有明确的 `rendered=false` 证据，非布局节点保留为不适用。
-父级 Surface 与应用根可以具有不同尺寸：映射使用真实父级变换，`rectangular_clip_bounds` 单独记录
-组件边界与实际裁剪链的矩形交集。原始组件尺寸不因此被改写；内层父级和裁剪均须独立核验，
-详见[父级视口与应用根](exact-window-mapping.md#父级视口和应用根尺寸不同)。
-零尺寸容器的无穷大 RS 矩形在完整无绘制子树证据通过后，可以保留其原生零尺寸边界并标记不绘制；
-不删除容器或子节点，不把无穷大值用作屏幕坐标，也不单凭跳过准备状态认定无绘制。
-无绘制节点使用 `render_state_source=RenderService.no_draw_content`，
-`geometry.source.no_draw_render_node_ids` 只保留证明中的挂载节点标识，
-`geometry.source.no_draw_detached_render_node_ids` 单独保存有明确未挂载来源的证明节点。
-两组必须不重叠并完整覆盖已观察的原始及原生零尺寸 Frame，不能把未挂载后代计入挂载子树。
-隐藏节点可能声明逻辑后代而不展开；保留 `declared_child_count` 和 `FrameProxy`，不补造未输出节点，
-详见[非渲染节点](exact-window-mapping.md#非渲染节点)。
-系统窗口保留独立原生双树；当前正式应用 ArkUI 的坐标校验不等于系统树全部节点均已转换坐标。
+旧版本的邮件阅读、打码开关和五文件实机记录保留在
+[README 的历史记录](../README.md#历史五文件实机记录)。
+这些记录不构成当前声明式交付、页面判断规则或所有应用的新一轮实机验收。
