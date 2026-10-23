@@ -108,7 +108,9 @@ async function collectSample(
   const startedAt = new Date().toISOString();
   let sample: any;
   try {
-    await agent.aiAct(taskPrompt(state, remaining), { cacheable: false, abortSignal: state.signal });
+    await agent.aiAct(taskPrompt(state, remaining), {
+      effort: 'deepThink', cacheable: false, abortSignal: state.signal,
+    });
     await state.planningEvidence?.flush();
     state.signal.throwIfAborted();
     sample = await acceptCandidate(state, device, agent, () => ({ started_at: startedAt,

@@ -181,7 +181,10 @@ function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
     state = this.state;
     device = this;
   });
-  t.mock.method(CollectionAgent.prototype, 'aiAct', async (prompt: string) => {
+  t.mock.method(CollectionAgent.prototype, 'aiAct', async (prompt: string, options: any) => {
+    assert.equal(options.effort, 'deepThink');
+    assert.equal(options.cacheable, false);
+    assert.equal(options.abortSignal, state.signal);
     f.events.push('aiAct');
     f.prompts.push(prompt);
     count += 1;

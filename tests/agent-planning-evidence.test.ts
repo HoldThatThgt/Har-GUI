@@ -94,7 +94,7 @@ function deviceIO(t: TestContext, state: RunState, control: { count: number; mis
 /** @brief 使用真实 SDK 和用量封装，仅在公开工厂处返回脚本化客户端。 */
 function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: string,
   answers: string[], modelOverrides: Record<string, string | number>) {
-  const requests: Array<{ hashes: string[]; images: Buffer[]; model: string }> = [];
+  const requests: Array<{ hashes: string[]; images: Buffer[]; model: string; body: any }> = [];
   const usage = new UsageRecorder(join(directory, 'model-usage.jsonl'));
   const factory = evidence.clientFactory(usage.createOpenAIClient);
   const agent = new CollectionAgent(device, { cache: false, generateReport: false,
@@ -110,7 +110,7 @@ function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: st
           .map((part: any) => Buffer.from(part.image_url.url.split(',')[1], 'base64'));
         const content = answers[requests.length];
         assert.equal(typeof content, 'string', 'Unexpected extra model request');
-        requests.push({ images, hashes: images.map(digest), model: body.model });
+        requests.push({ images, hashes: images.map(digest), model: body.model, body });
         return { id: `anonymous-${requests.length}`, object: 'chat.completion', created: 1,
           model: body.model, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
           choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }] };
@@ -408,7 +408,8 @@ test('real independent Locate uses its own protocol while Insight remains the de
 test('SDK failure completion stops before Capture or native input and remains a failed plan in evidence', async (t) => {
   const f = fixture(t, ['<complete success="false">The task stop condition was reached</complete>']);
   await assert.rejects(f.agent.aiAct('Stop with failure if the required path is unavailable.',
-    { cacheable: false, abortSignal: f.state.signal }), /Task failed: The task stop condition was reached/);
+    { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal }),
+  /Task failed: The task stop condition was reached/);
   await f.close();
   assert.equal(f.requests.length, 1);
   assert.deepEqual(f.native, []);
@@ -418,3 +419,72 @@ test('SDK failure completion stops before Capture or native input and remains a 
     && record.status === 'failed'));
   assert.equal(trace.some((record) => ['action_dispatch', 'tool_call'].includes(record.type)), false);
 });
+
+test('deepThink discards a wrong planning point and dispatches independent Locate through task scope', async (t) => {
+  const f = fixture(t, [action('Tap', [900, 900]), '<|point|>[250,500]<|/point|>', COMPLETE]);
+  await f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal });
+  await f.close();
+  assert.deepEqual(f.native, [[80, 120]]);
+  assert.equal(f.requests.length, 3);
+  assert.ok(f.requests.every((request) => request.model === 'anonymous-planning-fixture'));
+  const plan = f.snapshots.flat().find((task) => task.sub_type === 'Plan'
+    && task.status === 'finished' && task.actions?.length);
+  assert.deepEqual(plan.actions[0].param.locate, { prompt: LOCATOR });
+  const trace = readTrace(f.directory);
+  const requests = trace.filter((record) => record.type === 'model_request' && record.status === 'started');
+  assert.deepEqual(requests.map((request) => request.sub_type), ['Plan', 'Locate', 'Plan']);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.source, 'ai');
+  assert.notEqual(locate.locate.hit_by?.from, 'Plan');
+  assert.deepEqual(locate.locate.raw_coordinates, { field: 'point', value: [250, 500] });
+  assert.deepEqual(locate.locate.element.center, [40, 60]);
+  assert.equal(requests[1].task_id, locate.task_id);
+  const dispatch = trace.find((record) => record.type === 'action_dispatch' && record.status === 'native_returned');
+  assert.deepEqual(dispatch.parameters.locate.center, [80, 120]);
+  assert.equal(f.state.revision, 1);
+  assert.equal(f.usage.summary().calls, 3);
+  assert.equal(f.requests[2].images.length, 2);
+});
+
+test('deepThink independent Locate outside application bounds aborts without native input or replanning', async (t) => {
+  const f = fixture(t, [action('Tap', [250, 500]), '<|point|>[900,900]<|/point|>']);
+  t.mock.method(f.device, 'windows', async () => [{ ...structuredClone(TARGET),
+    bounding_box: { x: 0, y: 0, width: 160, height: 240 },
+    screen_bounds: { x: 0, y: 0, width: 160, height: 240 } }]);
+  await assert.rejects(f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal }),
+  /Tap target is outside known application window rectangles/);
+  await f.close();
+  assert.deepEqual(f.native, []);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.state.revision, 0);
+  assert.equal(f.state.signal.aborted, true);
+  const trace = readTrace(f.directory);
+  assert.deepEqual(trace.filter((record) => record.type === 'model_request' && record.status === 'started')
+    .map((record) => record.sub_type), ['Plan', 'Locate']);
+  assert.equal(trace.some((record) => record.type === 'action_dispatch'), false);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.source, 'ai');
+  assert.deepEqual(locate.locate.element.center, [144, 108]);
+});
+
+for (const reasoning of ['false', 'true'] as const) {
+  test(`deepThink preserves explicitly configured DeepSeek thinking=${reasoning} on Plan and Locate`, async (t) => {
+    const f = fixture(t, [action('Tap', [900, 900]), '<|point|>[250,500]<|/point|>', COMPLETE], 'deepseek', {
+      MIDSCENE_MODEL_REASONING_ENABLED: reasoning, MIDSCENE_MODEL_REASONING_EFFORT: 'high',
+    });
+    await f.agent.aiAct('Tap the anonymous control, then finish.',
+      { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal });
+    await f.close();
+    assert.equal(f.requests.length, 3);
+    for (const request of f.requests) {
+      assert.equal(request.body.model, 'anonymous-planning-fixture');
+      assert.deepEqual(request.body.thinking, { type: reasoning === 'true' ? 'enabled' : 'disabled' });
+      assert.equal(request.body.reasoning_effort, 'high');
+      assert.equal(request.body.effort, undefined);
+    }
+  });
+}
