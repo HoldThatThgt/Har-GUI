@@ -93,16 +93,16 @@ function deviceIO(t: TestContext, state: RunState, control: { count: number; mis
 
 /** @brief 使用真实 SDK 和用量封装，仅在公开工厂处返回脚本化客户端。 */
 function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: string,
-  answers: string[], family: string) {
-  const requests: Array<{ hashes: string[]; images: Buffer[] }> = [];
+  answers: string[], modelOverrides: Record<string, string | number>) {
+  const requests: Array<{ hashes: string[]; images: Buffer[]; model: string }> = [];
   const usage = new UsageRecorder(join(directory, 'model-usage.jsonl'));
   const factory = evidence.clientFactory(usage.createOpenAIClient);
   const agent = new CollectionAgent(device, { cache: false, generateReport: false,
     persistExecutionDump: false, autoPrintReportMsg: false, screenshotShrinkFactor: 2,
     waitAfterAction: 0, replanningCycleLimit: 5,
-    modelConfig: { MIDSCENE_MODEL_FAMILY: family, MIDSCENE_MODEL_NAME: 'anonymous-planning-fixture',
+    modelConfig: { MIDSCENE_MODEL_FAMILY: 'deepseek', MIDSCENE_MODEL_NAME: 'anonymous-planning-fixture',
       MIDSCENE_MODEL_API_KEY: API_SECRET, MIDSCENE_MODEL_BASE_URL: 'https://fixture.invalid/v1',
-      MIDSCENE_MODEL_STREAM_MODE: 'non-stream', MIDSCENE_MODEL_RETRY_COUNT: 0 },
+      MIDSCENE_MODEL_STREAM_MODE: 'non-stream', MIDSCENE_MODEL_RETRY_COUNT: 0, ...modelOverrides },
     createOpenAIClient: async (client, options) => {
       const fake = { chat: { completions: { create: async (body: any) => {
         const parts = body.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []);
@@ -110,9 +110,9 @@ function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: st
           .map((part: any) => Buffer.from(part.image_url.url.split(',')[1], 'base64'));
         const content = answers[requests.length];
         assert.equal(typeof content, 'string', 'Unexpected extra model request');
-        requests.push({ images, hashes: images.map(digest) });
+        requests.push({ images, hashes: images.map(digest), model: body.model });
         return { id: `anonymous-${requests.length}`, object: 'chat.completion', created: 1,
-          model: 'anonymous-planning-fixture', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          model: body.model, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
           choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }] };
       } } } };
       return factory(fake as typeof client, { ...options, headers: { Authorization: HEADER_SECRET } } as any);
@@ -121,7 +121,8 @@ function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: st
 }
 
 /** @brief 所有证据与临时文件都位于本测试新建的匿名目录，绝不访问真实采集。 */
-function fixture(t: TestContext, answers: string[], family = 'deepseek') {
+function fixture(t: TestContext, answers: string[], family = 'deepseek',
+  modelOverrides: Record<string, string | number> = {}) {
   const parent = resolve('artifacts/planning-evidence-engine-20261023/tests');
   mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(join(parent, 'anonymous-'));
@@ -137,7 +138,8 @@ function fixture(t: TestContext, answers: string[], family = 'deepseek') {
   const control = { count: 0, missingAfter: false };
   const io = deviceIO(t, state, control);
   io.device.actions = createRegistry(() => io.device).actions(state);
-  const model = sdk(evidence, io.device, directory, answers, family);
+  const model = sdk(evidence, io.device, directory, answers,
+    { MIDSCENE_MODEL_FAMILY: family, ...modelOverrides });
   const snapshots: any[] = [];
   const contexts = new Map<string, { image: Buffer; width: number; height: number; ratio: number }>();
   const originalContext = model.agent.getUIContext.bind(model.agent);
@@ -374,4 +376,45 @@ test('real custom SDK planning preserves pixel evidence and completion without c
   assert.deepEqual(dispatch.parameters.locate.center, [80, 120]);
   assert.equal(dispatch.parameters.locate.prompt, undefined);
   assert.equal(dispatch.parameters.locate.description, undefined);
+});
+
+test('real independent Locate uses its own protocol while Insight remains the default model', async (t) => {
+  const f = fixture(t, [action('Tap', [900, 900]), '{"bbox_2d":[200,400,300,600]}', COMPLETE], 'deepseek', {
+    MIDSCENE_LOCATE_MODEL_NAME: 'anonymous-locate-fixture', MIDSCENE_LOCATE_MODEL_FAMILY: 'qwen3-vl',
+    MIDSCENE_LOCATE_MODEL_API_KEY: API_SECRET, MIDSCENE_LOCATE_MODEL_BASE_URL: 'https://fixture.invalid/v1',
+    MIDSCENE_LOCATE_MODEL_STREAM_MODE: 'non-stream', MIDSCENE_LOCATE_MODEL_RETRY_COUNT: 0,
+  });
+  assert.equal(f.agent.modelConfigManager.getModelConfig('insight').modelFamily, 'deepseek');
+  assert.equal(f.agent.modelConfigManager.getModelConfig('locate').modelFamily, 'qwen3-vl');
+  await f.agent.aiAct('Tap the anonymous control, then finish.', { cacheable: false, abortSignal: f.state.signal });
+  await f.close();
+  assert.deepEqual(f.requests.map((request) => request.model),
+    ['anonymous-planning-fixture', 'anonymous-locate-fixture', 'anonymous-planning-fixture']);
+  assert.deepEqual(f.native, [[80, 120]]);
+  const trace = readTrace(f.directory);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.source, 'ai');
+  assert.notEqual(locate.locate.hit_by?.from, 'Plan');
+  assert.deepEqual(locate.locate.raw_coordinates, { field: 'bbox_2d', value: [200, 400, 300, 600] });
+  assert.equal(locate.locate.prompt_spec.resultKey, 'bbox_2d');
+  assert.deepEqual(locate.locate.element.center, [40, 60]);
+  const request = trace.find((record) => record.type === 'model_request' && record.status === 'started'
+    && record.task_id === locate.task_id);
+  assert.equal(request.model, 'anonymous-locate-fixture');
+  assert.equal(request.sub_type, 'Locate');
+});
+
+test('SDK failure completion stops before Capture or native input and remains a failed plan in evidence', async (t) => {
+  const f = fixture(t, ['<complete success="false">The task stop condition was reached</complete>']);
+  await assert.rejects(f.agent.aiAct('Stop with failure if the required path is unavailable.',
+    { cacheable: false, abortSignal: f.state.signal }), /Task failed: The task stop condition was reached/);
+  await f.close();
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(f.native, []);
+  assert.equal(f.state.candidate, undefined);
+  const trace = readTrace(f.directory);
+  assert.ok(trace.some((record) => record.type === 'sdk_task' && record.sub_type === 'Plan'
+    && record.status === 'failed'));
+  assert.equal(trace.some((record) => ['action_dispatch', 'tool_call'].includes(record.type)), false);
 });

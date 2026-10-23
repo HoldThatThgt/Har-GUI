@@ -101,7 +101,7 @@ export class PlanningEvidence {
   /** @brief 订阅现有 SDK 的公开诊断接口；保持完整报告与原始执行转储关闭。 */
   attach(agent: HarmonyAgent, actionSpace: DeviceAction[]): void {
     this.planningRuntime = getModelRuntime(agent.modelConfigManager.getModelConfig('planning'));
-    this.locateRuntime = getModelRuntime(agent.modelConfigManager.getModelConfig('insight'));
+    this.locateRuntime = getModelRuntime(agent.modelConfigManager.getModelConfig('locate'));
     this.actionSpace = actionSpace;
     agent.addProgressListener((event) => this.progress(event));
     agent.addDumpUpdateListener((_serialized, dump) => {
