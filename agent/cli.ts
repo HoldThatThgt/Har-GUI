@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfiguration, type LoadedConfiguration } from './config.js';
 
-/** @brief 配置 SDK 日志的临时目录，避免额外截图和模型上下文留在项目中。 */
+/** @brief 配置 SDK 临时日志目录，运行后只保留明确摘取的内部导航证据。 */
 function isolateSdk(directory: string): void {
   process.env.MIDSCENE_RUN_DIR = directory;
   delete process.env.MIDSCENE_DEBUG_MODE;

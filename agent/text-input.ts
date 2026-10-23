@@ -1,4 +1,5 @@
 import { getMidsceneLocationSchema } from '@midscene/core/device';
+import type { ExecutorContext } from '@midscene/core';
 import { z } from 'zod';
 import { bridge } from './bridge.js';
 import type { CollectionDevice } from './device.js';
@@ -27,7 +28,7 @@ const receiptSchema = z.object({
 }).strict();
 
 /** @brief 在设备访问前校验输入，并将正文仅经标准输入交给原生文本输入桥接。 */
-async function inputText(parameters: unknown, getDevice: () => CollectionDevice) {
+async function inputText(parameters: unknown, getDevice: () => CollectionDevice, context?: ExecutorContext) {
   const diagnostics: { phase: string; request?: object } = { phase: 'validate_parameters' };
   try {
     const validation = resolvedSchema.safeParse(parameters);
@@ -46,9 +47,11 @@ async function inputText(parameters: unknown, getDevice: () => CollectionDevice)
     assertInputScope('Input', parsed, observation.windows, device.state.task.bundle_names);
     if (!window) throw new Error('Input target is outside known application window rectangles');
     diagnostics.phase = 'native_input';
-    const result = await bridge(device.connection, { operation: 'input_text', x, y, value: parsed.value,
+    const invoke = () => bridge(device.connection, { operation: 'input_text', x, y, value: parsed.value,
       mode: parsed.mode, window_id: window.window_id, bundle_name: window.bundle_name,
       display_id: window.display_id }, device.state.signal);
+    const result = device.state.planningEvidence
+      ? await device.state.planningEvidence.nativeCall('Input', parsed, context, invoke) : await invoke();
     diagnostics.phase = 'verify_receipt';
     const receipt = receiptSchema.parse(result);
     if (receipt.window_id !== window.window_id || receipt.mode !== parsed.mode) {
@@ -77,6 +80,6 @@ export function registerTextInput(registry: ToolRegistry, getDevice: () => Colle
         + 'cancel it with the visible IME control or KeyboardPress Escape when appropriate; '
         + 'observe again before Input.',
       sample: { value: 'test@example.com', locate: { prompt: 'the email input field' } },
-      call: (parameters) => inputText(parameters, getDevice),
+      call: (parameters, context) => inputText(parameters, getDevice, context),
     } });
 }

@@ -42,12 +42,15 @@ export class ToolRegistry {
   private async invoke(tool: RegisteredTool, parameters: any, state: RunState, context?: ExecutorContext) {
     try {
       state.enter(tool.action.name);
+      state.planningEvidence?.toolEvent('invoked', tool.action.name, parameters, context);
+      await state.planningEvidence?.flush();
       const result = tool.resultSchema.parse(await tool.action.call(parameters, context));
       if (tool.mutates) state.revision += 1;
       const feedback = JSON.stringify(result ?? { completed: true });
       if (context) context.task.planningFeedback = feedback;
       state.event('action_finished', { name: tool.action.name,
         parameters: safeActionParameters(tool.action.name, parameters), result });
+      state.planningEvidence?.toolEvent('returned', tool.action.name, parameters, context);
       return result;
     } catch (error) {
       const message = String(error);
@@ -55,6 +58,7 @@ export class ToolRegistry {
       const diagnostics = error instanceof Error && 'diagnostics' in error ? error.diagnostics : undefined;
       state.event('action_failed', { name: tool.action.name, error: message,
         parameters: safeFailedActionParameters(tool.action.name, parameters), diagnostics });
+      state.planningEvidence?.toolEvent('failed', tool.action.name, parameters, context);
       state.controller.abort(new Error(message));
       throw error;
     } finally { state.leave(); }

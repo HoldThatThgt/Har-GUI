@@ -2,6 +2,7 @@ import { appendFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import type { LoadedConfiguration } from './config.js';
+import type { PlanningEvidence } from './planning-evidence.js';
 
 export const windowSchema = z.object({
   window_id: z.number().int(), bundle_name: z.string(), process_id: z.number().int(),
@@ -33,6 +34,8 @@ export class RunState {
   changes: object[] = [];
   accepted: object[] = [];
   observations = new Map<string, Observation>();
+  /** 只在实际导航运行中启用的内部诊断，不属于公开采集交付。 */
+  planningEvidence?: PlanningEvidence;
   signal: AbortSignal;
   controller = new AbortController();
   private busy = false;

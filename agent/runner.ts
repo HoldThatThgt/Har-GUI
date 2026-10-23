@@ -13,6 +13,7 @@ import { withRunOutput } from './run-output.js';
 import { createRegistry } from './tools.js';
 import { exportAccepted } from './export.js';
 import { UsageRecorder, estimateUsageCost, type UsageRates } from './usage.js';
+import { PlanningEvidence } from './planning-evidence.js';
 
 /** @brief 仅约束本轮新增发布数量，不改变项目累计配额。 */
 export interface RunOptions {
@@ -53,11 +54,14 @@ function taskPrompt(state: RunState, remaining: number): string {
     + 'Start from a fresh observation; never reuse coordinates or trees from previous runs.';
 }
 
-/** @brief 初始化 agent，明确关闭 SDK 报告、执行转储与动作缓存。 */
+/** @brief 订阅公开诊断并过滤保存内部证据，关闭完整 SDK 报告、原始转储与动作缓存。 */
 function createAgent(device: CollectionDevice, state: RunState, usage: UsageRecorder): CollectionAgent {
+  const modelConfig = resolveModelConfig(state.config.profile);
+  const evidence = new PlanningEvidence(state);
+  state.planningEvidence = evidence;
   return new CollectionAgent(device, {
-    modelConfig: resolveModelConfig(state.config.profile), generateReport: false,
-    createOpenAIClient: usage.createOpenAIClient,
+    modelConfig, generateReport: false,
+    createOpenAIClient: evidence.clientFactory(usage.createOpenAIClient),
     persistExecutionDump: false, cache: false, autoPrintReportMsg: false,
     replanningCycleLimit: state.config.project.run.max_actions, waitAfterAction: 500,
     onTaskStartTip: () => {
@@ -105,6 +109,7 @@ async function collectSample(
   let sample: any;
   try {
     await agent.aiAct(taskPrompt(state, remaining), { cacheable: false, abortSignal: state.signal });
+    await state.planningEvidence?.flush();
     state.signal.throwIfAborted();
     sample = await acceptCandidate(state, device, agent, () => ({ started_at: startedAt,
       finished_at: new Date().toISOString(), ...usageSnapshot(usage, state.config.profile.pricing, startIndex) }));
@@ -185,7 +190,10 @@ async function collectRemaining(
   await device.connect();
   const agent = createAgent(device, state, usage);
   try { return await collectTasks(state, device, agent, usage, limitReached); }
-  finally { await agent.destroy(); }
+  finally {
+    try { await agent.destroy(); }
+    finally { await state.planningEvidence?.flush(); }
+  }
 }
 
 /** @brief 在固定证据目录使用设备锁执行采集，保留真实配额和失败信息。 */

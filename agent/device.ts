@@ -106,6 +106,7 @@ export class CollectionDevice extends HarmonyDevice {
       this.latestObservation = observation;
       this.state.event('observation', { ...observation, sha256: createHash('sha256').update(bytes).digest('hex') });
       result = `data:image/png;base64,${bytes.toString('base64')}`;
+      await this.state.planningEvidence?.observation(observation, result);
     } catch (error) {
       console.error('Observation failed:', String(error));
       failure = error instanceof Error ? error : new Error(String(error));
@@ -125,6 +126,7 @@ export class CollectionAgent extends HarmonyAgent {
   constructor(device: CollectionDevice, options?: HarmonyAgentOpt) {
     super(device, options);
     this.addProgressListener((event) => this.bindPlanningObservation(event));
+    device.state.planningEvidence?.attach(this, device.actions);
   }
 
   /** @brief 只读取规划事件中的截图标识；缺失绑定立即中止，不能被 SDK 吞错后继续。 */
@@ -168,6 +170,7 @@ export class CollectionAgent extends HarmonyAgent {
     }
     if (device.latestObservation && !device.frozenScreenshot) {
       device.state.observations.set(context.screenshot.id, device.latestObservation);
+      await device.state.planningEvidence?.context(context, device.latestObservation);
     }
     return context;
   }

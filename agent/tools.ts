@@ -34,7 +34,10 @@ function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice
         const observation = await checkWindows(device);
         assertInputScope(name, parameters, observation.windows, device.state.task.bundle_names);
         const native = device.nativeActions().find((action) => action.name === name)!;
-        await native.call(parameters, context);
+        if (device.state.planningEvidence) {
+          await device.state.planningEvidence.nativeCall(name, parameters, context,
+            () => native.call(parameters, context));
+        } else await native.call(parameters, context);
         return { completed: true, resolved_parameters: safeActionParameters(name, parameters) };
       },
     } });

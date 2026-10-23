@@ -27,6 +27,7 @@ dataset.root/
     run.json             详细状态、run_index、artifacts_directory、进度和错误
     events.jsonl
     model-usage.jsonl    有模型调用的运行才产生相应用量记录
+    planning-evidence/   实际导航图片、规划、定位、动作及后继观察
     captures/<capture_id>/
     exports/<capture_id>.json
 ```
@@ -54,6 +55,8 @@ CLI 返回 `001-success` 这样的实际交付目录。外部 `manifest.json` �
 配置、原始采集、候选、验收收据、SQLite 和内部详细状态始终引用稳定的内部位置。
 内部 `run.json` 的 `run_index` 对应本轮序号，`artifacts_directory` 指向自身稳定目录；
 它记录完整进度，不是用户交付文件。`finalize` 的来源也保留内部稳定路径。
+正常 `run` 的导航证据保存在 `artifacts_directory/planning-evidence/`，字段说明见
+[导航证据](planning-evidence.md)。离线导出不生成这类证据，也不将其加入项目声明的交付文件。
 
 成功只表示本次命令正常结束。达到 `run_sample_limit` 时，总配额可能尚未完成。
 采集已经登记、随后导出失败的运行仍显示 `failed`，已采计数不回退；
