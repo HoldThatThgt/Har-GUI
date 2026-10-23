@@ -20,6 +20,8 @@ const INPUT_SECRET = 'PRIVATE_PLANNING_INPUT_BODY';
 const THOUGHT_SECRET = 'PRIVATE_PLANNING_THOUGHT';
 const LOCATOR = 'anonymous editable control';
 const COMPLETE = '<complete success="true">Anonymous offline fixture complete</complete>';
+type FixtureViewport = { width: number; height: number; shrink: number };
+const DEFAULT_VIEWPORT: FixtureViewport = { width: 320, height: 240, shrink: 2 };
 const TARGET: WindowInfo = { window_id: 7, bundle_name: 'app.fixture', process_id: 123,
   display_id: 0, ui_node_id: 70, z_order: 10, window_mode: 102, is_system: false, focused: true,
   bounding_box: { x: 0, y: 0, width: 320, height: 240 },
@@ -35,8 +37,8 @@ function action(name: string, point: [number, number], extra: object = {}) {
 function digest(bytes: Buffer) { return createHash('sha256').update(bytes).digest('hex'); }
 
 /** @brief 只创建匿名 PNG；模拟输入完成后改变画面，避免伪造真实 UI 效果。 */
-async function image(applied: number) {
-  return sharp({ create: { width: 320, height: 240, channels: 3,
+async function image(applied: number, viewport: FixtureViewport) {
+  return sharp({ create: { width: viewport.width, height: viewport.height, channels: 3,
     background: { r: applied * 70, g: 60, b: 120 } } }).png().toBuffer();
 }
 
@@ -68,12 +70,15 @@ function inputBridge(t: TestContext, applied: { count: number }) {
 }
 
 /** @brief 公开设备 I/O 的替身保留真实 CollectionDevice 截图、观察和清理流程。 */
-function deviceIO(t: TestContext, state: RunState, control: { count: number; missingAfter: boolean }) {
+function deviceIO(t: TestContext, state: RunState, control: { count: number; missingAfter: boolean },
+  viewport: FixtureViewport) {
   const native: Array<[number, number]> = [];
   const images: Buffer[] = [];
   const device = new CollectionDevice({ python: 'unused-python', hdc: 'unused-hdc', serial: 'fixture' }, state);
-  t.mock.method(device, 'size', async () => ({ width: 320, height: 240 }));
-  t.mock.method(device, 'windows', async () => [structuredClone(TARGET)]);
+  t.mock.method(device, 'size', async () => ({ width: viewport.width, height: viewport.height }));
+  t.mock.method(device, 'windows', async () => [{ ...structuredClone(TARGET),
+    bounding_box: { x: 0, y: 0, width: viewport.width, height: viewport.height },
+    screen_bounds: { x: 0, y: 0, width: viewport.width, height: viewport.height } }]);
   t.mock.method(device, 'getHdc', async () => ({
     async shell(command: string) {
       if (command.startsWith('rm -f ')) return '';
@@ -82,7 +87,7 @@ function deviceIO(t: TestContext, state: RunState, control: { count: number; mis
       return `ScreenCap saved to ${command.split(' -p ')[1]}`;
     },
     async fileRecv(_remote: string, local: string) {
-      const bytes = await image(control.count);
+      const bytes = await image(control.count, viewport);
       images.push(bytes);
       await writeFile(local, bytes);
     },
@@ -93,16 +98,16 @@ function deviceIO(t: TestContext, state: RunState, control: { count: number; mis
 
 /** @brief 使用真实 SDK 和用量封装，仅在公开工厂处返回脚本化客户端。 */
 function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: string,
-  answers: string[], modelOverrides: Record<string, string | number>) {
+  answers: string[], options: { modelOverrides: Record<string, string | number>; shrink: number }) {
   const requests: Array<{ hashes: string[]; images: Buffer[]; model: string; body: any }> = [];
   const usage = new UsageRecorder(join(directory, 'model-usage.jsonl'));
   const factory = evidence.clientFactory(usage.createOpenAIClient);
   const agent = new CollectionAgent(device, { cache: false, generateReport: false,
-    persistExecutionDump: false, autoPrintReportMsg: false, screenshotShrinkFactor: 2,
+    persistExecutionDump: false, autoPrintReportMsg: false, screenshotShrinkFactor: options.shrink,
     waitAfterAction: 0, replanningCycleLimit: 5,
     modelConfig: { MIDSCENE_MODEL_FAMILY: 'deepseek', MIDSCENE_MODEL_NAME: 'anonymous-planning-fixture',
       MIDSCENE_MODEL_API_KEY: API_SECRET, MIDSCENE_MODEL_BASE_URL: 'https://fixture.invalid/v1',
-      MIDSCENE_MODEL_STREAM_MODE: 'non-stream', MIDSCENE_MODEL_RETRY_COUNT: 0, ...modelOverrides },
+      MIDSCENE_MODEL_STREAM_MODE: 'non-stream', MIDSCENE_MODEL_RETRY_COUNT: 0, ...options.modelOverrides },
     createOpenAIClient: async (client, options) => {
       const fake = { chat: { completions: { create: async (body: any) => {
         const parts = body.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []);
@@ -122,7 +127,7 @@ function sdk(evidence: PlanningEvidence, device: CollectionDevice, directory: st
 
 /** @brief 所有证据与临时文件都位于本测试新建的匿名目录，绝不访问真实采集。 */
 function fixture(t: TestContext, answers: string[], family = 'deepseek',
-  modelOverrides: Record<string, string | number> = {}) {
+  modelOverrides: Record<string, string | number> = {}, viewport: FixtureViewport = DEFAULT_VIEWPORT) {
   const parent = resolve('artifacts/planning-evidence-engine-20261023/tests');
   mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(join(parent, 'anonymous-'));
@@ -136,10 +141,10 @@ function fixture(t: TestContext, answers: string[], family = 'deepseek',
   const evidence = new PlanningEvidence(state);
   state.planningEvidence = evidence;
   const control = { count: 0, missingAfter: false };
-  const io = deviceIO(t, state, control);
+  const io = deviceIO(t, state, control, viewport);
   io.device.actions = createRegistry(() => io.device).actions(state);
   const model = sdk(evidence, io.device, directory, answers,
-    { MIDSCENE_MODEL_FAMILY: family, ...modelOverrides });
+    { modelOverrides: { MIDSCENE_MODEL_FAMILY: family, ...modelOverrides }, shrink: viewport.shrink });
   const snapshots: any[] = [];
   const contexts = new Map<string, { image: Buffer; width: number; height: number; ratio: number }>();
   const originalContext = model.agent.getUIContext.bind(model.agent);
@@ -195,7 +200,8 @@ async function savedImage(directory: string, info: any) {
 
 test('real SDK retains planning image coordinates, direct-hit locate and actual native dispatch', async (t) => {
   const f = fixture(t, [action('Tap', [250, 500]), action('Tap', [750, 250]), COMPLETE]);
-  await f.agent.aiAct('Perform the two anonymous taps, then finish.', { cacheable: false, abortSignal: f.state.signal });
+  await f.agent.aiAct('Perform the two anonymous taps, then finish.',
+    { cacheable: false, abortSignal: f.state.signal });
   await f.close();
   assert.deepEqual(f.native, [[80, 120], [240, 60]]);
   assert.equal(f.requests.length, 3);
@@ -285,14 +291,15 @@ test('real SDK retains planning image coordinates, direct-hit locate and actual 
     assert.ok(!observation.after.some((item: any) => firstPlan.recorder
       .some((planImage: any) => planImage.screenshot_id === item.screenshot_id)));
   }
-  const images = [...trace.filter((record) => ['context', 'observation'].includes(record.type)).map((record) => record.image),
+  const images = [
+    ...trace.filter((record) => ['context', 'observation'].includes(record.type)).map((record) => record.image),
     ...modelRequests.flatMap((request) => request.images.map((item: any) => item.image)),
     ...observed.flatMap((observation) => observation.after.map((item: any) => item.image))];
   for (const info of images) await savedImage(f.directory, info);
   assert.doesNotMatch(readFileSync(join(f.directory, 'planning-evidence', 'trace.jsonl'), 'utf8'), /data:image/);
 });
 
-test('real SDK Input keeps diagnostic locator text without persisting input, thought, key or factory headers', async (t) => {
+test('real SDK Input keeps locator text without persisting input, thought, key or factory headers', async (t) => {
   const f = fixture(t, [action('Input', [250, 500], { value: INPUT_SECRET, mode: 'replace' }), COMPLETE]);
   const requests = inputBridge(t, f.control);
   await f.agent.aiAct('Edit the anonymous field, then finish.', { cacheable: false, abortSignal: f.state.signal });
@@ -357,7 +364,7 @@ test('a swallowed SDK listener persistence failure aborts before native dispatch
   assert.deepEqual(f.native, []);
 });
 
-test('real custom SDK planning preserves pixel evidence and completion without copying derived thought prompts', async (t) => {
+test('real custom SDK preserves pixel evidence and completion without copying derived thought prompts', async (t) => {
   const f = fixture(t, [`Thought: ${THOUGHT_SECRET}\nAction: click(start_box='(250,500)')`,
     `Thought: ${THOUGHT_SECRET}\nAction: finished(content='Anonymous fixture complete')`], 'vlm-ui-tars');
   await f.agent.aiAct('Tap the anonymous control, then finish.', { cacheable: false, abortSignal: f.state.signal });
@@ -485,6 +492,142 @@ for (const reasoning of ['false', 'true'] as const) {
       assert.deepEqual(request.body.thinking, { type: reasoning === 'true' ? 'enabled' : 'disabled' });
       assert.equal(request.body.reasoning_effort, 'high');
       assert.equal(request.body.effort, undefined);
+    }
+  });
+}
+
+// 尺寸取自冻结来源；坐标是匿名测试值，不代表历史模型实际响应。
+for (const scenario of [
+  { shrink: 1, point: [573, 219], element: [1788, 456], logical: [1788, 456] },
+  { shrink: 2, point: [501, 251], element: [782, 261], logical: [1564, 522] },
+]) {
+  test(`deepThink nested point preserves SDK rounding at 3120x2080 shrink=${scenario.shrink}`, async (t) => {
+    const response = `<｜｜point｜｜>${JSON.stringify([scenario.point])}<｜｜/point｜｜>`;
+    const f = fixture(t, [action('Tap', [900, 900]), response, COMPLETE], 'deepseek', {},
+      { width: 3120, height: 2080, shrink: scenario.shrink });
+    await f.agent.aiAct('Tap the anonymous control, then finish.',
+      { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal });
+    await f.close();
+    assert.deepEqual(f.native, [scenario.logical]);
+    assert.equal(f.requests.length, 3);
+    const plan = f.snapshots.flat().find((task) => task.sub_type === 'Plan'
+      && task.status === 'finished' && task.actions?.length);
+    assert.deepEqual(plan.actions[0].param.locate, { prompt: LOCATOR });
+    const trace = readTrace(f.directory);
+    const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+      && record.status === 'finished');
+    assert.equal(locate.locate.source, 'ai');
+    assert.notEqual(locate.locate.hit_by?.from, 'Plan');
+    assert.deepEqual(locate.locate.raw_coordinates, { field: 'point', value: scenario.point });
+    assert.deepEqual(locate.locate.element.center, scenario.element);
+    const requests = trace.filter((record) => record.type === 'model_request' && record.status === 'started');
+    assert.deepEqual(requests.map((record) => record.sub_type), ['Plan', 'Locate', 'Plan']);
+    assert.equal(requests[1].task_id, locate.task_id);
+    const locateImage = requests[1].images[0].image;
+    assert.deepEqual([locateImage.width, locateImage.height], [3120 / scenario.shrink, 2080 / scenario.shrink]);
+    const context = trace.find((record) => record.type === 'context' && record.image.sha256 === locateImage.sha256);
+    assert.equal(context.shrunk_shot_to_logical_ratio, 1 / scenario.shrink);
+    assert.deepEqual(context.shot_size, { width: 3120 / scenario.shrink, height: 2080 / scenario.shrink });
+    const observed = trace.find((record) => record.type === 'observation'
+      && record.observation_id === context.observation_id);
+    assert.deepEqual([observed.image.width, observed.image.height], [3120, 2080]);
+    assert.equal(locateImage.sha256, f.requests[1].hashes[0]);
+    await savedImage(f.directory, locateImage);
+    const dispatch = trace.find((record) => record.type === 'action_dispatch' && record.status === 'native_returned');
+    assert.deepEqual(dispatch.parameters.locate.center, scenario.logical);
+    assert.ok(dispatch.sequence > locate.sequence);
+    assert.equal(trace.some((record) => record.type === 'diagnostic_failure'), false);
+    assert.equal(f.state.revision, 1);
+    if (scenario.shrink === 2) {
+      assert.deepEqual(scenario.logical, [1564, 522]);
+      assert.notDeepEqual(f.native[0], [1563, 522]);
+    }
+  });
+}
+
+test('nested independent Locate outside scope never dispatches or reuses the safe coarse plan point', async (t) => {
+  const f = fixture(t, [action('Tap', [250, 500]), '<｜｜point｜｜>[[900,900]]<｜｜/point｜｜>'],
+    'deepseek', {}, { width: 3120, height: 2080, shrink: 1 });
+  t.mock.method(f.device, 'windows', async () => [{ ...structuredClone(TARGET),
+    bounding_box: { x: 0, y: 0, width: 1560, height: 2080 },
+    screen_bounds: { x: 0, y: 0, width: 1560, height: 2080 } }]);
+  await assert.rejects(f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal }),
+  /Tap target is outside known application window rectangles/);
+  await f.close();
+  assert.deepEqual(f.native, []);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.state.revision, 0);
+  assert.equal(f.state.signal.aborted, true);
+  const trace = readTrace(f.directory);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.source, 'ai');
+  assert.deepEqual(locate.locate.raw_coordinates, { field: 'point', value: [900, 900] });
+  assert.deepEqual(locate.locate.element.center, [2808, 1872]);
+  assert.equal(trace.some((record) => record.type === 'action_dispatch'), false);
+  assert.equal(trace.some((record) => record.type === 'diagnostic_failure'), false);
+  assert.deepEqual(trace.filter((record) => record.type === 'model_request' && record.status === 'started')
+    .map((record) => record.sub_type), ['Plan', 'Locate']);
+});
+
+/** @brief 仅在真实 SDK 的公开转储通知前篡改匿名终态，用于检验诊断失败的完整收尾。 */
+function invalidLocateSnapshot(t: TestContext, f: ReturnType<typeof fixture>, stage: string) {
+  const original = f.agent.writeOutActionDumps.bind(f.agent);
+  const injected: { binding?: Record<string, unknown>; persistedSynchronously?: boolean } = {};
+  t.mock.method(f.agent, 'writeOutActionDumps', (execution: any) => {
+    const task = execution?.tasks.find((item: any) => item.subType === 'Locate' && item.status === 'finished');
+    if (!task || injected.binding) return original(execution);
+    injected.binding = { execution_id: execution.id, task_id: task.taskId, sdk_task_type: task.type,
+      sub_type: task.subType, status: task.status, screenshot_id: task.uiContext?.screenshot.id ?? null };
+    task.param = { prompt: INPUT_SECRET, private_input: THOUGHT_SECRET };
+    task.output.element.description = HEADER_SECRET;
+    task.output.element.prompt = THOUGHT_SECRET;
+    if (stage === 'element_geometry') task.output.element.center = [API_SECRET, 20];
+    if (stage === 'raw_protocol') task.log.dump.taskInfo.rawResponse = `${INPUT_SECRET} ${HEADER_SECRET}`;
+    if (stage === 'raw_coordinates') {
+      task.log.dump.taskInfo.rawResponse = `<｜｜point｜｜>[[1,2],[3,"${INPUT_SECRET}"]]<｜｜/point｜｜>`;
+    }
+    return original(execution);
+  });
+  f.agent.addDumpUpdateListener((_raw, execution) => {
+    if (!injected.binding || !execution?.tasks.some((task) => task.taskId === injected.binding!.task_id
+      && task.status === 'finished')) return;
+    // 同一次 SDK 通知中，后续监听器不等待任何异步写入就应读到失败记录。
+    injected.persistedSynchronously = readTrace(f.directory).some((record) => record.type === 'diagnostic_failure'
+      && record.task_id === injected.binding!.task_id);
+  });
+  return injected;
+}
+
+for (const stage of ['element_geometry', 'raw_protocol', 'raw_coordinates']) {
+  test(`Locate ${stage} failure preserves bounded diagnostic binding and remains fatal`, async (t) => {
+    const f = fixture(t, [action('Tap', [900, 900]), '<｜｜point｜｜>[250,500]<｜｜/point｜｜>']);
+    const injected = invalidLocateSnapshot(t, f, stage);
+    await assert.rejects(f.agent.aiAct('Tap the anonymous control, then finish.',
+      { effort: 'deepThink', cacheable: false, abortSignal: f.state.signal }));
+    await assert.rejects(f.evidence.flush(), /Planning evidence persistence failed/);
+    await assert.rejects(f.close(), /Planning evidence persistence failed/);
+    assert.ok(injected.binding);
+    assert.equal(injected.persistedSynchronously, true);
+    assert.equal(f.state.signal.aborted, true);
+    assert.equal(f.requests.length, 2);
+    assert.deepEqual(f.native, []);
+    const trace = readTrace(f.directory);
+    const failures = trace.filter((record) => record.type === 'diagnostic_failure');
+    assert.equal(failures.length, 1);
+    const failed = failures[0];
+    assert.equal(failed.projection, 'locate');
+    assert.equal(failed.projection_stage, stage);
+    assert.equal(failed.raw_response_available, true);
+    assert.deepEqual(failed.sdk_element, stage === 'element_geometry' ? null : { center: [40, 60] });
+    for (const [key, value] of Object.entries(injected.binding!)) assert.deepEqual(failed[key], value);
+    assert.ok(['element_geometry', 'raw_protocol', 'raw_coordinates'].includes(failed.projection_stage));
+    assert.equal(trace.some((record) => record.type === 'action_dispatch'), false);
+    const text = readFileSync(join(f.directory, 'planning-evidence', 'trace.jsonl'), 'utf8');
+    for (const secret of [API_SECRET, HEADER_SECRET, INPUT_SECRET, THOUGHT_SECRET]) assert.ok(!text.includes(secret));
+    for (const key of ['rawResponse', 'rawAssistantOutput', 'error', 'message', 'stack', 'param', 'output']) {
+      assert.equal(failed[key], undefined);
     }
   });
 }

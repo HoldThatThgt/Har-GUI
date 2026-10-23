@@ -87,6 +87,26 @@ flowchart LR
 SDK 支持未完成目标时报告失败并退出，采集器随后保留失败状态；成功采集仍必须取得候选并通过验收。
 诊断能证明发生了哪些动作、图像是否变化，不能仅凭原生调用返回就认定任务停止条件未触发。
 
+## 独立定位的坐标诊断
+
+定位原文仍由当前模型的 SDK 公开协议解析。SDK 1.16.5 的 DeepSeek 提示会把已有方括号的
+坐标 schema 和示例再包一层数组，产生 `[[x,y]]`；SDK 自身可以解码这种值。
+诊断读取单个数值向量及其单个外层数组，保存其中原始数值，不把外层数组误判为无效坐标。
+多个候选向量、非数值或非有限值仍拒绝，不静默选取第一个候选。
+依据为[固定版本 DeepSeek 定位协议](https://github.com/web-infra-dev/midscene/blob/v1.16.5/packages/core/src/ai-model/models/deepseek/locate-protocol.ts)
+与[SDK 坐标值解析](https://github.com/web-infra-dev/midscene/blob/v1.16.5/packages/core/src/ai-model/shared/model-locate-result/parse.ts)。
+
+诊断不重算或替代 SDK 的点击位置。截图像素结果、SDK 上下文的缩放比例和原生动作参数分别记录；
+缩放及取整顺序继续由 SDK 执行，原有窗口范围检查不变。
+投影失败时同步保存 `diagnostic_failure`，包含 SDK 执行及任务标识、任务状态、截图标识和固定阶段码
+`element_geometry`、`raw_protocol` 或 `raw_coordinates`，随后仍中止运行。
+同时保留 SDK 已返回的有限数值几何和原文是否存在，避免原文提取错误连带丢失已经得到的定位结果。
+该记录不包含模型全文、原始错误消息或业务输入正文；非法几何字段不会作为有效数值保存。
+
+百度运行 `8b89c264-6980-4b50-a43c-2c8a3223946a` 的冻结证据止于首次 Locate 模型请求返回，
+没有终态定位结果或原始回复。实际请求图片与最后上下文图片均为 `3120×2080`，摘要相同，比例为 `1`。
+SDK 双层坐标可以离线复现同一错误，但不能据此补写该历史运行的原始响应或宣称已关闭弹窗。
+
 ## 保存范围与失败
 
 记录由已安装 Midscene 的公开进度、执行快照、模型客户端工厂和图片存储接口产生。

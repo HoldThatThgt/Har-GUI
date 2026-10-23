@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { HarmonyAgent } from '@midscene/harmony';
-import type { AgentProgressEvent, AiActProgressData, DeviceAction, ExecutionDump,
-  ExecutionTask, ExecutorContext, ScreenshotItem, UIContext } from '@midscene/core';
+import { getTaskServiceDump, type AgentProgressEvent, type AiActProgressData, type DeviceAction, type ExecutionDump,
+  type ExecutionTask, type ExecutorContext, type ScreenshotItem, type UIContext } from '@midscene/core';
 import { getModelRuntime, type ModelRuntime } from '@midscene/core/ai-model';
 import { ReportImageStore, parseBase64ImageDataUrl } from '@midscene/core/dump';
 import { imageInfoOfBase64 } from '@midscene/shared/img';
@@ -234,9 +234,23 @@ export class PlanningEvidence {
     const terminal = ['finished', 'failed', 'cancelled'].includes(task.status);
     const plan = terminal && task.type === 'Planning' && task.subType === 'Plan'
       ? projectPlan(task, this.planningRuntime!, this.actionSpace, this.secrets) : null;
-    const locate = terminal && task.subType === 'Locate'
-      ? projectLocate(task, this.locateRuntime!, this.secrets,
-        this.planningRuntime?.adapter.planning.kind === 'standard') : null;
+    let locate = null;
+    if (terminal && task.subType === 'Locate') {
+      try {
+        locate = projectLocate(task, this.locateRuntime!, this.secrets,
+          this.planningRuntime?.adapter.planning.kind === 'standard');
+      } catch (error) {
+        const stage = error instanceof Error ? error.cause : undefined;
+        if (typeof stage === 'string' && ['element_geometry', 'raw_protocol', 'raw_coordinates'].includes(stage)) {
+          this.append(this.record('diagnostic_failure', { projection: 'locate', projection_stage: stage,
+            status: task.status, screenshot_id: task.uiContext?.screenshot.id ?? null,
+            raw_response_available: typeof getTaskServiceDump(task)?.taskInfo.rawResponse === 'string',
+            sdk_element: safeDiagnosticParameters('Tap', { locate: (task.output as any)?.element },
+              this.secrets, false).locate ?? null }, binding));
+        }
+        throw error;
+      }
+    }
     const record = this.record('sdk_task', { status: task.status,
       screenshot_id: task.uiContext?.screenshot.id ?? null, plan, locate }, binding);
     if (task.type === 'Planning' && task.subType === 'Plan' && task.status === 'pending') record.plan_index = null;

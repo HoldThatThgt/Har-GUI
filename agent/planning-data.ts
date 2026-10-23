@@ -286,13 +286,14 @@ function hit(value: unknown, secrets: readonly string[]): Record<string, unknown
   return result;
 }
 
-/** @brief 已由 SDK 提取的坐标值只接受标准 JSON 数值向量，不解析模型标签。 @param value 原始坐标值。
+/** @brief 读取 SDK 协议提取的数值向量及单个向量外层数组，不重写模型标签或像素换算。 @param value 原始坐标值。
  * @return 两个或四个有限数值；其他值为空。
  */
 function coordinates(value: unknown): number[] | null {
   if (value === undefined) return null;
   const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value;
-  const result = vector(parsed, 2) ?? vector(parsed, 4);
+  const values = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed;
+  const result = vector(values, 2) ?? vector(values, 4);
   if (result === null) throw new Error('Invalid raw diagnostic coordinates');
   return result;
 }
@@ -304,6 +305,7 @@ function coordinates(value: unknown): number[] | null {
 export function projectLocate(
   task: ExecutionTask, runtime: ModelRuntime, secrets: readonly string[], preserveDescriptions: boolean,
 ): Record<string, unknown> {
+  let stage = 'element_geometry';
   try {
     const value = object(object(task.output).element);
     validateGeometry(value);
@@ -330,14 +332,16 @@ export function projectLocate(
     if (runtime.adapter.locate.kind !== 'standard') throw new Error('Invalid locate adapter kind');
     const operation = runtime.adapter.locate.element, spec = operation.resultCodec.promptSpec;
     result.prompt_spec = specification(spec, secrets);
+    stage = 'raw_protocol';
     const parsed = operation.protocol.parseRawResponse(raw as string, spec);
     if (parsed.kind === 'located') {
+      stage = 'raw_coordinates';
       const target = coordinates(parsed.target);
       if (target) result.raw_coordinates = { field: text(spec.resultKey, secrets), value: target };
     }
     return result;
   } catch {
-    console.error('Locate diagnostic projection failed');
-    throw new Error('Locate diagnostic projection failed');
+    console.error('Locate diagnostic projection failed:', stage);
+    throw new Error('Locate diagnostic projection failed', { cause: stage });
   }
 }

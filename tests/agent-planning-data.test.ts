@@ -177,6 +177,48 @@ test('ordinary AI locate uses the public response protocol and retains original 
   assert.equal(JSON.stringify(result).includes('rawAssistantOutput'), false);
 });
 
+test('SDK declared wrapped point and bbox values retain their numeric coordinates in diagnostics', () => {
+  for (const [family, values] of [['deepseek', [573, 219]], ['qwen3-vl', [100, 200, 300, 400]]] as const) {
+    const model = runtime(family), adapter = model.adapter.locate;
+    if (adapter.kind !== 'standard') throw new Error('Expected standard adapter');
+    const operation = adapter.element, spec = operation.resultCodec.promptSpec;
+    const raw = family === 'deepseek' ? '<｜｜point｜｜>[[573,219]]<｜｜/point｜｜>'
+      : JSON.stringify({ [spec.resultKey]: [values] });
+    const parsed = operation.protocol.parseRawResponse(raw, spec);
+    assert.equal(parsed.kind, 'located');
+    if (parsed.kind !== 'located') throw new Error('Expected located result');
+    const pixel = operation.resultCodec.toPixelResult(parsed.target, { preparedSize: { width: 3120, height: 2080 } });
+    const task = { taskId: 'wrapped-locate', output: { element: pixel },
+      log: { dump: { type: 'locate', taskInfo: { rawResponse: raw } } } } as unknown as ExecutionTask;
+    assert.deepEqual(projectLocate(task, model, [], true).raw_coordinates, { field: spec.resultKey, value: values });
+    if (family === 'deepseek') {
+      assert.ok(operation.protocol.buildResponseInstructions(spec).includes('[[number, number]]'));
+      assert.deepEqual(pixel.center, [1788, 456]);
+    }
+  }
+});
+
+test('wrapped coordinates in a standard planning response use the same numeric extraction', () => {
+  const model = runtime();
+  const task = planningTask('Tap', { locate: { prompt: 'anonymous control', point: [[573, 219]] } }, model);
+  assert.deepEqual(projectPlan(task, model, [action('Tap')], []).raw_locations,
+    { locate: { prompt: 'anonymous control', point: [573, 219] } });
+});
+
+test('invalid wrapped coordinates retain a bounded failure stage without source text', (t) => {
+  const errors: unknown[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
+  for (const raw of ['[[1,null]]', '[[1,2],[3,4]]', '[[1,2,3]]', `[[1,"${SECRET}"]]`]) {
+    const task = { taskId: 'invalid-wrapped', output: { element: { center: [10, 20] } },
+      log: { dump: { type: 'locate', taskInfo: {
+        rawResponse: `<｜｜point｜｜>${raw}<｜｜/point｜｜>` } } } } as unknown as ExecutionTask;
+    assert.throws(() => projectLocate(task, runtime(), [SECRET], true),
+      { message: 'Locate diagnostic projection failed', cause: 'raw_coordinates' });
+  }
+  assert.equal(JSON.stringify(errors).includes(SECRET), false);
+  assert.ok(errors.every((error: any) => error[1] === 'raw_coordinates'));
+});
+
 test('invalid extracted coordinate JSON is rejected and never recovered from final element pixels', (t) => {
   const errors: unknown[] = [];
   t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
