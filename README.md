@@ -52,6 +52,11 @@ npm run agent -- run --project project.toml --config config.toml `
 更换应用、页面、数量和视觉验收条件只需修改项目任务；省略 `bundle_names` 即可让 agent 发现应用。
 远程模型会接收导航截图和工具反馈；原始组件树只留在本地。
 
+页面和任务要求的变化已满足时，agent 应直接 `Capture`。目标应用不再可见时，使用启用的
+应用查询与 `LaunchApplication` 入口，再以新观察和 `ReadWindows` 核实，不通过系统 Dock 找回。
+`ReadWindows.task_scope` 明确当前范围内的普通窗口与缺席应用；窗口存在不等于页面合格。
+通用规划规则、现有范围保护和离线验证限制见[应用导航](docs/navigation-guidance.md)。
+
 运行证据位于 `run.output`，正式数据位于 `dataset.root`；路径均相对 `project.toml`。
 项目必须声明 `dataset.canvas` 的宽高，每个任务必须声明 `app`、`scene`、`privacy`。
 画布不符时拒收，不拉伸图像。输出结构如下：

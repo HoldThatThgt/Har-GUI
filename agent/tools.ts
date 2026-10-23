@@ -25,6 +25,9 @@ function registerInput(registry: ToolRegistry, getDevice: () => CollectionDevice
     registry.register({ mutates: true, resultSchema: z.object({ completed: z.literal(true),
       resolved_parameters: z.unknown() }), action: {
       ...action,
+      description: action.description + ' For bundle-restricted tasks, stay inside an allowed application window. '
+        + 'Do not minimize or close it unless the task requests this. Do not click system Dock or launcher icons; '
+        + 'use the enabled application query and launch tools when the target application is not visible.',
       call: async (parameters, context) => {
         if (name === 'KeyboardPress') parameters = harmonyKeyboardContract.paramSchema.parse(parameters);
         const device = getDevice();
@@ -54,7 +57,8 @@ function registerApplications(registry: ToolRegistry, getDevice: () => Collectio
   registry.register({ mutates: false, resultSchema: z.object({ bundle_name: z.string(),
     abilities: z.array(z.object({ ability_name: z.string(), module_name: z.string(), launcher: z.boolean() })),
   }), action: {
-    name: 'ReadApplication', description: 'Read declared UI abilities before launching an application. '
+    name: 'ReadApplication', planningFeedbackMaxLength: 16000,
+    description: 'Read declared UI abilities before launching or restoring a non-visible application. '
       + 'Choose the appropriate ability_name explicitly when multiple desktop entries exist.',
     paramSchema: z.object({ bundle_name: z.string() }),
     call: (parameters) => bridge(getDevice().connection,
@@ -62,7 +66,12 @@ function registerApplications(registry: ToolRegistry, getDevice: () => Collectio
   } });
   registry.register({ mutates: true, resultSchema: z.object({ bundle_name: z.string(),
     module_name: z.string(), ability_name: z.string(), launched: z.literal(true) }), action: {
-    name: 'LaunchApplication', description: 'Launch an installed bundle through its declared entry ability.',
+    name: 'LaunchApplication', description: 'Request an installed bundle through its real declared UI entry, '
+      + 'including when its window is no longer visible. ReadApplication, when enabled, provides real entries. '
+      + 'Never use system Dock clicks to restore it. '
+      + 'After launch, inspect a fresh screenshot and verify the window with enabled query tools; '
+      + 'stop if verification is unavailable. '
+      + 'A confirmed launch does not prove that a visible window or the requested page is ready.',
     paramSchema: z.object({ bundle_name: z.string(), ability_name: z.string().optional() }),
     call: (parameters) => {
       const device = getDevice();
@@ -76,14 +85,28 @@ function registerApplications(registry: ToolRegistry, getDevice: () => Collectio
 /** @brief 返回明确的窗口标识与屏幕坐标，而不把整个组件树发送给模型。 */
 function registerWindows(registry: ToolRegistry, getDevice: () => CollectionDevice): void {
   registry.register({ mutates: false,
-    resultSchema: z.object({ observation_id: z.string(), windows: windowSchema.array() }), action: {
+    resultSchema: z.object({ observation_id: z.string(), task_scope: z.object({
+      bundle_names: z.array(z.string()).nullable(), visible_window_ids: z.array(z.number().int()),
+      absent_bundle_names: z.array(z.string()),
+    }), windows: windowSchema.array() }), action: {
       name: 'ReadWindows', description: 'Read current app windows: IDs, bundles, exact physical screen_bounds '
-        + 'and z order. bounding_box contains the original WMS logical geometry; use screen_bounds for screen points.',
+        + 'and z order. task_scope identifies visible ordinary windows within allowed bundles and absent bundles; '
+        + 'it does not judge page readiness. Inspect the page and Capture when it meets the task. '
+        + 'For a non-visible target, use enabled application query and launch tools, never system Dock clicks; '
+        + 'stop if the required navigation tools are unavailable. '
+        + 'bounding_box is original WMS logical geometry; use screen_bounds for screen points.',
       paramSchema: z.object({}), planningFeedbackMaxLength: 20000,
       call: async (_parameters, context) => {
         const device = getDevice();
         const observation = await checkWindows(device);
-        return { observation_id: observation.id, windows: observation.windows };
+        const allowed = device.state.task.bundle_names;
+        const visible = observation.windows.filter((window) => !window.is_system
+          && (!allowed || allowed.includes(window.bundle_name)));
+        return { observation_id: observation.id, task_scope: { bundle_names: allowed ?? null,
+          visible_window_ids: visible.map((window) => window.window_id),
+          absent_bundle_names: allowed?.filter((bundle) => !visible.some((window) =>
+            window.bundle_name === bundle)) ?? [],
+        }, windows: observation.windows };
       },
     } });
   registry.register({ mutates: true, resultSchema: z.object({

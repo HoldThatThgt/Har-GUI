@@ -375,6 +375,12 @@ Midscene 的 `call` 返回值主要用于执行记录，不能假定返回 JSON 
 
 ## Agent 如何自己找页面
 
+当前规划先检查页面是否已满足采集要求，满足时直接 `Capture`，不进行无关的最小化、关闭或窗口变化。
+目标应用缺席时，经已启用的应用查询和真实入口启动，再以新观察和 `ReadWindows` 核实窗口。
+`ReadWindows.task_scope` 提供范围内普通窗口和缺席包名的事实，不判断页面是否合格。
+系统 Dock 不作为受限应用的导航路线；错误仍中止运行。实现与证据边界见
+[应用导航](../navigation-guidance.md)，没有自动恢复、范围豁免或另一套规划循环。
+
 应用清单从实际设备读取，在项目指定范围内匹配目标；未限定包名的任务按描述自主发现目标应用。
 记录实际 bundle name、应用版本和可启动 Ability。
 不得统一假设启动入口叫 `EntryAbility`。[官方 bm 工具](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/tools/bm-tool.md)
