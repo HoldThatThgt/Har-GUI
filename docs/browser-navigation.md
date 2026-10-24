@@ -26,7 +26,8 @@ flowchart TD
 输入通过 [Hypium 官方 Driver 模式](https://pypi.org/project/hypium/6.1.0.210/)接入现有 Python 桥接。
 当前依赖固定为 `hypium==6.1.0.210`、`xdevice==6.0.7.210`、
 `xdevice-ohos==6.1.0.210`、`xdevice-devicetest==6.1.0.210`，由 `requirements.txt` 安装。
-组件粘贴使用官方 `InputTextMode().paste(True)`；带输入模式的接口要求 API level 至少为 20。
+组件输入使用官方 `InputTextMode().paste(False)` 默认选择，并显式设置追加语义；接口要求 API level 至少为 20。
+SDK 对可映射且不超过 200 字节的文本逐键输入，其他文本仍可能使用剪贴板；Har 不强制粘贴，也不重试输入。
 首次准备环境后执行 `python -m hypium telemetry disable`；本次实机验证已关闭该 SDK 的遥测。
 连接使用官方原生代理；每次输入结束关闭驱动连接，临时报告和日志随后清理。
 
@@ -34,8 +35,8 @@ flowchart TD
 | --- | --- |
 | `locate` | 必填；SDK 解析为有限屏幕坐标后，绑定该点最高层普通应用窗口及其唯一焦点输入叶子 |
 | `value` | 必填字符串，不将缺省值解释为清空 |
-| `mode=replace` | 默认；组件粘贴 `addition(False)`，期望完整文本等于 `value` |
-| `mode=append` | 组件粘贴 `addition(True)`，在末尾追加；期望完整文本等于操作前文本加 `value` |
+| `mode=replace` | 默认；组件输入 `addition(False)`，期望完整文本等于 `value` |
+| `mode=append` | 组件输入 `addition(True)`，在末尾追加；期望完整文本等于操作前文本加 `value` |
 | `mode=clear` | 使用官方组件清空接口；`value` 必须显式为空，读回结果也必须为空 |
 | `autoDismissKeyboard` | 默认 `false`；为 `true` 时，仅在匹配验证结果后调用 SDK 关闭键盘 |
 | `verified=true` | 控件已提交文本逐字匹配；返回窗口、模式、字符数和 SHA-256，不返回正文 |

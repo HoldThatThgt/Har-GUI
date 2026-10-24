@@ -1,4 +1,4 @@
-"""@brief 通过官方 Hypium 粘贴文本，并核验原生控件的窗口归属和输入结果。"""
+"""@brief 通过官方 Hypium 输入文本，并核验原生控件的窗口归属和输入结果。"""
 
 import contextlib
 import hashlib
@@ -205,13 +205,13 @@ def expected_text(properties: dict, request: dict, diagnostics: dict) -> str:
 
 
 def perform_input(driver: object, component: object, request: dict, mode_type: object) -> None:
-    """@brief 仅执行原有官方输入调用。 @param driver 驱动。 @param component 已绑定控件。
+    """@brief 使用官方默认输入选择，不强制粘贴，且只调用一次。 @param driver 驱动。 @param component 已绑定控件。
     @param request 请求。 @param mode_type 官方输入模式类型。
     """
     if request["mode"] == "clear":
         driver.clear_text(component)
     else:
-        mode = mode_type().paste(True).addition(request["mode"] == "append")
+        mode = mode_type().paste(False).addition(request["mode"] == "append")
         driver.input_text(component, request["value"], mode=mode)
 
 
@@ -267,7 +267,7 @@ def failure_observations(component: object, request: dict, properties: dict, exp
 
 
 def apply_input(driver: object, selector: object, request: dict, context: dict) -> dict:
-    """@brief 使用官方控件粘贴接口并读回完整文本。 @param driver 官方驱动。
+    """@brief 使用官方控件输入接口并读回完整文本。 @param driver 官方驱动。
     @param selector 焦点选择器。 @param request 请求。 @param context 当前窗口、模式类型和诊断。
     @return 不包含输入正文的验证摘要。
     """

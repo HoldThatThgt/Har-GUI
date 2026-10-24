@@ -1,4 +1,4 @@
-"""验证原生粘贴的范围绑定、模式与完整文本读回。"""
+"""验证原生输入的范围绑定、模式与完整文本读回。"""
 
 import copy
 import contextlib
@@ -116,7 +116,7 @@ class NativeInputTests(unittest.TestCase):
                 if name == "clear":
                     self.driver.clear_text.assert_called_once_with(self.component)
                 else:
-                    self.mode.paste.assert_called_with(True)
+                    self.mode.paste.assert_called_with(False)
                     self.mode.paste.return_value.addition.assert_called_with(name == "append")
 
     def test_partial_or_corrupted_readback_never_records_completion(self):

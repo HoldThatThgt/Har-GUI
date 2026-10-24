@@ -252,7 +252,7 @@ npm run agent -- run --project project.toml --config config.toml `
 | `ListApplications`、`ReadApplication`、`LaunchApplication` | 查询安装包及声明的界面入口；多入口时由 agent 明确选择 |
 | `ReadWindows` | 读取显示器零的 WMS 前台会话、真实包名、窗口边界、进程与层叠顺序 |
 | `Tap`、`DoubleClick`、`Scroll`、`DragAndDrop` | 复用 Midscene 官方 Harmony 输入；项目选择启用 |
-| `Input` | 定位同窗口内的原生输入控件，用官方 Hypium 粘贴或清空，并逐字读回验证 |
+| `Input` | 定位同窗口内的原生输入控件，用官方 Hypium 默认方式输入或清空，并逐字读回验证 |
 | `KeyboardPress` | 用 Midscene Harmony 的受支持单键作用于当前焦点；不支持组合键 |
 | `ToggleWindowSize` | 按系统标题栏中唯一可操作的最大化控件切换大小，并核验实际 WMS 边界；支持普通及兼容窗口按钮 |
 | `MoveWindow` | 按当前系统标题栏的无障碍身份定位拖动点，用官方 `uinput` 鼠标拖动到指定屏幕像素坐标 |
