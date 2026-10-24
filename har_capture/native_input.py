@@ -220,9 +220,50 @@ def compare_text(actual: object, expected: str, before: str, diagnostics: dict) 
     @param before 输入前文本。 @param diagnostics 诊断。
     """
     diagnostics["comparison"].update(actual=text_summary(actual), equal=actual == expected,
-                                     actual_equals_before=actual == before)
+                                     actual_equals_before=actual == before,
+                                     actual_is_expected_prefix=isinstance(actual, str) and bool(actual)
+                                     and actual != expected and expected.startswith(actual))
     if actual != expected:
         fail("Native input text does not exactly match the requested content")
+
+
+def failure_text_summary(value: object, expected: str, diagnostics: dict) -> dict:
+    """@brief 失败后的文本仅保留摘要和与先前值的关系，不据此重新判定成功。
+    @param value 本次读取值。 @param expected 原始预期文本。 @param diagnostics 原始诊断。
+    @return 不含正文的文本比较。
+    """
+    summary = text_summary(value)
+    readable = isinstance(value, str)
+    return {"text": summary, "matches_expected": readable and value == expected,
+            "matches_initial_readback": readable and summary == diagnostics["comparison"]["actual"],
+            "matches_before_input": readable and summary == diagnostics["before"],
+            "is_expected_prefix": readable and bool(value) and value != expected and expected.startswith(value)}
+
+
+def failure_observations(component: object, request: dict, properties: dict, expected: str, diagnostics: dict) -> None:
+    """@brief 写入阶段失败后各读一次属性和文本，保留原失败及同一原生句柄的后续观察。
+    @param component 已选定控件。 @param request 输入请求。 @param properties 原选择属性。
+    @param expected 原始预期文本。 @param diagnostics 原始诊断。
+    """
+    evidence = {"primary_phase": diagnostics["phase"], "properties": {"status": "not_started"},
+                "text": {"status": "not_started"}}
+    diagnostics["failure_observations"] = evidence
+    operations = (("properties", lambda: component.getAllProperties().to_dict()), ("text", component.getText))
+    for name, operation in operations:
+        try:
+            value = trace_call(diagnostics, "failure_" + name, operation)
+            record = {"status": "recorded", "same_component_handle": True}
+            if name == "properties":
+                index = next(item["index"] for item in diagnostics["candidates"] if item.get("selected"))
+                record["component"] = candidate_summary(value, request, (request["x"], request["y"]), index)
+                fields = ("hostWindowId", "displayId", "hierarchy")
+                record["binding_matches_selected"] = all(value.get(key) == properties.get(key) for key in fields)
+                value = value.get("text")
+            record.update(failure_text_summary(value, expected, diagnostics))
+            evidence[name] = record
+        except Exception as error:
+            evidence[name] = {"status": "failed", "error_type": type(error).__name__}
+            LOGGER.error("Native input failure observation failed: %s %s", name, type(error).__name__)
 
 
 def apply_input(driver: object, selector: object, request: dict, context: dict) -> dict:
@@ -237,9 +278,13 @@ def apply_input(driver: object, selector: object, request: dict, context: dict) 
     trace_call(diagnostics, "center_window_check", lambda: verify_component_window(properties, request, context))
     expected = trace_call(diagnostics, "prepare_text", lambda: expected_text(properties, request, diagnostics))
     phase = "clear_text" if request["mode"] == "clear" else "input_text"
-    trace_call(diagnostics, phase, lambda: perform_input(driver, component, request, context["mode_type"]))
-    actual = trace_call(diagnostics, "get_text", component.getText)
-    trace_call(diagnostics, "compare_text", lambda: compare_text(actual, expected, properties["text"], diagnostics))
+    try:
+        trace_call(diagnostics, phase, lambda: perform_input(driver, component, request, context["mode_type"]))
+        actual = trace_call(diagnostics, "get_text", component.getText)
+        trace_call(diagnostics, "compare_text", lambda: compare_text(actual, expected, properties["text"], diagnostics))
+    except Exception:
+        failure_observations(component, request, properties, expected, diagnostics)
+        raise
     diagnostics["input"]["status"] = "verified"
     return {"window_id": context["window"]["window_id"], "mode": request["mode"], "verified": True,
             "character_count": len(actual), "text_sha256": hashlib.sha256(actual.encode("utf-8")).hexdigest()}

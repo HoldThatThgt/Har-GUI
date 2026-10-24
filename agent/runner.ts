@@ -109,7 +109,7 @@ async function collectSample(
   let sample: any;
   try {
     await agent.aiAct(taskPrompt(state, remaining), {
-      effort: 'deepThink', cacheable: false, abortSignal: state.signal,
+      effort: 'deepThink', deepLocate: true, cacheable: false, abortSignal: state.signal,
     });
     await state.planningEvidence?.flush();
     state.signal.throwIfAborted();
@@ -191,10 +191,22 @@ async function collectRemaining(
   device.actions = createRegistry(() => device).actions(state);
   await device.connect();
   const agent = createAgent(device, state, usage);
+  let failed = false;
   try { return await collectTasks(state, device, agent, usage, limitReached); }
+  catch (error) { failed = true; throw error; }
   finally {
-    try { await agent.destroy(); }
-    finally { await state.planningEvidence?.flush(); }
+    let cleanupError: unknown, cleanupFailed = false;
+    for (const [phase, operation] of [
+      ['agent_destroy', () => agent.destroy()], ['evidence_flush', () => state.planningEvidence?.flush()],
+    ] as const) {
+      try { await operation(); }
+      catch (error) {
+        console.error('Collection cleanup failed:', phase, error instanceof Error ? error.name : 'UnknownError');
+        if (!cleanupFailed) cleanupError = error;
+        cleanupFailed = true;
+      }
+    }
+    if (!failed && cleanupFailed) throw cleanupError;
   }
 }
 

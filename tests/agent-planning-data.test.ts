@@ -121,6 +121,7 @@ test('locate projection preserves prompt, plan hit geometry and final element bu
     prompt: 'the Browse button [redacted]', hit_by: { from: 'Plan', locatedPixelResult: {
       center: [1788, 456], rect: { left: 1, top: 2, width: 3, height: 4 } } },
     element: { center: [1788, 456], description: 'Browse [redacted]' }, source: 'plan',
+    search_area: null, search_area_coordinate_space: null, raw_reference: null,
     element_coordinate_space: 'screenshot_pixels', raw_response_available: false,
     raw_coordinates: null, prompt_spec: null });
   const cached = { ...task, hitBy: { from: 'Cache', context: { cacheEntry: { secret: SECRET } } } };
@@ -133,6 +134,7 @@ test('missing hitBy does not invent a locate source and unavailable raw planning
   assert.deepEqual(projectLocate(task, runtime(), [], true), { task_id: 'locate-task', adapter_kind: 'standard',
     prompt: 'the control',
     hit_by: null, element: { center: [1, 2] }, source: null,
+    search_area: null, search_area_coordinate_space: null, raw_reference: null,
     element_coordinate_space: 'screenshot_pixels', raw_response_available: false,
     raw_coordinates: null, prompt_spec: null });
   const result = projectPlan({ taskId: 'plan-task' } as ExecutionTask, runtime(), [action('Tap')], []);
@@ -167,6 +169,7 @@ test('ordinary AI locate uses the public response protocol and retains original 
   const result = projectLocate(task, model, [SECRET], true);
   assert.equal(result.source, 'ai');
   assert.equal(result.raw_response_available, true);
+  assert.equal(result.raw_reference, 'screenshot');
   assert.deepEqual(result.raw_coordinates, { field: 'point', value: [573, 219] });
   assert.deepEqual(result.element, { center: [1788, 456], description: 'Browse' });
   assert.equal(result.prompt, 'Browse [redacted]');
@@ -196,6 +199,76 @@ test('SDK declared wrapped point and bbox values retain their numeric coordinate
       assert.deepEqual(pixel.center, [1788, 456]);
     }
   }
+});
+
+test('deep locate retains the public search area and leaves final SDK coordinates unchanged', () => {
+  const area = { left: 100.7, top: 50.2, width: 200.8, height: 150.9, unknown: SECRET };
+  const task = { taskId: 'deep-locate', searchArea: area, output: { element: { center: [201.2, 125.7] } },
+    log: { dump: { type: 'locate', deepLocate: true, taskInfo: {
+      searchArea: { left: 1, top: 2, width: 3, height: 4 },
+      rawResponse: '<|point|>[500,500]<|/point|>', searchAreaRawResponse: SECRET } } },
+  } as unknown as ExecutionTask;
+  const before = JSON.stringify(task), result = projectLocate(task, runtime(), [SECRET], true);
+  assert.deepEqual(result.search_area, { left: 100.7, top: 50.2, width: 200.8, height: 150.9 });
+  assert.equal(result.search_area_coordinate_space, 'screenshot_pixels');
+  assert.equal(result.raw_reference, 'enlarged_search_area');
+  assert.deepEqual(result.raw_coordinates, { field: 'point', value: [500, 500] });
+  assert.deepEqual(result.element, { center: [201.2, 125.7] });
+  assert.equal(result.element_coordinate_space, 'screenshot_pixels');
+  assert.equal(JSON.stringify(task), before);
+  assert.equal(JSON.stringify(result).includes(SECRET), false);
+  delete task.searchArea;
+  assert.deepEqual(projectLocate(task, runtime(), [], true).search_area,
+    { left: 1, top: 2, width: 3, height: 4 });
+});
+
+test('a failed search-area stage does not invent a final raw response or crop', () => {
+  const task = { taskId: 'search-area-failure', output: { element: null },
+    log: { dump: { type: 'locate', deepLocate: true,
+      taskInfo: { searchAreaRawResponse: SECRET, searchAreaRawChoiceMessage: { content: SECRET } } } },
+  } as unknown as ExecutionTask;
+  const result = projectLocate(task, runtime(), [SECRET], true);
+  assert.equal(result.source, null);
+  assert.equal(result.raw_response_available, false);
+  assert.equal(result.raw_coordinates, null);
+  assert.equal(result.raw_reference, null);
+  assert.equal(result.search_area, null);
+  assert.equal(result.search_area_coordinate_space, null);
+  assert.equal(result.element, null);
+  assert.equal(JSON.stringify(result).includes(SECRET), false);
+});
+
+test('explicit malformed search-area metadata is rejected with a fixed safe stage', (t) => {
+  const errors: unknown[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
+  for (const area of [{}, { left: 0, top: 0, width: 1 },
+    { left: -1, top: 0, width: 2, height: 3 }, { left: 0, top: -1, width: 2, height: 3 },
+    { left: 0, top: 0, width: 0, height: 3 }, { left: 0, top: 0, width: 2, height: -1 },
+    { left: NaN, top: 0, width: 2, height: 3 }, { left: 0, top: 0, width: Infinity, height: 3 },
+    { left: 0, top: 0, width: SECRET, height: 3 }]) {
+    const task = { taskId: 'invalid-search-area', searchArea: area,
+      output: { element: { center: [40, 60] } } } as unknown as ExecutionTask;
+    assert.throws(() => projectLocate(task, runtime(), [SECRET], true),
+      { message: 'Locate diagnostic projection failed', cause: 'search_area_geometry' });
+  }
+  assert.ok(errors.every((value) => JSON.stringify(value)
+    === JSON.stringify(['Locate diagnostic projection failed:', 'search_area_geometry'])));
+  assert.equal(JSON.stringify(errors).includes(SECRET), false);
+});
+
+test('custom locate keeps available search-area evidence without inventing a raw parser', () => {
+  const area = { left: 20, top: 30, width: 100, height: 80 };
+  const task = { taskId: 'custom-search-area', searchArea: area,
+    log: { dump: { type: 'locate', taskInfo: { rawResponse: SECRET } } },
+    output: { element: { center: [40, 60], description: SECRET } },
+  } as unknown as ExecutionTask;
+  const result = projectLocate(task, runtime('auto-glm'), [SECRET], false);
+  assert.deepEqual(result.search_area, area);
+  assert.equal(result.raw_reference, 'enlarged_search_area');
+  assert.equal(result.raw_coordinates, null);
+  assert.equal(result.raw_unavailable_reason, 'public_custom_adapter_has_no_raw_parser');
+  assert.deepEqual(result.element, { center: [40, 60] });
+  assert.equal(JSON.stringify(result).includes(SECRET), false);
 });
 
 test('wrapped coordinates in a standard planning response use the same numeric extraction', () => {

@@ -9,6 +9,7 @@ import { ReportImageStore, parseBase64ImageDataUrl } from '@midscene/core/dump';
 import { imageInfoOfBase64 } from '@midscene/shared/img';
 import type { CreateOpenAIClientFn } from '@midscene/shared/env/types';
 import type { Observation, RunState } from './state.js';
+import type { CollectionDevice } from './device.js';
 import { projectLocate, projectPlan, safeDiagnosticParameters } from './planning-data.js';
 
 /** @brief 来自 SDK 正在执行任务的直接关联，不通过时间或相同坐标推测。 */
@@ -71,6 +72,8 @@ export class PlanningEvidence {
   private readonly secrets: string[];
   private queue = Promise.resolve();
   private failure?: Error;
+  /** 补拍持久化失败可中止执行，但取消原因仍保留已发生的原生输入错误。 */
+  private failureObservationError?: Error;
   private sequence = 0;
   private active = false;
   private invocation?: string;
@@ -84,6 +87,8 @@ export class PlanningEvidence {
   private readonly contexts = new Map<string, { observation_id: string; image: EvidenceImage;
     shot_size: { width: number; height: number }; shrunk_shot_to_logical_ratio: number }>();
   private readonly dispatches = new Set<string>();
+  private readonly modelRequests = new Map<string, Array<{ request_id: string; sequence: number;
+    images: Array<{ message_index: number; content_index: number; image: EvidenceImage }> }>>();
 
   /** @brief 独占创建本轮内部证据目录，凭据只用于过滤字符串且不会写出。 */
   constructor(private readonly state: RunState) {
@@ -115,7 +120,7 @@ export class PlanningEvidence {
     if (this.failure) return;
     console.error('Planning evidence persistence failed:', error instanceof Error ? error.name : 'UnknownError');
     this.failure ??= new Error('Planning evidence persistence failed');
-    this.state.controller.abort(this.failure);
+    this.state.controller.abort(this.failureObservationError ?? this.failure);
   }
 
   /** @brief 串行保存已摘取的证据；后台失败立即中止，收尾仍会等待全部写入。 */
@@ -241,7 +246,8 @@ export class PlanningEvidence {
           this.planningRuntime?.adapter.planning.kind === 'standard');
       } catch (error) {
         const stage = error instanceof Error ? error.cause : undefined;
-        if (typeof stage === 'string' && ['element_geometry', 'raw_protocol', 'raw_coordinates'].includes(stage)) {
+        if (typeof stage === 'string'
+          && ['element_geometry', 'search_area_geometry', 'raw_protocol', 'raw_coordinates'].includes(stage)) {
           this.append(this.record('diagnostic_failure', { projection: 'locate', projection_stage: stage,
             status: task.status, screenshot_id: task.uiContext?.screenshot.id ?? null,
             raw_response_available: typeof getTaskServiceDump(task)?.taskInfo.rawResponse === 'string',
@@ -253,6 +259,9 @@ export class PlanningEvidence {
     }
     const record = this.record('sdk_task', { status: task.status,
       screenshot_id: task.uiContext?.screenshot.id ?? null, plan, locate }, binding);
+    if (locate) {
+      locate.model_requests = [...(this.modelRequests.get(`${binding.execution_id}:${binding.task_id}`) ?? [])];
+    }
     if (task.type === 'Planning' && task.subType === 'Plan' && task.status === 'pending') record.plan_index = null;
     this.enqueue(async () => this.append(record));
     if (terminal && task.type === 'Action Space') this.afterAction(task, binding);
@@ -310,6 +319,47 @@ export class PlanningEvidence {
     }
   }
 
+  /** @brief 原生输入失败后补拍一次只读观察，不使用 SDK 成功路径的 after-calling 语义。
+   * @param device 本次设备。 @param context 原 SDK 任务。 @param phase 原生失败阶段。
+   * @param primaryError 补拍失败时仍保留的原输入错误。
+   */
+  async nativeInputFailureObservation(device: CollectionDevice, context: ExecutorContext | undefined,
+    phase: unknown, primaryError: Error): Promise<void> {
+    if (!this.active || !context || context.task.taskId !== this.currentTask?.task_id) {
+      console.error('Native input failure observation has no matching SDK task');
+      return;
+    }
+    const binding = { ...this.currentTask };
+    const before = device.latestObservation?.id;
+    const started = new Date().toISOString();
+    const fields = { action_status: 'failed',
+      phase: typeof phase === 'string' && ['input_text', 'clear_text', 'get_text', 'compare_text'].includes(phase)
+        ? phase : null, ui_effect: 'not_evaluated', capture_started_at: started };
+    this.failureObservationError = primaryError;
+    try {
+      // 截图自身会进入 observation 队列并等待落盘，必须在本队列外调用。
+      const data = await device.screenshotBase64();
+      const observation = device.latestObservation;
+      if (!observation || observation.id === before) throw new Error('Failure observation is not a fresh capture');
+      const record = this.record('native_input_failure_observation', { ...fields,
+        observation_status: 'recorded', observation_id: observation.id, revision: observation.revision,
+        windows: structuredClone(observation.windows), capture_finished_at: new Date().toISOString() }, binding);
+      await this.enqueue(async () => this.append({ ...record, image: await this.image(data) }));
+      await this.flush();
+    } catch (error) {
+      console.error('Native input failure observation unavailable');
+      try {
+        this.append(this.record('native_input_failure_observation', { ...fields,
+          observation_status: 'unavailable', capture_finished_at: new Date().toISOString(),
+          error_type: error instanceof Error ? error.constructor.name : 'UnknownError' }, binding));
+      } catch {
+        console.error('Native input failure observation could not be persisted');
+      }
+    } finally {
+      this.failureObservationError = undefined;
+    }
+  }
+
   /** @brief 复用公开客户端工厂，只观察实际发出的模型图片，不读取凭据或认证头。 */
   clientFactory(next: CreateOpenAIClientFn): CreateOpenAIClientFn {
     return async (client, options) => {
@@ -340,6 +390,10 @@ export class PlanningEvidence {
       for (const image of images) prepared.push({ message_index: image.message_index,
         content_index: image.content_index, image: await this.image(image.data) });
       this.append({ ...record, images: prepared });
+      const key = `${binding.execution_id}:${binding.task_id}`;
+      const requests = this.modelRequests.get(key) ?? [];
+      requests.push({ request_id: id, sequence: record.sequence, images: prepared });
+      this.modelRequests.set(key, requests);
     });
     await this.flush();
     try {

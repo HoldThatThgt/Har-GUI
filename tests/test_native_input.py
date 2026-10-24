@@ -228,6 +228,140 @@ class NativeInputTests(unittest.TestCase):
         self.assertTrue(all(value is False for value in candidate["filters"].values()))
 
 
+class NativeInputFailureEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        NativeInputTests.setUp(self)
+        self.component.getText.return_value = "v"
+        self.window_read = patch("har_capture.agent_device.read_windows", return_value={"windows": [self.window]})
+        self.window_read.start()
+        self.addCleanup(self.window_read.stop)
+
+    def failed_input(self, message="does not exactly match"):
+        with self.assertRaisesRegex(CaptureError, message) as failure:
+            apply_input(self.driver, Mock(), self.request, self.context)
+        return failure.exception
+
+    def test_later_matching_readback_does_not_accept_or_repeat_the_failed_write(self):
+        self.component.getText.side_effect = ["v", self.request["value"]]
+        self.component.getAllProperties.return_value.to_dict.side_effect = [self.properties,
+            {**self.properties, "text": self.request["value"], "description": "PRIVATE_DESCRIPTION"}]
+        self.failed_input()
+        evidence = self.diagnostics["failure_observations"]
+        self.assertEqual(evidence["primary_phase"], "compare_text")
+        self.assertEqual(self.diagnostics["phase"], "compare_text")
+        self.assertFalse(self.diagnostics["comparison"]["equal"])
+        self.assertFalse(self.diagnostics["comparison"]["actual_is_expected_prefix"])
+        for name in ("properties", "text"):
+            self.assertEqual(evidence[name]["status"], "recorded")
+            self.assertTrue(evidence[name]["matches_expected"])
+            self.assertFalse(evidence[name]["matches_initial_readback"])
+            self.assertTrue(evidence[name]["same_component_handle"])
+        self.assertTrue(evidence["properties"]["binding_matches_selected"])
+        self.assertNotEqual(self.diagnostics["input"]["status"], "verified")
+        self.driver.click.assert_called_once()
+        self.driver.input_text.assert_called_once()
+        self.driver.clear_text.assert_not_called()
+        self.driver.find_all_components.assert_called_once()
+        phases = [item["phase"] for item in self.diagnostics["trace"]]
+        self.assertEqual(phases[-5:], ["input_text", "get_text", "compare_text", "failure_properties", "failure_text"])
+        for item in self.diagnostics["trace"]:
+            self.assertLessEqual(item["started_at"], item["finished_at"])
+        self.assertNotIn(self.request["value"], json.dumps(self.diagnostics))
+        self.assertNotIn("PRIVATE_DESCRIPTION", json.dumps(self.diagnostics))
+
+    def test_unchanged_partial_prefix_is_distinguished_from_arbitrary_short_text(self):
+        partial = "https://example.test/"
+        self.component.getText.return_value = partial
+        self.component.getAllProperties.return_value.to_dict.side_effect = [self.properties,
+            {**self.properties, "text": partial}]
+        self.failed_input()
+        self.assertTrue(self.diagnostics["comparison"]["actual_is_expected_prefix"])
+        for record in self.diagnostics["failure_observations"].values():
+            if isinstance(record, dict):
+                self.assertTrue(record["is_expected_prefix"])
+                self.assertTrue(record["matches_initial_readback"])
+                self.assertFalse(record["matches_expected"])
+                self.assertFalse(record["matches_before_input"])
+        self.assertNotIn(partial, json.dumps(self.diagnostics))
+
+    def test_properties_and_text_observations_fail_independently_without_hiding_primary_error(self):
+        for failed in ("properties", "text", "both"):
+            with self.subTest(failed=failed):
+                self.diagnostics = new_diagnostics(self.request)
+                self.context["diagnostics"] = self.diagnostics
+                second = RuntimeError("PRIVATE_PROPERTY_ERROR") if failed in ("properties", "both") else self.properties
+                self.component.getAllProperties.return_value.to_dict.side_effect = [self.properties, second]
+                final = RuntimeError("PRIVATE_READ_ERROR") if failed in ("text", "both") else "v"
+                self.component.getText.side_effect = ["v", final]
+                with self.assertLogs("har_capture.native_input", level="ERROR") as logs:
+                    error = self.failed_input()
+                evidence = self.diagnostics["failure_observations"]
+                for name in ("properties", "text"):
+                    self.assertEqual(evidence[name]["status"], "failed" if failed in (name, "both") else "recorded")
+                self.assertEqual(self.diagnostics["phase"], "compare_text")
+                self.assertNotIn("PRIVATE", json.dumps(self.diagnostics) + "".join(logs.output) + str(error))
+
+    def test_write_exception_keeps_original_error_and_collects_reads_without_retry(self):
+        primary = RuntimeError("PRIVATE_NATIVE_WRITE_ERROR")
+        self.driver.input_text.side_effect = primary
+        self.component.getText.return_value = self.request["value"]
+        with self.assertRaises(RuntimeError) as caught:
+            apply_input(self.driver, Mock(), self.request, self.context)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(self.diagnostics["phase"], "input_text")
+        self.assertIsNone(self.diagnostics["comparison"]["actual"])
+        self.assertTrue(self.diagnostics["failure_observations"]["text"]["matches_expected"])
+        self.assertFalse(self.diagnostics["failure_observations"]["text"]["matches_initial_readback"])
+        self.driver.input_text.assert_called_once()
+        self.component.getText.assert_called_once()
+        self.assertNotIn("PRIVATE_NATIVE_WRITE_ERROR", json.dumps(self.diagnostics))
+
+    def test_changed_component_binding_is_recorded_without_selecting_or_writing_another_field(self):
+        changed = {**self.properties, "hostWindowId": "101", "hierarchy": "ROOT101,0,0", "focused": "false",
+                   "text": "PRIVATE_AFTER_TEXT", "resourceId": "PRIVATE_RESOURCE"}
+        self.component.getAllProperties.return_value.to_dict.side_effect = [self.properties, changed]
+        self.failed_input()
+        evidence = self.diagnostics["failure_observations"]["properties"]
+        self.assertFalse(evidence["binding_matches_selected"])
+        self.assertFalse(evidence["component"]["filters"]["window"])
+        self.assertFalse(evidence["component"]["filters"]["focused"])
+        self.driver.find_all_components.assert_called_once()
+        self.driver.input_text.assert_called_once()
+        self.assertNotIn("PRIVATE", json.dumps(self.diagnostics))
+
+    def test_unreadable_observation_types_are_summarized_without_false_string_matches(self):
+        self.component.getAllProperties.return_value.to_dict.side_effect = [self.properties,
+            {**self.properties, "text": {"PRIVATE_BODY": "value"}}]
+        self.component.getText.side_effect = [None, ["PRIVATE_BODY"]]
+        self.failed_input()
+        for name in ("properties", "text"):
+            record = self.diagnostics["failure_observations"][name]
+            self.assertIsNone(record["text"]["length"])
+            self.assertIsNone(record["text"]["sha256"])
+            self.assertFalse(record["matches_expected"])
+            self.assertFalse(record["matches_initial_readback"])
+        self.assertNotIn("PRIVATE_BODY", json.dumps(self.diagnostics))
+
+    def test_successful_input_has_no_additional_diagnostic_reads(self):
+        self.component.getText.return_value = self.request["value"]
+        result = apply_input(self.driver, Mock(), self.request, self.context)
+        self.assertTrue(result["verified"])
+        self.assertNotIn("failure_observations", self.diagnostics)
+        self.component.getAllProperties.assert_called_once()
+        self.component.getText.assert_called_once()
+        self.driver.input_text.assert_called_once()
+
+    def test_point_rejection_remains_before_writing_and_does_not_trigger_write_failure_reads(self):
+        self.component.getAllProperties.return_value.to_dict.return_value = {
+            **self.properties, "bounds": {"left": 100, "top": 30, "right": 150, "bottom": 50}}
+        self.failed_input("focused native input leaf")
+        self.assertEqual(self.diagnostics["phase"], "focus_leaf_selection")
+        self.assertNotIn("failure_observations", self.diagnostics)
+        self.component.getAllProperties.assert_called_once()
+        self.component.getText.assert_not_called()
+        self.driver.input_text.assert_not_called()
+
+
 class NativeInputLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.public_logs = io.StringIO()
@@ -386,12 +520,12 @@ class NativeInputLifecycleTests(unittest.TestCase):
         self.assertEqual(diagnostics["input"], {"status": "failed", "error_type": "RuntimeError"})
         self.assertEqual(diagnostics["close"], {"status": "failed", "error_type": "ValueError"})
         self.assertEqual([step["phase"] for step in diagnostics["trace"] if step["status"] == "failed"],
-                         ["get_text", "close", "logging_shutdown", "remove_reports"])
+                         ["get_text", "failure_text", "close", "logging_shutdown", "remove_reports"])
         self.assertNotIn(self.secret, json.dumps(diagnostics) + str(caught.exception))
         self.assertNotIn(self.secret, self.public_logs.getvalue())
         self.assertFalse(any(path.exists() for path in self.reports))
         self.driver.input_text.assert_called_once()
-        self.component.getText.assert_called_once()
+        self.assertEqual(self.component.getText.call_count, 2)
 
     def test_verified_input_and_failed_close_are_reported_as_separate_outcomes(self):
         self.driver.close.side_effect = ValueError(self.secret)

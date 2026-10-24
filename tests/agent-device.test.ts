@@ -131,6 +131,23 @@ test('receive and cleanup failures retain both causes while removing the partial
   assert.equal(f.device.latestObservation, undefined);
 });
 
+test('observation and cleanup logs retain error types without exposing exception text', async (t) => {
+  const f = fixture(t);
+  const logs = t.mock.method(console, 'error', () => {});
+  const receiveError = new TypeError('PRIVATE_SCREEN_CONTENT');
+  const cleanupError = new Error('PRIVATE_CLEANUP_CONTENT');
+  mockHdc(t, f.device, { receiveError, cleanupError });
+  await assert.rejects(f.device.screenshotBase64(), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [receiveError, cleanupError]);
+    return true;
+  });
+  assert.deepEqual(logs.mock.calls.map((call) => call.arguments), [
+    ['Observation failed:', 'TypeError'], ['Observation cleanup failed:', 'Error'],
+  ]);
+  assert.deepEqual(readdirSync(f.directory), []);
+});
+
 test('abort after native capture prevents transfer and still removes temporary files', async (t) => {
   const f = fixture(t);
   mockHdc(t, f.device, { abortAfterCapture: true });

@@ -24,7 +24,10 @@ async function cleanupScreenshot(
   ];
   for (const operation of operations) {
     try { await operation(); }
-    catch (error) { console.error('Observation cleanup failed:', String(error)); errors.push(error); }
+    catch (error) {
+      console.error('Observation cleanup failed:', error instanceof Error ? error.constructor.name : 'UnknownError');
+      errors.push(error);
+    }
   }
   return errors;
 }
@@ -108,7 +111,7 @@ export class CollectionDevice extends HarmonyDevice {
       result = `data:image/png;base64,${bytes.toString('base64')}`;
       await this.state.planningEvidence?.observation(observation, result);
     } catch (error) {
-      console.error('Observation failed:', String(error));
+      console.error('Observation failed:', error instanceof Error ? error.constructor.name : 'UnknownError');
       failure = error instanceof Error ? error : new Error(String(error));
     }
     const cleanupErrors = await cleanupScreenshot(hdc, remote, local, directory);
