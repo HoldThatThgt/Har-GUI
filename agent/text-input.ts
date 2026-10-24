@@ -27,9 +27,27 @@ const receiptSchema = z.object({
   character_count: z.number().int().nonnegative(), text_sha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
+/** @brief 仅为原生写入后的结构化失败补充观察，诊断异常不能替换原输入错误。
+ * @param error 原输入错误。 @param device 本次设备。 @param context 原 SDK 任务上下文。
+ */
+async function observeNativeInputFailure(error: Error, device: CollectionDevice | undefined,
+  context?: ExecutorContext): Promise<void> {
+  const diagnostics = 'diagnostics' in error && error.diagnostics !== null && typeof error.diagnostics === 'object'
+    ? error.diagnostics as Record<string, unknown> : undefined;
+  const observations = diagnostics?.failure_observations;
+  if (!device?.state.planningEvidence || observations === null || typeof observations !== 'object'
+    || Array.isArray(observations)) return;
+  try {
+    await device.state.planningEvidence.nativeInputFailureObservation(device, context, diagnostics?.phase, error);
+  } catch {
+    console.error('Native input failure observation could not be recorded');
+  }
+}
+
 /** @brief 在设备访问前校验输入，并将正文仅经标准输入交给原生文本输入桥接。 */
 async function inputText(parameters: unknown, getDevice: () => CollectionDevice, context?: ExecutorContext) {
   const diagnostics: { phase: string; request?: object } = { phase: 'validate_parameters' };
+  let device: CollectionDevice | undefined;
   try {
     const validation = resolvedSchema.safeParse(parameters);
     if (!validation.success) throw new Error('Input parameters failed validation');
@@ -37,7 +55,7 @@ async function inputText(parameters: unknown, getDevice: () => CollectionDevice,
     const [x, y] = parsed.locate.center.map(Math.round);
     diagnostics.request = { x, y, mode: parsed.mode };
     if (parsed.mode === 'clear' && parsed.value !== '') throw new Error('Clear mode requires an empty value');
-    const device = getDevice();
+    device = getDevice();
     diagnostics.phase = 'read_windows';
     const observation = await checkWindows(device);
     const window = windowAt(parsed.locate, observation.windows);
@@ -47,9 +65,10 @@ async function inputText(parameters: unknown, getDevice: () => CollectionDevice,
     assertInputScope('Input', parsed, observation.windows, device.state.task.bundle_names);
     if (!window) throw new Error('Input target is outside known application window rectangles');
     diagnostics.phase = 'native_input';
-    const invoke = () => bridge(device.connection, { operation: 'input_text', x, y, value: parsed.value,
+    const { connection, state } = device;
+    const invoke = () => bridge(connection, { operation: 'input_text', x, y, value: parsed.value,
       mode: parsed.mode, window_id: window.window_id, bundle_name: window.bundle_name,
-      display_id: window.display_id }, device.state.signal);
+      display_id: window.display_id }, state.signal);
     const result = device.state.planningEvidence
       ? await device.state.planningEvidence.nativeCall('Input', parsed, context, invoke) : await invoke();
     diagnostics.phase = 'verify_receipt';
@@ -62,6 +81,7 @@ async function inputText(parameters: unknown, getDevice: () => CollectionDevice,
     return { ...receipt, resolved_parameters: safeActionParameters('Input', parsed) };
   } catch (error) {
     if (error instanceof Error) {
+      await observeNativeInputFailure(error, device, context);
       const existing = 'diagnostics' in error && typeof error.diagnostics === 'object' ? error.diagnostics : undefined;
       Object.assign(error, { diagnostics: existing ? { ...diagnostics, ...existing } : diagnostics });
     }

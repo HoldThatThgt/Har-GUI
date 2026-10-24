@@ -43,17 +43,19 @@ async function image(applied: number, viewport: FixtureViewport) {
 }
 
 /** @brief 真实 Input 桥接仅连接本地 Node 子进程，不启动 Python、HDC 或 shell。 */
-function inputBridge(t: TestContext, applied: { count: number }) {
+function inputBridge(t: TestContext, applied: { count: number }, failure?: object) {
   const requests: any[] = [];
   const original = childProcess.spawn;
   const script = `let text='';process.stdin.on('data',part=>text+=part);process.stdin.on('end',()=>{
-    const request=JSON.parse(text);const result={window_id:request.window_id,mode:request.mode,verified:true,
+    const request=JSON.parse(text);const failure=JSON.parse(process.argv[1]);
+    if(failure){process.stdout.write(JSON.stringify({error:failure}));process.exitCode=1;return;}
+    const result={window_id:request.window_id,mode:request.mode,verified:true,
       character_count:Array.from(request.value).length,
       text_sha256:require('node:crypto').createHash('sha256').update(request.value).digest('hex')};
     process.stdout.write(JSON.stringify({result}));});`;
   const spawn = t.mock.method(childProcess, 'spawn', (_program: any, args: any, options: any) => {
     assert.equal(basename(String(args[0])), 'agent_device.py');
-    const child = original(process.execPath, ['-e', script], options);
+    const child = original(process.execPath, ['-e', script, JSON.stringify(failure ?? null)], options);
     const end = child.stdin.end.bind(child.stdin);
     t.mock.method(child.stdin, 'end', (bytes: any) => {
       const request = JSON.parse(String(bytes));
@@ -309,6 +311,7 @@ test('real SDK Input keeps locator text without persisting input, thought, key o
   assert.deepEqual([requests[0].x, requests[0].y], [80, 120]);
   assert.equal(f.requests.length, 2);
   const dispatches = readTrace(f.directory).filter((record) => record.type === 'action_dispatch');
+  assert.equal(readTrace(f.directory).filter((record) => record.type === 'native_input_failure_observation').length, 0);
   assert.deepEqual(dispatches.map((record) => record.status), ['invoked', 'native_returned']);
   assert.ok(dispatches.every((record) => record.name === 'Input'));
   assert.deepEqual(dispatches[0].parameters.locate.center, [80, 120]);
@@ -342,6 +345,181 @@ test('native completion without a successor screenshot does not become verified 
   assert.equal(observed.native_invocation_recorded, true);
   assert.equal(observed.ui_effect, 'not_evaluated');
   assert.deepEqual(observed.after, []);
+});
+
+/** @brief 匿名桥接失败保留首次比较阶段，后验组件读数仅作为独立证据。 */
+function inputFailure() {
+  return { message: 'Native input text does not exactly match the requested content', diagnostics: {
+    phase: 'compare_text', failure_observations: { primary_phase: 'compare_text',
+      properties: { status: 'completed', value: { type: 'dict', focused: true, editable: true } },
+      text: { status: 'completed', value: { type: 'str', length: 1, sha256: 'a'.repeat(64) } } } } };
+}
+
+test('real SDK failed Input captures one independent observation before abort without a success record', async (t) => {
+  const f = fixture(t, [action('Input', [250, 500], { value: INPUT_SECRET, mode: 'replace' })]);
+  const requests = inputBridge(t, f.control, inputFailure());
+  const capture = f.device.screenshotBase64.bind(f.device);
+  let failuresObserved = 0;
+  t.mock.method(f.device, 'screenshotBase64', async () => {
+    if (f.control.count) { failuresObserved += 1; assert.equal(f.state.signal.aborted, false); }
+    return capture();
+  });
+  await assert.rejects(f.agent.aiAct('Input anonymous text.', { cacheable: false, abortSignal: f.state.signal }),
+    /Native input text does not exactly match the requested content/);
+  await f.close();
+  assert.equal(requests.length, 1);
+  assert.deepEqual([requests[0].x, requests[0].y], [80, 120]);
+  assert.equal(failuresObserved, 1);
+  assert.equal(f.state.revision, 0);
+  const trace = readTrace(f.directory);
+  const records = trace.filter((record) => record.type === 'native_input_failure_observation');
+  assert.equal(records.length, 1);
+  const recorded = records[0];
+  assert.equal(recorded.phase, 'compare_text');
+  assert.equal(recorded.action_status, 'failed');
+  assert.equal(recorded.ui_effect, 'not_evaluated');
+  assert.equal(recorded.observation_status, 'recorded');
+  const dispatch = trace.find((record) => record.type === 'action_dispatch'
+    && record.status === 'failed_or_interrupted');
+  assert.deepEqual([recorded.task_id, recorded.execution_id], [dispatch.task_id, dispatch.execution_id]);
+  const observed = trace.find((record) => record.type === 'observation'
+    && record.observation_id === recorded.observation_id);
+  assert.deepEqual(recorded.image, observed.image);
+  assert.deepEqual(recorded.windows, observed.windows);
+  assert.ok(Date.parse(recorded.capture_started_at) >= Date.parse(dispatch.time));
+  assert.ok(Date.parse(recorded.capture_finished_at) >= Date.parse(recorded.capture_started_at));
+  assert.equal(digest(await savedImage(f.directory, recorded.image)), digest(f.images.at(-1)!));
+  assert.notEqual(recorded.image.sha256, digest(f.images[0]));
+  const after = trace.find((record) => record.type === 'action_observation' && record.task_id === recorded.task_id);
+  assert.equal(after.action_status, 'failed');
+  assert.deepEqual(after.after, []);
+  assert.equal(after.observation_status, 'unavailable');
+  const task = f.snapshots.at(-1).find((item: any) => item.id === recorded.task_id);
+  assert.equal(task.status, 'failed');
+  assert.ok(!task.recorder?.some((item: any) => item.timing === 'after-calling'));
+  for (const file of ['planning-evidence/trace.jsonl', 'events.jsonl']) {
+    const text = readFileSync(join(f.directory, file), 'utf8');
+    for (const secret of [API_SECRET, HEADER_SECRET, INPUT_SECRET, THOUGHT_SECRET]) assert.ok(!text.includes(secret));
+    assert.ok(!text.includes('data:image/'));
+  }
+});
+
+test('failure observation errors stay safe and do not replace the failed Input', async (t) => {
+  for (const condition of ['screenshot', 'cancelled', 'frozen']) {
+    await t.test(condition, async (child) => {
+      const f = fixture(child, [action('Input', [250, 500], { value: INPUT_SECRET })]);
+      inputBridge(child, f.control, inputFailure());
+      const input = f.device.actions.find((item) => item.name === 'Input')!;
+      const call = input.call.bind(input);
+      let primary: unknown;
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      child.mock.method(input, 'call', async (...args: Parameters<typeof input.call>) => {
+        try { return await call(...args); } catch (error) { primary = error; throw error; } finally { settle(); }
+      });
+      const capture = f.device.screenshotBase64.bind(f.device);
+      let attempts = 0;
+      let beforeCount = 0;
+      child.mock.method(f.device, 'screenshotBase64', async () => {
+        if (f.control.count) {
+          attempts += 1;
+          beforeCount = f.images.length;
+          if (condition === 'screenshot') throw new TypeError(INPUT_SECRET);
+          if (condition === 'cancelled') {
+            f.state.controller.abort(new DOMException('Anonymous cancellation', 'AbortError'));
+          }
+          if (condition === 'frozen') {
+            f.device.frozenScreenshot = `data:image/png;base64,${f.images[0].toString('base64')}`;
+          }
+        }
+        return capture();
+      });
+      await assert.rejects(f.agent.aiAct('Input anonymous text.', { cacheable: false, abortSignal: f.state.signal }),
+        condition === 'cancelled' ? /Anonymous cancellation/ : /does not exactly match/);
+      await settled;
+      assert.equal((primary as Error).message, inputFailure().message);
+      await f.close();
+      assert.equal(attempts, 1);
+      assert.equal(f.images.length, beforeCount);
+      assert.equal(f.state.revision, 0);
+      const records = readTrace(f.directory).filter((record) => record.type === 'native_input_failure_observation');
+      assert.equal(records.length, 1);
+      assert.equal(records[0].observation_status, 'unavailable');
+      assert.equal(records[0].error_type, condition === 'screenshot' ? 'TypeError'
+        : condition === 'cancelled' ? 'DOMException' : 'Error');
+      assert.equal(records[0].image, undefined);
+      assert.equal(records[0].observation_id, undefined);
+      assert.ok(!JSON.stringify(records).includes(INPUT_SECRET));
+      const events = readFileSync(join(f.directory, 'events.jsonl'), 'utf8');
+      assert.ok(!events.includes(INPUT_SECRET));
+      assert.ok(events.includes(inputFailure().message));
+    });
+  }
+});
+
+test('real SDK pre-write Input failure does not capture a native failure observation', async (t) => {
+  const f = fixture(t, [action('Input', [250, 500], { value: INPUT_SECRET })]);
+  const failure = { message: 'Native input target is outside the editable component',
+    diagnostics: { phase: 'find_component' } };
+  const requests = inputBridge(t, f.control, failure);
+  const capture = f.device.screenshotBase64.bind(f.device);
+  let afterFailure = 0;
+  t.mock.method(f.device, 'screenshotBase64', async () => {
+    if (f.control.count) afterFailure += 1;
+    return capture();
+  });
+  await assert.rejects(f.agent.aiAct('Input anonymous text.', { cacheable: false, abortSignal: f.state.signal }),
+    /outside the editable component/);
+  await f.close();
+  assert.equal(requests.length, 1);
+  assert.equal(afterFailure, 0);
+  assert.equal(f.state.revision, 0);
+  assert.equal(readTrace(f.directory).filter((record) => record.type === 'native_input_failure_observation').length, 0);
+});
+
+test('failure observation persistence errors keep the Input error while evidence flush remains fatal', async (t) => {
+  for (const cancelled of [false, true]) {
+    await t.test(`external cancellation: ${cancelled}`, async (child) => {
+      const f = fixture(child, [action('Input', [250, 500], { value: INPUT_SECRET })]);
+      inputBridge(child, f.control, inputFailure());
+      const input = f.device.actions.find((item) => item.name === 'Input')!;
+      const call = input.call.bind(input);
+      let primary: unknown, propagated: unknown;
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      child.mock.method(input, 'call', async (...args: Parameters<typeof input.call>) => {
+        try { return await call(...args); } catch (error) { primary = error; throw error; } finally { settle(); }
+      });
+      const cancellation = new DOMException('Anonymous cancellation', 'AbortError');
+      const store = (f.evidence as any).image.bind(f.evidence);
+      child.mock.method(f.evidence as any, 'image', async (...args: any[]) => {
+        if (f.control.count) {
+          if (cancelled) f.state.controller.abort(cancellation);
+          throw new TypeError(INPUT_SECRET);
+        }
+        return store(...args);
+      });
+      const expected = cancelled ? cancellation.message : inputFailure().message;
+      await assert.rejects(f.agent.aiAct('Input anonymous text.', { cacheable: false, abortSignal: f.state.signal }),
+        (error: unknown) => { propagated = error; return (error as Error).message === expected; });
+      await settled;
+      assert.equal((primary as Error).message, inputFailure().message);
+      assert.equal(propagated, cancelled ? cancellation : primary);
+      assert.equal(f.state.signal.reason, propagated);
+      await assert.rejects(f.close(), /Planning evidence persistence failed/);
+      const observations = readTrace(f.directory)
+        .filter((record) => record.type === 'native_input_failure_observation');
+      assert.equal(observations.length, 1);
+      assert.equal(observations[0].observation_status, 'unavailable');
+      assert.equal(observations[0].image, undefined);
+      assert.equal(observations[0].error_type, 'Error');
+      assert.equal(f.state.revision, 0);
+      const events = readFileSync(join(f.directory, 'events.jsonl'), 'utf8');
+      assert.ok(events.includes(inputFailure().message));
+      assert.ok(!events.includes(INPUT_SECRET));
+      assert.ok(!JSON.stringify(observations).includes(INPUT_SECRET));
+    });
+  }
 });
 
 test('a swallowed SDK listener persistence failure aborts before native dispatch and survives cleanup', async (t) => {

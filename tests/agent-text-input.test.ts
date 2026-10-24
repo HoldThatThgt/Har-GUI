@@ -6,6 +6,7 @@ import { test, type TestContext } from 'node:test';
 import type { ExecutorContext } from '@midscene/core';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { CollectionDevice } from '../agent/device.js';
+import type { PlanningEvidence } from '../agent/planning-evidence.js';
 import { RunState, type WindowInfo } from '../agent/state.js';
 import { createRegistry } from '../agent/tools.js';
 
@@ -225,7 +226,7 @@ test('Input rejects stale exact screen bounds before the text bridge', async (t)
   assert.equal(f.state.revision, 0);
 });
 
-test('failed native Input records exact request scope and safe phases through the nonzero bridge response', async (t) => {
+test('failed native Input records request scope and safe phases through the nonzero bridge response', async (t) => {
   const diagnostics = { request: { x: 10, y: 20, mode: 'replace', window_id: 1,
     bundle_name: 'app.allowed', display_id: 0 }, phase: 'compare_text',
     comparison: { expected: { type: 'str', length: 18, sha256: 'a'.repeat(64) },
@@ -246,4 +247,58 @@ test('failed native Input records exact request scope and safe phases through th
   assert.equal(f.state.revision, 0);
   assert.ok(!JSON.stringify(f.audit.mock.calls).includes('PRIVATE'));
   assert.ok(!JSON.stringify(f.errors.mock.calls).includes('PRIVATE'));
+});
+
+/** @brief 保留真实注册器失败边界，只替换证据落盘以检查补拍调用时机。 */
+function failureEvidence(t: TestContext, state: RunState, observe: (...args: any[]) => Promise<void>) {
+  const observation = t.mock.fn(observe);
+  state.planningEvidence = { flush: async () => {}, toolEvent: () => {},
+    nativeCall: async (_name: string, _parameters: unknown, _context: unknown,
+      invoke: () => Promise<unknown>) => invoke(),
+    nativeInputFailureObservation: observation } as unknown as PlanningEvidence;
+  return observation;
+}
+
+test('structured post-write failures observe once before abort and preserve the primary error', async (t) => {
+  for (const observationFails of [false, true]) {
+    await t.test(`observation rejects: ${observationFails}`, async (child) => {
+      const diagnostics = { phase: 'compare_text', failure_observations: { primary_phase: 'compare_text',
+        properties: { status: 'completed' }, text: { status: 'completed' } } };
+      const f = fixture(child, {}, { message: 'Native input readback mismatch', diagnostics });
+      const context = { task: { taskId: 'original-input' } } as ExecutorContext;
+      const observed = failureEvidence(child, f.state, async (device, binding, phase, primary) => {
+        assert.equal(f.state.signal.aborted, false);
+        assert.equal(device, f.device);
+        assert.equal(binding, context);
+        assert.equal(phase, 'compare_text');
+        assert.equal(primary.message, 'Native input readback mismatch');
+        if (observationFails) throw new Error('PRIVATE_OBSERVATION_ERROR');
+      });
+      await assert.rejects(f.action.call({ value: 'PRIVATE_INPUT', locate: { center: [10, 20] } }, context),
+        (error: any) => error.message === 'Native input readback mismatch'
+          && error.diagnostics.failure_observations.primary_phase === 'compare_text');
+      assert.equal(observed.mock.callCount(), 1);
+      assert.equal(f.state.signal.aborted, true);
+      assert.equal(f.state.revision, 0);
+      assert.equal(f.hide.mock.callCount(), 0);
+      assert.equal(f.requests.length, 1);
+      assert.ok(!JSON.stringify([f.audit.mock.calls, f.errors.mock.calls]).includes('PRIVATE'));
+    });
+  }
+});
+
+test('success and failures without structured post-write observations do not request a screenshot', async (t) => {
+  for (const marker of [undefined, null, [], 'invalid', false, 'success']) {
+    await t.test(String(marker), async (child) => {
+      const failure = marker === 'success' ? undefined : { message: 'Native input component was not selected',
+        diagnostics: { phase: 'find_component', failure_observations: marker } };
+      const f = fixture(child, {}, failure);
+      const observed = failureEvidence(child, f.state, async () => { throw new Error('Unexpected observation'); });
+      const call = f.action.call({ value: 'PRIVATE_INPUT', locate: { center: [10, 20] } });
+      if (failure) await assert.rejects(call, /component was not selected/);
+      else await call;
+      assert.equal(observed.mock.callCount(), 0);
+      assert.equal(f.state.revision, failure ? 0 : 1);
+    });
+  }
 });

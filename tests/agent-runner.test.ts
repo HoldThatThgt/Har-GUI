@@ -19,6 +19,7 @@ process.env.MIDSCENE_RECORD_MODEL_CALL = 'false';
 process.env.HAR_GUI_RUNNER_TEST_KEY = 'local-fixture-key';
 const { run } = await import('../agent/runner.js');
 const { CollectionAgent, CollectionDevice } = await import('../agent/device.js');
+const { PlanningEvidence } = await import('../agent/planning-evidence.js');
 after(() => {
   assert.equal(dirname(sdkDirectory), resolve(tmpdir()));
   assert.ok(basename(sdkDirectory).startsWith('har-gui-runner-sdk-'));
@@ -394,6 +395,51 @@ test('failed visual acceptance does not count a capture as a new publication', a
   assert.equal(summary.new_samples, 0);
   assert.equal(summary.stop_reason, undefined);
   assert.equal(f.plan().publish_attempts, 0);
+});
+
+test('input failure remains the run error when agent destruction and evidence flush also fail', async (t) => {
+  const f = mockRun(t);
+  const primary = new Error('Native input text does not exactly match the requested content');
+  const calls: string[] = [];
+  t.mock.method(CollectionAgent.prototype, 'aiAct', async () => { throw primary; });
+  t.mock.method(CollectionAgent.prototype, 'destroy', async () => {
+    calls.push('destroy'); throw new Error('Fixture destruction failed');
+  });
+  t.mock.method(PlanningEvidence.prototype, 'flush', async () => {
+    calls.push('flush'); throw new Error('Fixture evidence failed');
+  });
+  await assert.rejects(run(f.config, f.connection, { maxNewSamples: 1 }), (error) => error === primary);
+  assert.deepEqual(calls, ['destroy', 'flush']);
+  assert.equal(f.summaries()[0].error, String(primary));
+  assert.equal(f.summaries()[0].new_samples, 0);
+  assert.deepEqual(f.plan().requests.map((request: any) => request.operation), ['dataset_status']);
+});
+
+test('evidence flush failure after an otherwise completed run remains fatal', async (t) => {
+  const f = mockRun(t);
+  const failure = new Error('Fixture final evidence failed');
+  let finalFlush = 0;
+  t.mock.method(PlanningEvidence.prototype, 'flush', async () => {
+    if (f.events.includes('destroy')) { finalFlush += 1; throw failure; }
+  });
+  await assert.rejects(run(f.config, f.connection, { maxNewSamples: 1 }), (error) => error === failure);
+  assert.equal(finalFlush, 1);
+  assert.equal(f.summaries()[0].status, 'failed');
+  assert.equal(f.summaries()[0].error, String(failure));
+  assert.equal(f.summaries()[0].new_samples, 1);
+});
+
+test('agent destruction failure still flushes evidence and remains the first cleanup error', async (t) => {
+  const f = mockRun(t);
+  const failure = new Error('Fixture agent destruction failed');
+  let destroyed = false, finalFlush = 0;
+  t.mock.method(CollectionAgent.prototype, 'destroy', async () => { destroyed = true; throw failure; });
+  t.mock.method(PlanningEvidence.prototype, 'flush', async () => {
+    if (destroyed) { finalFlush += 1; throw new Error('Fixture final evidence failed'); }
+  });
+  await assert.rejects(run(f.config, f.connection, { maxNewSamples: 1 }), (error) => error === failure);
+  assert.equal(finalFlush, 1);
+  assert.equal(f.summaries()[0].error, String(failure));
 });
 
 test('run rejects every invalid API cap before dataset or device access', async (t) => {
