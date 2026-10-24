@@ -137,6 +137,10 @@ def parse_source_node(raw: bytes, source_line: int) -> dict:
     while pending:
         node = pending.pop()
         node["source_line"] += source_line - 1
+        if "canvas_diagnostics" in node:
+            node["canvas_diagnostics"]["source_line"] += source_line - 1
+            for record in node["canvas_diagnostics"]["records"]:
+                record["source_line"] += source_line - 1
         pending.extend(node["children"])
         for block in node.get("embedded_trees", []):
             block["source_line"] += source_line - 1
@@ -160,7 +164,11 @@ def source_path(forest: dict, index: int) -> list[dict]:
     for position in stack[:-1]:
         start = nodes[position]["line_index"]
         end = nodes[position + 1]["line_index"] if position + 1 < len(nodes) else len(lines)
-        path.append(parse_source_node(b"".join(lines[start:end]), start + 1))
+        if nodes[position]["tag"] == b"__Recycle__":
+            raw, selection = node_slice(forest["raw"], lines, nodes, position)
+            path.append(parse_source_node(raw, selection["start_line"]))
+        else:
+            path.append(parse_source_node(b"".join(lines[start:end]), start + 1))
     raw, selection = node_slice(forest["raw"], lines, nodes, index)
     path.append(parse_source_node(raw, selection["start_line"]))
     return path

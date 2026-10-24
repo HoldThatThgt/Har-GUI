@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 
 from har_capture.hdc import fail
-from har_capture.coordinates import node_key, subtree_index, client_render
+from har_capture.coordinates import (raw_node_key, native_node_key, subtree_index,
+                                     client_render, verify_recycle_ownership)
 from har_capture.arkui import parse_arkui, parse_forest, count_arkui_nodes
 from har_capture.metadata import file_info, verify_window_response
 from har_capture.geometry_capture import parse_geometry_response, verify_native_application
@@ -121,10 +122,9 @@ def forest_occurrences(roots: list[dict]) -> dict:
         while pending:
             node, parent = pending.pop()
             attrs = node["attributes"]
-            tag = attrs["type"].split(",", 1)[0].strip()
             if not isinstance(attrs.get("ID"), str) or not re.fullmatch(r"-?\d+", attrs["ID"]):
                 fail(f"ArkUI full source has an invalid node identity at line {node['source_line']}")
-            key = node_key(attrs["ID"], tag, parent)
+            key = raw_node_key(node, parent)
             result.setdefault(key, []).append({"node": node, "parent": parent, "root_line": root["source_line"]})
             pending.extend((child, key) for child in reversed(node["children"]))
     return result
@@ -171,6 +171,12 @@ def verify_selected_parent(key: str, selected: dict, native: dict, parents: dict
     """
     record, parent = selected[key], parents[key]
     attrs = record["node"]["attributes"]
+    if attrs["ID"] == "-1" and native[key]["$type"] == "__Recycle__":
+        header = selected[parent]["node"]["attributes"]["type"] if parent is not None else None
+        try:
+            verify_recycle_ownership(record["node"], native[key], header)
+        except ValueError as error:
+            fail(f"Invalid ArkUI recycle ownership for {key}: {error}")
     if attrs["ID"] == "-1" and native[key]["$type"] == "Image":
         owner = selected[parent]["node"]["attributes"]
         if attrs.get("Parent") != owner["type"] or attrs.get("LastParentId") != owner["ID"]:
@@ -212,9 +218,8 @@ def verify_selected_children(key: str, selected: dict, native: dict, parents: di
     @param native 原生索引。 @param parents 原生父索引。 @return 原生键及独立原文 Overlay 节点。
     """
     raw = selected[key]["node"]
-    raw_keys = [node_key(c["attributes"]["ID"], c["attributes"]["type"].split(",", 1)[0].strip(), key)
-                for c in raw["children"]]
-    native_keys = [node_key(str(c["$ID"]), c["$type"], key) for c in native[key].get("$children", [])]
+    raw_keys = [raw_node_key(child, key) for child in raw["children"]]
+    native_keys = [native_node_key(child, key) for child in native[key].get("$children", [])]
     regular = [child for child in native_keys if selected[child]["parent"] == key]
     if [child for child in raw_keys if child in native] != regular:
         fail(f"ArkUI node {key} has conflicting raw/native child coverage or order")
@@ -244,7 +249,7 @@ def copy_overlay_tree(root: dict, parent: str, root_line: int, native: dict) -> 
         node, owner = pending.pop()
         attrs = node["attributes"]
         tag = attrs["type"].split(",", 1)[0].strip()
-        key = node_key(attrs["ID"], tag, owner)
+        key = raw_node_key(node, owner)
         if key in native:
             fail(f"ArkUI overlay node {key} overlaps an independently selected native occurrence")
         node["source_header"], attrs["type"] = attrs["type"], tag
@@ -283,7 +288,7 @@ def select_native_tree(roots: list[dict], native_root: dict) -> dict:
         output[key]["children"] = [output[child] if isinstance(child, str) else
                                     copy_overlay_tree(child, key, selected[key]["root_line"], native)
                                     for child in child_keys[key]]
-    root_key = node_key(str(native_root["$ID"]), native_root["$type"], None)
+    root_key = native_node_key(native_root, None)
     for key, rows in forest_occurrences([output[root_key]]).items():
         if len(rows) != 1:
             fail(f"Selected ArkUI window contains duplicate node identity {key}")

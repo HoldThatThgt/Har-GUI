@@ -1,11 +1,16 @@
 """@brief 解析 ArkUI 原始文本组件树，保留节点属性和原始属性文本。"""
 
+import math
 import re
+from datetime import datetime
 
 from har_capture.hdc import fail
 
 NODE_HEADER = re.compile(r"^(?P<indent> *)\|-> (?P<tag>\S(?:.*?\S)?) childSize:(?P<count>\d+)\s*$")
 NODE_MARKER = re.compile(r"^[ \t]*\|->")
+CANVAS_DRAW_RECORD = re.compile(
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) Canvas Size: "
+    r"\[(?P<width>-?\d+\.\d{6}), (?P<height>-?\d+\.\d{6})\], Command Size: (?P<commands>\d+);", re.ASCII)
 
 
 def create_node(match: re.Match, line_number: int) -> dict:
@@ -34,6 +39,46 @@ def property_content(line: str) -> str:
     """@brief 移除本层属性包装，不移除远端组件树自己的层级。 @param line 本层文本。 @return 属性正文。"""
     content = line.strip()
     return content[1:].lstrip() if content.startswith("|") else content
+
+
+def canvas_draw_record(content: str, line_number: int) -> dict:
+    """@brief 只解析官方 Canvas 绘制历史格式，不把绘制时间或命令尺寸当作节点属性。
+    @param content 无包装的完整记录。 @param line_number 原文全局行号。 @return 绘制诊断记录。
+    """
+    match = CANVAS_DRAW_RECORD.fullmatch(content)
+    if match is None:
+        fail(f"Invalid Canvas drawing diagnostic at line {line_number}")
+    try:
+        datetime.strptime(match["timestamp"], "%Y-%m-%d %H:%M:%S.%f")
+        width, height = float(match["width"]), float(match["height"])
+        commands = int(match["commands"])
+    except (ValueError, OverflowError):
+        fail(f"Invalid Canvas drawing diagnostic values at line {line_number}")
+    if not math.isfinite(width) or not math.isfinite(height):
+        fail(f"Non-finite Canvas drawing diagnostic size at line {line_number}")
+    return {"source_line": line_number, "timestamp": match["timestamp"],
+            "canvas_size": {"width": width, "height": height}, "command_size": commands}
+
+
+def canvas_diagnostics(lines: list[tuple[str, str, int]], start: int) -> tuple[dict, int]:
+    """@brief 按唯一标题和完整连续记录保存 Canvas 历史块；空块对应官方已消费历史。
+    @param lines 当前节点原文、解析视图及全局行号。 @param start 标题位置。 @return 诊断块及后续位置。
+    """
+    prefix = lines[start][1].split("DrawCmdInfo:", 1)[0]
+    records, end = [], start + 1
+    while end < len(lines):
+        _, view, line_number = lines[end]
+        content = property_content(view)
+        if not (re.match(r"^\d{4}-", content) or content.startswith(("Canvas Size:", "Command Size:"))):
+            break
+        if not view.startswith(prefix):
+            fail(f"Invalid Canvas drawing diagnostic prefix at line {line_number}")
+        records.append(canvas_draw_record(view[len(prefix):].rstrip("\r\n"), line_number))
+        if len(records) > 10:
+            fail(f"Canvas drawing diagnostics exceed the official history limit at line {line_number}")
+        end += 1
+    return {"source_line": lines[start][2], "raw": "".join(row[0] for row in lines[start:end]),
+            "records": records}, end
 
 
 def embedded_end(lines: list[tuple[str, str, int]], start: int, prefix: str) -> int:
@@ -93,6 +138,12 @@ def finish_node(node: dict, lines: list[tuple[str, str, int]], prefix: str) -> N
     index = 0
     while index < len(lines):
         content = property_content(lines[index][1])
+        if content == "DrawCmdInfo:" and node["attributes"]["type"].split(",", 1)[0].strip() == "Canvas":
+            if "canvas_diagnostics" in node:
+                fail(f"Duplicate Canvas drawing diagnostic marker at line {lines[index][2]}")
+            block, index = canvas_diagnostics(lines, index)
+            node["canvas_diagnostics"] = block
+            continue
         if content == "UI Extension info:":
             block, index = embedded_tree(lines, index, prefix)
             node.setdefault("embedded_trees", []).append(block)

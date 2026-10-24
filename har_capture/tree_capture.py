@@ -6,7 +6,7 @@ from pathlib import Path
 
 from har_capture.arkui import count_arkui_nodes, parse_arkui, parse_forest
 from har_capture.arkui_selection import select_system_tree, select_native_tree
-from har_capture.geometry_capture import collect_window_geometry
+from har_capture.geometry_capture import dump_window_geometry, receive_window_geometry
 from har_capture.hdc import Hdc, fail
 from har_capture.metadata import count_nodes, artifact_info, verify_window_response
 from har_capture.sessions import parse_sessions
@@ -42,7 +42,7 @@ def save_full_arkui_tree(stage: Path, raw_path: Path, geometry: dict) -> dict:
 
 
 def collect_arkui(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
-    """@brief 按窗口顺序导出组件树，避免同进程文件相互覆盖。 @param hdc 连接。
+    """@brief 连续完成应用原文和原生转储后再接收，减少两次来源之间的主机等待。 @param hdc 连接。
     @param stage 采集目录。 @param remote 本次设备临时文件。 @param window 窗口记录。 @return 树元数据。
     """
     window_id = window["window_id"]
@@ -54,13 +54,14 @@ def collect_arkui(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
     output = hdc.run(["shell", command], f"dump_arkui_{window_id}")
     if "HAR_CAPTURE_DUMP_READY" not in output.splitlines():
         fail(f"ArkUI command did not produce a response for window {window_id}")
+    geometry_path = dump_window_geometry(hdc, remote, window)
     response = stage / "arkui" / f"window-{window_id}-response.txt"
     hdc.receive(path, response, f"receive_arkui_response_{window_id}")
     raw = response.read_bytes()
     verify_window_response(raw.decode("utf-8"), window)
     destination = stage / "arkui" / f"window-{window_id}.txt"
     destination.write_bytes(raw)
-    geometry = collect_window_geometry(hdc, stage, remote, window)
+    geometry = receive_window_geometry(hdc, stage, geometry_path, window)
     files = save_full_arkui_tree(stage, destination, geometry)
     return {**files, "origin": {"kind": "stdout"}, "response": artifact_info(stage, response),
             "source": "WindowManagerService.-default.-all"}

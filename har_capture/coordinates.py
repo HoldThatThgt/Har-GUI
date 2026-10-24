@@ -86,13 +86,62 @@ def native_rect(value: str) -> dict:
     return {"x": left, "y": top, "width": right - left, "height": bottom - top}
 
 
-def node_key(node_id: str, tag: str, parent_id: str | None) -> str:
+def node_key(node_id: str, tag: str, parent_id: str | None, children: list) -> str:
     """@brief 为官方未分配标识的回收容器及动画图片建立父域身份。 @param node_id 原生标识。
-    @param tag 原生类型。 @param parent_id 父身份。 @return 唯一关联键。
+    @param tag 原生类型。 @param parent_id 父身份。 @param children 已观察直接子节点的类型和标识。
+    @return 唯一关联键，回收容器同时使用完整有序子节点身份。
     """
-    if node_id == "-1" and tag in {"__Recycle__", "Image"}:
-        return str(parent_id) + "/" + tag
+    if node_id == "-1" and tag == "__Recycle__":
+        if any(not isinstance(child_tag, str) or not child_tag or not re.fullmatch(r"\d+", child_id)
+               for child_tag, child_id in children):
+            logging.error("ArkUI recycle identity requires allocated direct child identities")
+            raise ValueError("unverified_recycle_child_identity")
+        anchor = ",".join(child_tag + ":" + child_id for child_tag, child_id in children)
+        return str(parent_id) + "/__Recycle__" + ("[" + anchor + "]" if children else "")
+    if node_id == "-1" and tag == "Image":
+        return str(parent_id) + "/Image"
     return node_id
+
+
+def raw_node_key(node: dict, parent_id: str | None) -> str:
+    """@brief 从完整原文节点构造身份，官方明确排除的 Overlay 不充当原生子节点锚点。
+    @param node 原始组件。 @param parent_id 实际父身份。 @return 关联键，原始字段不变。
+    """
+    attrs = node["attributes"]
+    tag = attrs["type"].split(",", 1)[0].strip()
+    if str(attrs["ID"]) != "-1" or tag != "__Recycle__":
+        return node_key(str(attrs["ID"]), tag, parent_id, [])
+    children = [(child["attributes"]["type"].split(",", 1)[0].strip(), str(child["attributes"]["ID"]))
+                for child in node["children"] if child["attributes"].get("Description") != "OverlayNode"]
+    return node_key(str(attrs["ID"]), tag, parent_id, children)
+
+
+def native_node_key(node: dict, parent_id: str | None) -> str:
+    """@brief 从未过滤的原生直接子节点构造身份，不按遍历序号区分同父回收容器。
+    @param node 原生组件。 @param parent_id 实际父身份。 @return 双树共同使用的关联键。
+    """
+    if str(node["$ID"]) != "-1" or node["$type"] != "__Recycle__":
+        return node_key(str(node["$ID"]), node["$type"], parent_id, [])
+    children = [(child["$type"], str(child["$ID"])) for child in node.get("$children", [])]
+    return node_key(str(node["$ID"]), node["$type"], parent_id, children)
+
+
+def verify_recycle_ownership(node: dict, native: dict, parent_header: str | None) -> None:
+    """@brief 双树锚点还须核对完整父标题，不靠相同子标识重新绑定回收对象。
+    @param node 完整原文容器。 @param native 对应原生记录。 @param parent_header 实际原文父标题。
+    """
+    attrs = node["attributes"]
+    if str(attrs["ID"]) != "-1" or attrs["type"].split(",", 1)[0].strip() != "__Recycle__":
+        return
+    if attrs.get("Parent") != parent_header or "FrameRect" in attrs or "$rect" in native:
+        logging.error("ArkUI recycle ownership conflicts with its raw/native parent or layout kind")
+        raise ValueError("recycle_parent_or_layout_mismatch")
+    header = node.get("source_header", attrs["type"])
+    for child in node["children"]:
+        if (child["attributes"].get("Description") != "OverlayNode"
+                and child["attributes"].get("Parent") != header):
+            logging.error("ArkUI recycle child has conflicting parent evidence")
+            raise ValueError("recycle_child_parent_mismatch")
 
 
 def frame_key(node: dict) -> str:
@@ -107,7 +156,7 @@ def frame_key(node: dict) -> str:
     if node_id == "-1" and tag == "Image" and not re.fullmatch(
             r"ImageAnimator," + re.escape(parent) + r",-?\d+", attrs.get("Parent", "")):
         raise ValueError("undefined_image_parent_identity_mismatch")
-    return node_key(node_id, tag, parent)
+    return node_key(node_id, tag, parent, [])
 
 
 def subtree_index(root: dict) -> tuple[dict, dict]:
@@ -119,7 +168,7 @@ def subtree_index(root: dict) -> tuple[dict, dict]:
         if (str(node["$ID"]) == "-1" and node["$type"] == "Image"
                 and (parent_id not in nodes or nodes[parent_id]["$type"] != "ImageAnimator")):
             raise ValueError("undefined_image_parent_type_mismatch")
-        node_id = node_key(str(node["$ID"]), node["$type"], parent_id)
+        node_id = native_node_key(node, parent_id)
         if node_id in nodes:
             raise ValueError("duplicate_native_geometry_id")
         nodes[node_id], parents[node_id] = node, parent_id
@@ -420,10 +469,11 @@ def local_projection(node: dict, parent: tuple) -> tuple:
     scale = list(map(number, attrs.get("scale(x,y)", "1,1").split(",")))
     translate = list(map(number, attrs.get("translate(x,y)", "0,0").split(",")))
     pivot = list(map(number, re.findall(NUMBER, attrs.get("Center", "x:0.5 y:0.5"))))
-    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2 or any(value == 0 for value in scale):
+    if len(scale) != 2 or len(translate) != 2 or len(pivot) != 2:
         raise ValueError("invalid_local_axis_transform")
     verify_raw_spatial_transform(node, (width, height))
     rotation = number(attrs.get("Rotation", "0"))
+    # 前向投影不求逆；有限零缩放须保留塌缩矩阵，并继续投影所有后代。
     local = affine.local({"x": x, "y": y, "width": width, "height": height}, scale, translate, pivot, rotation)
     matrix = affine.compose(parent[0], local)
     magnitude = max(*(abs(value) for value in parent[0][:4]), *(abs(value) for value in matrix[:4]), 1)
@@ -446,18 +496,20 @@ def verify_raw_spatial_transform(node: dict, size: tuple) -> None:
 
 def scene_projection(node: dict, native: tuple, parent: tuple) -> tuple:
     """@brief 按完整原生身份和父关系验证一层场景投影。 @param node 原始场景节点。
-    @param native 原生节点及父索引。 @param parent 父标识和仿射变换。 @return 标识、变换及可选矩形。
+    @param native 原生节点及父索引。 @param parent 父标识、仿射变换和完整原文父标题。
+    @return 标识、变换及可选矩形。
     """
     nodes, parents = native
-    parent_id, projection = parent
+    parent_id, projection, parent_header = parent
     attrs = node["attributes"]
     tag = attrs["type"].split(",", 1)[0]
-    node_id = node_key(str(attrs["ID"]), tag, parent_id)
+    node_id = raw_node_key(node, parent_id)
     actual = nodes.get(node_id)
     if actual is None or actual["$type"] != tag or parents[node_id] != parent_id:
         raise ValueError("scene_native_identity_or_parent_mismatch:" + node_id)
     if attrs.get("compid") and actual.get("compid") != attrs["compid"]:
         raise ValueError("scene_native_component_mismatch:" + node_id)
+    verify_recycle_ownership(node, actual, parent_header)
     if "FrameRect" not in attrs:
         if "$rect" in actual:
             raise ValueError("scene_frame_geometry_missing:" + node_id)
@@ -478,7 +530,7 @@ def scene_records(scene: dict) -> dict:
     @param scene 本批已核验来源。 @return 原生索引、轴变换和渲染关联。
     """
     native = subtree_index(scene["native"])
-    parent = (None, IDENTITY_PROJECTION)
+    parent = (None, IDENTITY_PROJECTION, None)
     records, rectangles, matrices = {}, {}, {}
     path = scene["path"]
     for node in path[:-1]:
@@ -490,7 +542,7 @@ def scene_records(scene: dict) -> dict:
             records[link["id"]] = (node, projection)
             rectangles[link["id"]] = rect
             matrices[link["id"]] = projection[0]
-        parent = (node_id, projection)
+        parent = (node_id, projection, node["attributes"]["type"])
     session_parent = parent[1]
     pending = [(path[-1], parent)]
     while pending:
@@ -503,7 +555,7 @@ def scene_records(scene: dict) -> dict:
             records[link["id"]] = (node, projection)
             rectangles[link["id"]] = rect
             matrices[link["id"]] = projection[0]
-        pending.extend((child, (node_id, projection)) for child in node["children"])
+        pending.extend((child, (node_id, projection, node["attributes"]["type"])) for child in node["children"])
     return {"native": native[0], "parents": native[1], "nodes": records,
             "rectangles": rectangles, "matrices": matrices,
             "parent_projection": session_parent}
@@ -1083,11 +1135,12 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
     @param mapping 屏幕映射。 @return 节点关联、原生窗口投影和渲染矩形。
     """
     links, rectangles, projections, matrices, overlays, frames = {}, {}, {}, {}, set(), {}
-    pending = [(raw, mapping["projection"], False, None, None)]
+    pending = [(raw, mapping["projection"], False, None, None, None)]
     while pending:
-        node, projection, overlay, parent_key, parent_id = pending.pop()
+        node, projection, overlay, parent_key, parent_id, parent_header = pending.pop()
         attrs = node["attributes"]
-        node_id = node_key(str(attrs.get("ID")), attrs["type"].split(",", 1)[0].strip(), parent_key)
+        node_id = raw_node_key(node, parent_key)
+        verify_recycle_ownership(node, native.get(node_id, {}), parent_header)
         overlay = overlay or attrs.get("Description") == "OverlayNode"
         if overlay and "FrameRect" in attrs and attrs.get("LastParentId") != parent_id:
             raise ValueError("overlay_parent_evidence_mismatch:" + node_id)
@@ -1107,11 +1160,11 @@ def source_nodes(raw: dict, native: dict, mapping: dict) -> dict:
                     raise ValueError("native_geometry_frame_missing:" + node_id)
                 overlays.add(node_id)
             projections[node_id] = rect
-        pending.extend((child, projection, overlay, node_id, attrs["ID"]) for child in node["children"])
+        pending.extend((child, projection, overlay, node_id, attrs["ID"], node.get("source_header", attrs["type"]))
+                       for child in node["children"])
         if "FrameRect" not in attrs:
             continue
-        link = client_render(node)
-        links[node_id] = link
+        link = links[node_id] = client_render(node)
         if link["id"] in rectangles:
             raise ValueError("ambiguous_render_geometry_mapping")
         matrix = (projection[0] if mapping["coordinate_space"] == "scene"
@@ -1730,7 +1783,7 @@ def normalize_nodes(root: dict, context: dict) -> tuple[list, dict]:
         node, parent_id, inherited, projection = pending.pop()
         attrs, clips = node["attributes"], inherited
         try:
-            node_id = node_key(str(attrs.get("ID")), attrs["type"].split(",", 1)[0], parent_id)
+            node_id = raw_node_key(node, parent_id)
             native = context["native"].get(node_id)
             overlay = node_id in context["overlays"]
             if not overlay and (native is None or native.get("$type") != attrs["type"].split(",", 1)[0]):

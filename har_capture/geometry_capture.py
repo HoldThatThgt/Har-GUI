@@ -38,9 +38,9 @@ def verify_native_application(root: dict, window: dict) -> None:
         fail(f"ArkUI application identity differs from window {window['window_id']}")
 
 
-def receive_geometry_response(hdc: Hdc, stage: Path, remote: dict, window: dict) -> Path:
-    """@brief 接收官方原生几何响应。 @param hdc 连接。 @param stage 目录。
-    @param remote 临时文件登记。 @param window 窗口。 @return 响应路径。
+def dump_window_geometry(hdc: Hdc, remote: dict, window: dict) -> str:
+    """@brief 在设备生成并登记原生几何响应，暂不接收。 @param hdc 连接。
+    @param remote 临时文件登记。 @param window 窗口。 @return 设备响应路径。
     """
     window_id = window["window_id"]
     path = remote["layout"] + f"-geometry-{window_id}.txt"
@@ -51,16 +51,15 @@ def receive_geometry_response(hdc: Hdc, stage: Path, remote: dict, window: dict)
     output = hdc.run(["shell", command], f"geometry_{window_id}")
     if "HAR_CAPTURE_GEOMETRY_READY" not in output.splitlines():
         fail(f"ArkUI geometry command did not produce a response for window {window_id}")
-    destination = stage / "arkui" / f"window-{window_id}-geometry-response.txt"
-    hdc.receive(path, destination, f"receive_geometry_{window_id}")
-    return destination
+    return path
 
 
-def collect_window_geometry(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
-    """@brief 保存单次原生几何及实际请求窗口。 @param hdc 连接。 @param stage 目录。
-    @param remote 临时文件登记。 @param window 窗口。 @return 文件摘要和来源。
+def receive_window_geometry(hdc: Hdc, stage: Path, path: str, window: dict) -> dict:
+    """@brief 接收已生成的原生响应并核验、保存几何。 @param hdc 连接。 @param stage 目录。
+    @param path 设备响应路径。 @param window 窗口。 @return 文件摘要和来源。
     """
-    response = receive_geometry_response(hdc, stage, remote, window)
+    response = stage / "arkui" / f"window-{window['window_id']}-geometry-response.txt"
+    hdc.receive(path, response, f"receive_geometry_{window['window_id']}")
     text = response.read_bytes().decode("utf-8")
     verify_window_response(text, window)
     geometry = parse_geometry_response(text)
@@ -69,6 +68,14 @@ def collect_window_geometry(hdc: Hdc, stage: Path, remote: dict, window: dict) -
     path.write_text(json.dumps(geometry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"arkui_geometry": artifact_info(stage, path), "response": artifact_info(stage, response),
             "source_window_id": window["window_id"], "process_id": window["process_id"]}
+
+
+def collect_window_geometry(hdc: Hdc, stage: Path, remote: dict, window: dict) -> dict:
+    """@brief 顺序转储并接收单窗口原生几何。 @param hdc 连接。 @param stage 目录。
+    @param remote 临时文件登记。 @param window 窗口。 @return 文件摘要和来源。
+    """
+    path = dump_window_geometry(hdc, remote, window)
+    return receive_window_geometry(hdc, stage, path, window)
 
 
 def collect_render_evidence(hdc: Hdc, stage: Path, remote: dict) -> dict:

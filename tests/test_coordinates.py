@@ -154,11 +154,11 @@ class CoordinateTests(unittest.TestCase):
         args[3]["arkui_geometry"]["$children"][0]["$children"][0]["$rect"] = "[16,10],[36,40]"
         self.assert_failed(args, "native_geometry_local_projection_mismatch")
 
-    def test_zero_scale_remains_unsupported(self):
+    def test_zero_scale_requires_matching_native_geometry(self):
         for scale in ("0,1", "1,-0", "-1,0"):
             args = fixture()
             args[0]["children"][0]["children"][0]["attributes"]["scale(x,y)"] = scale
-            self.assert_failed(args, "invalid_local_axis_transform")
+            self.assert_failed(args, "native_geometry_local_projection_mismatch")
 
     def test_native_ancestor_envelope_conflicting_with_reflection_is_rejected(self):
         args = fixture()
@@ -284,6 +284,7 @@ class CoordinateTests(unittest.TestCase):
         for node_id in (3, 4):
             raw = {"attributes": {"ID": str(node_id), "type": "IfElse"}, "raw": "", "children": [
                 {"attributes": {"ID": "-1", "type": "__Recycle__"}, "raw": "", "children": []}]}
+            raw["children"][0]["attributes"]["Parent"] = raw["attributes"]["type"]
             native = {"$ID": node_id, "$type": "IfElse", "$children": [{"$ID": -1, "$type": "__Recycle__"}]}
             args[0]["children"].append(raw)
             args[3]["arkui_geometry"]["$children"].append(native)

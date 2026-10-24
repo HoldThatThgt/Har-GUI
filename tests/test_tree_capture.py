@@ -77,7 +77,7 @@ class TreeCaptureTests(unittest.TestCase):
         hdc = fake_hdc()
         evidence = self.collect_component_tree(hdc)
         self.assertEqual([record["name"] for record in hdc.records],
-                         ["dump_arkui_92", "receive_arkui_response_92", "geometry_92", "receive_geometry_92"])
+                         ["dump_arkui_92", "geometry_92", "receive_arkui_response_92", "receive_geometry_92"])
         commands = "\n".join(str(record.get("command", [])) for record in hdc.records)
         self.assertIn("-w 92 -default -all", commands)
         self.assertIn("-w 92 -allInfoWithParamConfig", commands)
@@ -97,7 +97,7 @@ class TreeCaptureTests(unittest.TestCase):
         with self.assertLogs(level="ERROR"), self.assertRaises(CaptureError):
             self.collect_component_tree(hdc)
         self.assertEqual([record["name"] for record in hdc.records],
-                         ["dump_arkui_92", "receive_arkui_response_92", "geometry_92", "receive_geometry_92"])
+                         ["dump_arkui_92", "geometry_92", "receive_arkui_response_92", "receive_geometry_92"])
         self.assertFalse((self.stage / "arkui/window-92.json").exists())
 
     def test_native_source_missing_a_real_raw_child_cannot_publish_a_window_tree(self):
