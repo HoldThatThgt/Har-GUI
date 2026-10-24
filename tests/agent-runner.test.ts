@@ -184,6 +184,7 @@ function mockAgent(t: TestContext, f: ReturnType<typeof fixture>): void {
   });
   t.mock.method(CollectionAgent.prototype, 'aiAct', async (prompt: string, options: any) => {
     assert.equal(options.effort, 'deepThink');
+    assert.equal(options.deepLocate, true);
     assert.equal(options.cacheable, false);
     assert.equal(options.abortSignal, state.signal);
     f.events.push('aiAct');

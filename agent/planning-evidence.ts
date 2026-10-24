@@ -87,6 +87,8 @@ export class PlanningEvidence {
   private readonly contexts = new Map<string, { observation_id: string; image: EvidenceImage;
     shot_size: { width: number; height: number }; shrunk_shot_to_logical_ratio: number }>();
   private readonly dispatches = new Set<string>();
+  private readonly modelRequests = new Map<string, Array<{ request_id: string; sequence: number;
+    images: Array<{ message_index: number; content_index: number; image: EvidenceImage }> }>>();
 
   /** @brief 独占创建本轮内部证据目录，凭据只用于过滤字符串且不会写出。 */
   constructor(private readonly state: RunState) {
@@ -244,7 +246,8 @@ export class PlanningEvidence {
           this.planningRuntime?.adapter.planning.kind === 'standard');
       } catch (error) {
         const stage = error instanceof Error ? error.cause : undefined;
-        if (typeof stage === 'string' && ['element_geometry', 'raw_protocol', 'raw_coordinates'].includes(stage)) {
+        if (typeof stage === 'string'
+          && ['element_geometry', 'search_area_geometry', 'raw_protocol', 'raw_coordinates'].includes(stage)) {
           this.append(this.record('diagnostic_failure', { projection: 'locate', projection_stage: stage,
             status: task.status, screenshot_id: task.uiContext?.screenshot.id ?? null,
             raw_response_available: typeof getTaskServiceDump(task)?.taskInfo.rawResponse === 'string',
@@ -256,6 +259,9 @@ export class PlanningEvidence {
     }
     const record = this.record('sdk_task', { status: task.status,
       screenshot_id: task.uiContext?.screenshot.id ?? null, plan, locate }, binding);
+    if (locate) {
+      locate.model_requests = [...(this.modelRequests.get(`${binding.execution_id}:${binding.task_id}`) ?? [])];
+    }
     if (task.type === 'Planning' && task.subType === 'Plan' && task.status === 'pending') record.plan_index = null;
     this.enqueue(async () => this.append(record));
     if (terminal && task.type === 'Action Space') this.afterAction(task, binding);
@@ -384,6 +390,10 @@ export class PlanningEvidence {
       for (const image of images) prepared.push({ message_index: image.message_index,
         content_index: image.content_index, image: await this.image(image.data) });
       this.append({ ...record, images: prepared });
+      const key = `${binding.execution_id}:${binding.task_id}`;
+      const requests = this.modelRequests.get(key) ?? [];
+      requests.push({ request_id: id, sequence: record.sequence, images: prepared });
+      this.modelRequests.set(key, requests);
     });
     await this.flush();
     try {

@@ -35,7 +35,7 @@ flowchart LR
 | `context` | SDK 截图标识、图片尺寸、`shot_size` 和 `shrunk_shot_to_logical_ratio` |
 | `model_request` | 实际发出请求中的图片顺序、原始编码、尺寸及 SHA-256，直接关联正在执行的 SDK 任务 |
 | `sdk_task` 的 `plan` | 标准协议解析出的动作、原始坐标及协议声明；不保存原始模型正文 |
-| `sdk_task` 的 `locate` | 最终定位结果、定位描述及 `hit_by`，区分规划直接命中与额外模型定位 |
+| `sdk_task` 的 `locate` | SDK 最终定位、`hit_by`、截图搜索区域和同任务实际请求图片引用 |
 | `tool_call` | SDK 已转换到设备逻辑像素的注册工具参数和状态版本 |
 | `action_dispatch` | 实际调用原生动作时传入的参数、调用开始及返回状态 |
 | `action_observation` | 同一动作任务的后继截图，缺失时明确标记 `unavailable` |
@@ -57,14 +57,17 @@ flowchart LR
 
 ## 规划与独立定位
 
-当前采集从每次 `aiAct` 开始固定使用 Midscene 1.16.5 的 `effort="deepThink"`。
-标准规划器只提供目标描述，独立 `Locate` 请求在截图中定位，再经过原有窗口与任务范围检查后派发动作。
+当前采集从每次 `aiAct` 开始固定使用 Midscene 1.16.5 的 `effort="deepThink"` 和 `deepLocate=true`。
+标准规划器只提供目标描述。当前 DeepSeek 的独立 `Locate` 先从原图确定搜索区域，
+再从放大的区域裁图中精定位，最后经过原有窗口与任务范围检查后派发动作。
 即使规划回复附带粗坐标，SDK 也只保留描述，不将它作为直接点击位置。
 规划和定位仍可使用同一个默认模型，不要求新增模型配置或账号。
 
 ```mermaid
 flowchart LR
-    Plan[deepThink 标准规划只取目标描述] --> Locate[独立 Locate 模型请求]
+    Plan[deepThink 标准规划只取目标描述] --> Region[Locate：原图搜索区域]
+    Region --> Crop[SDK 裁图并放大两倍]
+    Crop --> Locate[同一 Locate：裁图精定位]
     Locate --> Scope
     Scope{核对当前窗口与输入范围} -->|通过| Native[调用原生动作]
     Scope -->|拒绝| Stop[终止并保留失败证据]
@@ -72,16 +75,23 @@ flowchart LR
 
 该选项也启用 SDK 的子目标规划，并将规划保留的历史图片上限从一张改为两张。
 标准规划请求不再要求定位用的原始图像细节；实际请求图片仍按 SDK 处理结果留存诊断证据。
-每个需要定位的动作会增加独立定位请求，通常增加用量与延迟；实际费用仍以运行的请求用量记录为准。
-这是固定执行策略，没有失败后切换、自动重试或新增配置开关；`deepLocate` 裁图能力没有启用。
+未被 SDK 的其他命中路径短路时，当前 DeepSeek 流程相对原有独立定位多一次区域定位请求，
+通常增加用量与延迟；实际费用仍以运行的请求用量记录为准。
+这是固定执行策略，没有新增失败后切换、重输策略或配置开关；SDK 已有的重试设置保持原样。
 `effort` 不改变 provider 的 `thinking`、`reasoning_effort` 或其他模型账号参数，
 这些参数仍由既有模型配置决定。依据为[官方规划模式说明](https://midscenejs.com/reference/#deepthink-planning-mode)、
 [固定版本的规划条件](https://github.com/web-infra-dev/midscene/blob/v1.16.5/packages/core/src/agent/tasks.ts#L557-L562)。
 
 该行为适用于 SDK 的标准规划器，包括当前使用的 DeepSeek。SDK 对自定义规划适配器会警告并忽略
-`effort="deepThink"`，例如 UI-TARS；不能据此声称自定义规划器也实现独立定位。
+`effort="deepThink"`，例如 UI-TARS；不支持动作区域定位的规划适配器也会忽略 `deepLocate`。
+不能据此声称自定义规划器也实现独立定位或裁图定位。
 旧运行中的 `Locate source=plan` 表示直接采用规划点，没有额外定位请求；新标准规划运行应记录
-`Plan → Locate → Plan` 请求链，定位的 `source=ai` 与请求角色由实际 SDK 任务确定。
+当前 DeepSeek 的普通新运行会记录 `Plan → Locate 区域 → Locate 精定位 → Plan` 请求链。
+两次 Locate 请求属于同一个 SDK 任务；`source=ai` 与请求归属由实际记录确定，不能将任意运行都假定为固定次数。
+
+SDK 还支持用现成计划坐标直接产生搜索区域；这种调用只需一次裁图定位请求，规划与 Locate 属于不同任务。
+当前固定 `deepThink` 会在生成执行动作时丢弃规划坐标，因此通常走原图区域定位。
+XPath、缓存命中和不支持该能力的适配器也可能没有上述两次请求。
 
 项目中的路径停止条件交给规划阶段处理；独立定位只解决当次目标在哪里，不决定是否继续任务。
 SDK 支持未完成目标时报告失败并退出，采集器随后保留失败状态；成功采集仍必须取得候选并通过验收。
@@ -98,8 +108,30 @@ SDK 支持未完成目标时报告失败并退出，采集器随后保留失败�
 
 诊断不重算或替代 SDK 的点击位置。截图像素结果、SDK 上下文的缩放比例和原生动作参数分别记录；
 缩放及取整顺序继续由 SDK 执行，原有窗口范围检查不变。
+
+`search_area` 来自公开 `getTaskSearchArea()`，只保存有限的 `left/top/width/height`；
+`search_area_coordinate_space="screenshot_pixels"` 表示它位于原 SDK 截图，尚未除以设备逻辑像素比例。
+未发生区域定位时两个字段为空；明确存在却形状非法、尺寸非正或起点为负的区域会拒绝。
+该矩形是 SDK 扩展后的实际搜索区域，不冒充第一轮模型的原始 bbox。
+
+AI 原文的 `raw_reference` 为 `enlarged_search_area` 或 `screenshot`，说明其坐标应相对哪类输入图解释；
+计划或缓存命中没有额外 AI 原文时为空。协议单位仍以实际定位适配器的 `prompt_spec` 为准。
+`element` 始终保留 SDK 已映射回原截图的结果，`element_coordinate_space="screenshot_pixels"` 不变。
+Har 不重做 codec、裁图、偏移还原或点击位置计算。
+
+SDK 的裁图内容放大两倍后还可能按模型要求补边。Node 裁图边界会截断为整数，
+因此实际请求尺寸以保存的图片字节为准，不能直接用 `search_area.width/height` 乘二推定。
+SDK 将精定位中心按 `point / 2 + search_area.left/top` 映射回来，不在这一步取整；
+保留含端点 bbox 语义的宽高还原是 `(size - 1) / 2 + 1`，不能改成简单除二或由 rect 中心重算点。
+这些公式解释 SDK 行为，不在 Har 中再执行一遍。
+
+`model_requests` 引用精确相同 `execution_id + task_id` 下已保存的全部实际请求，包含 `request_id`、
+`sequence` 和图片元数据，与原 `model_request` 记录一致。重试可能增加条目；不按顺序、相近时间或图片尺寸
+猜测某条原文来自哪次请求。SDK dump 没有提供与内部请求标识的一一对应关系，因此这里提供任务级图像关联，
+不声称某份 raw 对应某个单独请求，也不保存或杜撰第一轮模型原文。
+
 投影失败时同步保存 `diagnostic_failure`，包含 SDK 执行及任务标识、任务状态、截图标识和固定阶段码
-`element_geometry`、`raw_protocol` 或 `raw_coordinates`，随后仍中止运行。
+`element_geometry`、`search_area_geometry`、`raw_protocol` 或 `raw_coordinates`，随后仍中止运行。
 同时保留 SDK 已返回的有限数值几何和原文是否存在，避免原文提取错误连带丢失已经得到的定位结果。
 该记录不包含模型全文、原始错误消息或业务输入正文；非法几何字段不会作为有效数值保存。
 

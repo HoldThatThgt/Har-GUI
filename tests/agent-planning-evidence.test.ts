@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import sharp from 'sharp';
+import { cropByRect, scaleImage } from '@midscene/shared/img';
 import type { LoadedConfiguration } from '../agent/config.js';
 import { CollectionAgent, CollectionDevice } from '../agent/device.js';
 import { PlanningEvidence } from '../agent/planning-evidence.js';
@@ -542,11 +543,14 @@ test('a swallowed SDK listener persistence failure aborts before native dispatch
   assert.deepEqual(f.native, []);
 });
 
-test('real custom SDK preserves pixel evidence and completion without copying derived thought prompts', async (t) => {
+test('unsupported custom SDK keeps direct pixel evidence with both requested deep options', async (t) => {
+  t.mock.method(console, 'warn', () => {});
   const f = fixture(t, [`Thought: ${THOUGHT_SECRET}\nAction: click(start_box='(250,500)')`,
     `Thought: ${THOUGHT_SECRET}\nAction: finished(content='Anonymous fixture complete')`], 'vlm-ui-tars');
-  await f.agent.aiAct('Tap the anonymous control, then finish.', { cacheable: false, abortSignal: f.state.signal });
+  await f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', deepLocate: true, cacheable: false, abortSignal: f.state.signal });
   await f.close();
+  assert.equal(f.requests.length, 2);
   assert.deepEqual(f.native, [[80, 120]]);
   const traceText = readFileSync(join(f.directory, 'planning-evidence', 'trace.jsonl'), 'utf8');
   assert.ok(!traceText.includes(THOUGHT_SECRET));
@@ -557,6 +561,12 @@ test('real custom SDK preserves pixel evidence and completion without copying de
     && record.plan.raw_coordinates_available === false));
   assert.deepEqual(plans[0].plan.normalized_actions[0].parameters.locate.locatedPixelResult.center, [40, 60]);
   assert.deepEqual(plans[1].plan.normalized_actions, [{ name: 'Finished', parameters: {} }]);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.source, 'plan');
+  assert.equal(locate.locate.search_area, null);
+  assert.equal(locate.locate.raw_reference, null);
+  assert.deepEqual(locate.locate.model_requests, []);
   const dispatch = trace.find((record) => record.type === 'action_dispatch' && record.status === 'native_returned');
   assert.deepEqual(dispatch.parameters.locate.center, [80, 120]);
   assert.equal(dispatch.parameters.locate.prompt, undefined);
@@ -654,6 +664,80 @@ test('deepThink independent Locate outside application bounds aborts without nat
     && record.status === 'finished');
   assert.equal(locate.locate.source, 'ai');
   assert.deepEqual(locate.locate.element.center, [144, 108]);
+});
+
+test('deepThink deepLocate keeps both actual locate request images and SDK final coordinates', async (t) => {
+  const f = fixture(t, [action('Tap', [900, 900]),
+    '<|ref|>target: anonymous control<|/ref|><|box|>[200,200,600,600]<|/box|>',
+    '<|point|>[250,500]<|/point|>', COMPLETE], 'deepseek', {}, { width: 1200, height: 800, shrink: 1 });
+  await f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', deepLocate: true, cacheable: false, abortSignal: f.state.signal });
+  await f.close();
+  assert.equal(f.requests.length, 4);
+  const plan = f.snapshots.flat().find((task) => task.sub_type === 'Plan' && task.status === 'finished'
+    && task.actions?.length);
+  assert.deepEqual(plan.actions[0].param.locate, { prompt: LOCATOR });
+  const trace = readTrace(f.directory);
+  const requests = trace.filter((record) => record.type === 'model_request' && record.status === 'started');
+  assert.deepEqual(requests.map((record) => record.sub_type), ['Plan', 'Locate', 'Locate', 'Plan']);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  const located = f.snapshots.flat().find((task) => task.id === locate.task_id && task.status === 'finished');
+  assert.equal(requests[1].task_id, locate.task_id);
+  assert.equal(requests[2].task_id, locate.task_id);
+  assert.ok(requests.every((record) => record.execution_id === locate.execution_id));
+  assert.deepEqual(locate.locate.model_requests, requests.slice(1, 3).map((record) => ({
+    request_id: record.request_id, sequence: record.sequence, images: record.images,
+  })));
+  assert.deepEqual(locate.locate.search_area, { left: 140, top: 60, width: 681, height: 521 });
+  assert.equal(locate.locate.search_area_coordinate_space, 'screenshot_pixels');
+  assert.equal(locate.locate.raw_reference, 'enlarged_search_area');
+  assert.deepEqual(locate.locate.raw_coordinates, { field: 'point', value: [250, 500] });
+  assert.deepEqual(locate.locate.element.center, [310.5, 320.5]);
+  assert.equal(locate.locate.element_coordinate_space, 'screenshot_pixels');
+  const context = f.contexts.get(located.screenshot_id)!;
+  const sourceMetadata = await sharp(context.image).metadata();
+  const sourceUrl = `data:image/${sourceMetadata.format};base64,${context.image.toString('base64')}`;
+  const cropped = await cropByRect(sourceUrl, locate.locate.search_area);
+  const zoomed = await scaleImage(cropped.imageBase64, 2);
+  const zoomBytes = Buffer.from(zoomed.imageBase64.split(',')[1], 'base64');
+  assert.equal(f.requests[1].hashes[0], digest(context.image));
+  assert.equal(f.requests[2].hashes[0], digest(zoomBytes));
+  for (const [request, size] of [[requests[1], [1200, 800]], [requests[2], [1362, 1042]]] as const) {
+    const bytes = await savedImage(f.directory, request.images[0].image);
+    assert.equal(digest(bytes), request.images[0].image.sha256);
+    assert.deepEqual([request.images[0].image.width, request.images[0].image.height], size);
+  }
+  const dispatch = trace.find((record) => record.type === 'action_dispatch' && record.status === 'native_returned');
+  assert.deepEqual(dispatch.parameters.locate.center, [311, 321]);
+  assert.deepEqual(f.native, [[311, 321]]);
+  assert.equal(f.usage.summary().calls, 4);
+  for (const secret of [API_SECRET, HEADER_SECRET, THOUGHT_SECRET]) {
+    assert.equal(JSON.stringify(trace).includes(secret), false);
+  }
+});
+
+test('deepLocate final SDK coordinates still fail the original application scope before native dispatch', async (t) => {
+  const f = fixture(t, [action('Tap', [250, 500]),
+    '<|ref|>target: anonymous control<|/ref|><|box|>[200,200,600,600]<|/box|>',
+    '<|point|>[900,900]<|/point|>'], 'deepseek', {}, { width: 1200, height: 800, shrink: 1 });
+  t.mock.method(f.device, 'windows', async () => [{ ...structuredClone(TARGET),
+    bounding_box: { x: 0, y: 0, width: 500, height: 800 },
+    screen_bounds: { x: 0, y: 0, width: 500, height: 800 } }]);
+  await assert.rejects(f.agent.aiAct('Tap the anonymous control, then finish.',
+    { effort: 'deepThink', deepLocate: true, cacheable: false, abortSignal: f.state.signal }),
+  /Tap target is outside known application window rectangles/);
+  await f.close();
+  assert.deepEqual(f.native, []);
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.state.signal.aborted, true);
+  const trace = readTrace(f.directory);
+  assert.equal(trace.some((record) => record.type === 'action_dispatch'), false);
+  const locate = trace.find((record) => record.type === 'sdk_task' && record.sub_type === 'Locate'
+    && record.status === 'finished');
+  assert.equal(locate.locate.raw_reference, 'enlarged_search_area');
+  assert.equal(locate.locate.model_requests.length, 2);
+  assert.deepEqual(locate.locate.element.center, [753, 529]);
 });
 
 for (const reasoning of ['false', 'true'] as const) {
@@ -762,6 +846,9 @@ function invalidLocateSnapshot(t: TestContext, f: ReturnType<typeof fixture>, st
     task.output.element.description = HEADER_SECRET;
     task.output.element.prompt = THOUGHT_SECRET;
     if (stage === 'element_geometry') task.output.element.center = [API_SECRET, 20];
+    if (stage === 'search_area_geometry') {
+      task.searchArea = { left: INPUT_SECRET, top: 0, width: 1, height: 1, private_field: THOUGHT_SECRET };
+    }
     if (stage === 'raw_protocol') task.log.dump.taskInfo.rawResponse = `${INPUT_SECRET} ${HEADER_SECRET}`;
     if (stage === 'raw_coordinates') {
       task.log.dump.taskInfo.rawResponse = `<｜｜point｜｜>[[1,2],[3,"${INPUT_SECRET}"]]<｜｜/point｜｜>`;
@@ -778,7 +865,7 @@ function invalidLocateSnapshot(t: TestContext, f: ReturnType<typeof fixture>, st
   return injected;
 }
 
-for (const stage of ['element_geometry', 'raw_protocol', 'raw_coordinates']) {
+for (const stage of ['element_geometry', 'search_area_geometry', 'raw_protocol', 'raw_coordinates']) {
   test(`Locate ${stage} failure preserves bounded diagnostic binding and remains fatal`, async (t) => {
     const f = fixture(t, [action('Tap', [900, 900]), '<｜｜point｜｜>[250,500]<｜｜/point｜｜>']);
     const injected = invalidLocateSnapshot(t, f, stage);
@@ -800,7 +887,8 @@ for (const stage of ['element_geometry', 'raw_protocol', 'raw_coordinates']) {
     assert.equal(failed.raw_response_available, true);
     assert.deepEqual(failed.sdk_element, stage === 'element_geometry' ? null : { center: [40, 60] });
     for (const [key, value] of Object.entries(injected.binding!)) assert.deepEqual(failed[key], value);
-    assert.ok(['element_geometry', 'raw_protocol', 'raw_coordinates'].includes(failed.projection_stage));
+    assert.ok(['element_geometry', 'search_area_geometry', 'raw_protocol', 'raw_coordinates']
+      .includes(failed.projection_stage));
     assert.equal(trace.some((record) => record.type === 'action_dispatch'), false);
     const text = readFileSync(join(f.directory, 'planning-evidence', 'trace.jsonl'), 'utf8');
     for (const secret of [API_SECRET, HEADER_SECRET, INPUT_SECRET, THOUGHT_SECRET]) assert.ok(!text.includes(secret));

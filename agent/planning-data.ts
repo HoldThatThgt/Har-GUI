@@ -1,4 +1,4 @@
-import { getTaskServiceDump, type DeviceAction, type ExecutionTask } from '@midscene/core';
+import { getTaskSearchArea, getTaskServiceDump, type DeviceAction, type ExecutionTask } from '@midscene/core';
 import { findAllMidsceneLocatorField, type ModelRuntime } from '@midscene/core/ai-model';
 import { defineActionSleep } from '@midscene/core/device';
 
@@ -298,6 +298,19 @@ function coordinates(value: unknown): number[] | null {
   return result;
 }
 
+/** @brief 只保留 SDK 已公开的原截图搜索区域，不重建裁图或换算执行位置。 @param task 定位任务。
+ * @return 截图像素矩形；未发生区域定位时为空。
+ */
+function searchArea(task: ExecutionTask): Record<string, number> | null {
+  const value = getTaskSearchArea(task);
+  if (value === undefined) return null;
+  const result = rectangle(value);
+  if (!result || result.left < 0 || result.top < 0 || result.width <= 0 || result.height <= 0) {
+    throw new Error('Invalid diagnostic search area');
+  }
+  return result;
+}
+
 /** @brief 投影真实定位任务，计划命中不冒充额外模型定位。 @param task 定位执行记录。
  * @param runtime 实际定位适配器。 @param secrets 实际凭据。
  * @param preserveDescriptions 实际规划器是否允许保留描述。 @return 安全定位数据及原始坐标声明。
@@ -316,10 +329,15 @@ export function projectLocate(
     const from = object(task.hitBy).from;
     const source = from === 'Plan' ? 'plan' : from === 'Cache' ? 'cache'
       : from === 'User expected path' ? 'user_expected_path' : typeof raw === 'string' ? 'ai' : null;
+    const hitBy = hit(task.hitBy, secrets);
+    stage = 'search_area_geometry';
+    const area = searchArea(task);
     const kind = runtime.adapter.locate.kind;
     const result: Record<string, unknown> = { task_id: text(task.taskId, secrets), adapter_kind: kind,
-      prompt: preserveText ? prompt(object(task.param).prompt, secrets) : null, hit_by: hit(task.hitBy, secrets),
+      prompt: preserveText ? prompt(object(task.param).prompt, secrets) : null, hit_by: hitBy,
       element: Object.keys(element).length ? element : null, source,
+      search_area: area, search_area_coordinate_space: area ? 'screenshot_pixels' : null,
+      raw_reference: source === 'ai' ? area ? 'enlarged_search_area' : 'screenshot' : null,
       element_coordinate_space: 'screenshot_pixels', raw_response_available: typeof raw === 'string',
       raw_coordinates: null, prompt_spec: null };
     if (!preserveText) result.prompt_unavailable_reason = preserveDescriptions
