@@ -137,6 +137,10 @@ def parse_source_node(raw: bytes, source_line: int) -> dict:
     while pending:
         node = pending.pop()
         node["source_line"] += source_line - 1
+        if "canvas_diagnostics" in node:
+            node["canvas_diagnostics"]["source_line"] += source_line - 1
+            for record in node["canvas_diagnostics"]["records"]:
+                record["source_line"] += source_line - 1
         pending.extend(node["children"])
         for block in node.get("embedded_trees", []):
             block["source_line"] += source_line - 1
